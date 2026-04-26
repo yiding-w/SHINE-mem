@@ -2,6 +2,11 @@
 
 <div align="center">
 
+## 🎉 News
+**[2026-04-26] A Demo of SHINE is Released!** Check https://github.com/MuLabPKU/SHINE/issues/2#issue-4331215198
+
+https://github.com/MuLabPKU/SHINE/issues/2#issue-4331215198
+
 ---
 
 <img src="figures/example.png" alt="example" width="600" />
