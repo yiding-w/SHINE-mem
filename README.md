@@ -270,7 +270,7 @@ sh scripts/Qwen3-8B/meta_train_parallel_ift_c1qa_4layer_8lora_128metalora.sh
 ```
 Test code is provided in [test.py](test.py)
 
-Training is generally stable, if inf/nan appears, adding more warmup steps will solve it.
+Training is generally stable. Sometimes if inf/nan appears, adding more warmup steps will solve it.
 
 
 <!-- ## 📖 Citation
