@@ -5,25 +5,6 @@
 
 [https://github.com/user-attachments/assets/6b7fe64a-4345-43c7-ad3b-0093568939a8](https://github.com/user-attachments/assets/6b7fe64a-4345-43c7-ad3b-0093568939a8)
 
----
-
-<div align="center">
-
-<img src="figures/example.png" alt="example" width="600" />
-
----
-
-<img src="figures/overall_architecture.png" alt="example" width="1000" />
-
----
-
-<img src="figures/hypernetwork_architecture.png" alt="example" width="500" />
-
-
-</div>
-
----
-
 <!-- <div align="center">
 
 这里放置徽章，例如 arXiv 链接、许可证、Python 版本等
@@ -304,3 +285,20 @@ Test code is provided in [test.py](test.py)
 # url={https://openreview.net/forum?id=bc3sUsS6ck}
 # }
 # ``` -->
+
+## 🖼️ Main Figures
+
+<div align="center">
+
+<img src="figures/example.png" alt="example" width="600" />
+
+---
+
+<img src="figures/overall_architecture.png" alt="example" width="1000" />
+
+---
+
+<img src="figures/hypernetwork_architecture.png" alt="example" width="500" />
+
+
+</div>
