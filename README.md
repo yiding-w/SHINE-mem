@@ -1,11 +1,11 @@
 <h1 align="center">🔆 SHINE: A Scalable In-Context Hypernetwork for Mapping Context to LoRA in a Single Pass</h1>
 
 <div align="center">
-
+  
+**Yewei Liu, Xiyuan Wang, Yansheng Mao, Yoav Gelbery, Haggai Maron, Muhan Zhang**
+  
 [![arXiv](https://img.shields.io/badge/arXiv-2602.06358-b31b1b.svg)](https://arxiv.org/abs/2602.06358)
 [![Hugging Face Collection](https://img.shields.io/badge/🤗%20SHINE-Collection-FFD21E)](https://huggingface.co/collections/Yewei-Liu/shine)
-
-**Yewei Liu, Xiyuan Wang, Yansheng Mao, Yoav Gelbery, Haggai Maron, Muhan Zhang**
 
 Email: [liuyeweilewis@gmail.com](liuyeweilewis@gmail.com)
 
