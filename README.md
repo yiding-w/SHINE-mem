@@ -1,13 +1,9 @@
 <h1 align="center">🔆 SHINE: A Scalable In-Context Hypernetwork for Mapping Context to LoRA in a Single Pass</h1>
 
-<!-- <div align="center">
 
-这里放置徽章，例如 arXiv 链接、许可证、Python 版本等
-[![arXiv](https://img.shields.io/badge/arXiv-[Paper ID]-b31b1b.svg)](https://arxiv.org/abs/[Paper ID])
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python](https://img.shields.io/badge/Python-3.8%2B-green.svg)](https://www.python.org/)
+[![arXiv](https://img.shields.io/badge/arXiv-2602.06358-b31b1b.svg)](https://arxiv.org/abs/2602.06358)
 
-</div> -->
+
 
 ## 🎉 News
 <table>
