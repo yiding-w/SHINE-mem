@@ -7,7 +7,7 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2602.06358-b31b1b.svg)](https://arxiv.org/abs/2602.06358)
 [![Hugging Face Collection](https://img.shields.io/badge/🤗%20SHINE-Collection-FFD21E)](https://huggingface.co/collections/Yewei-Liu/shine)
 
-Email: [liuyeweilewis@gmail.com](liuyeweilewis@gmail.com)
+Email: liuyeweilewis@gmail.com
 
 </div>
 
