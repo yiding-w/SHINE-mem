@@ -1,18 +1,32 @@
 <h1 align="center">🔆 SHINE: A Scalable In-Context Hypernetwork for Mapping Context to LoRA in a Single Pass</h1>
 
+<div align="center">
 
 [![arXiv](https://img.shields.io/badge/arXiv-2602.06358-b31b1b.svg)](https://arxiv.org/abs/2602.06358)
+[![Hugging Face Collection](https://img.shields.io/badge/🤗%20SHINE-Collection-FFD21E)](https://huggingface.co/collections/Yewei-Liu/shine)
 
+**Yewei Liu, Xiyuan Wang, Yansheng Mao, Yoav Gelbery, Haggai Maron, Muhan Zhang**
 
+Email: [liuyeweilewis@gmail.com](liuyeweilewis@gmail.com)
+
+</div>
 
 ## 🎉 News
 <table>
   <tr>
     <td style="white-space: nowrap; padding-right: 16px; vertical-align: top;">
+      <b>2026-05-23</b>
+    </td>
+    <td>
+      <b>The camera-ready version has been updated.
+    </td>
+  </tr>
+  <tr>
+    <td style="white-space: nowrap; padding-right: 16px; vertical-align: top;">
       <b>2026-05-01</b>
     </td>
     <td>
-      <b>Our paper has been accepted by ICML 2026. The camera-ready version is coming soon.</b>
+      <b>Our paper has been accepted by ICML 2026!</b>
     </td>
   </tr>
   <tr>
