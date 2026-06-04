@@ -1,17 +1,17 @@
 # MemoryTest single-case inference defaults.
 # Command-line flags still override these values.
 
-context: "Sam is a boy who loves apple. His phone number is 123456."
+context: "Ulric's phone number is 877-6655.Fintan's phone number is 434-9307."
 context_file:
-question: "Who is Sam? Does he loves apple? What is his phone number?"
+question: "What is Ulric's phone number"
 
-model_path: "/root/data/xyh/SHINE-mem/models/Qwen3-8B"
-checkpoint_dir: "/root/data/xyh/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1"
-save_lora_path: "/root/data/xyh/SHINE-mem/generated_case_lora.pt"
+model_path: "/home/wangyiding/SHINE-mem/models/Qwen3-8B"
+checkpoint_dir: "/home/wangyiding/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1"
+save_lora_path: "/home/wangyiding/SHINE-mem/generated_case_lora.pt"
 load_lora_path:
 
 device: cuda
-gpu_id: 1
+gpu_id: 5
 seed: 42
 
 context_max_length: 1550
