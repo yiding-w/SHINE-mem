@@ -1,0 +1,55 @@
+# SHINE hypernetwork config for MemoryAgentBench (ift_mqa_1qa checkpoint)
+# Matches scripts/Qwen3-8B/test.sh defaults: lora_r=8, 4-layer transformer, method=rl
+
+name: 8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150
+mode: train
+
+run:
+  seed: 42
+  device: cuda
+
+paths:
+  model_path: /ceph/home/muhan01/huggingfacemodels/Qwen3-8B
+
+model:
+  lora_r: 8
+  metalora_r: 8
+  ift_additional_metalora_r: -1
+  metamodel_class_path: "LoraQwen.LoraQwen3ForCausalLM"
+  config_class_path: "LoraQwen.Qwen3Config"
+  tokenizer_from: "${paths.model_path}"
+  model_from: "${paths.model_path}"
+
+metanetwork:
+  type: transformer
+  method: rl
+  transformer_cfg:
+    encoder_cfg:
+      d_model: 4096
+      nhead: 32
+      dim_feedforward: 8192
+      dropout: 0
+      activation: gelu
+      layer_norm_eps: 0.00001
+      batch_first: true
+      norm_first: false
+      bias: true
+    couple_encoder_cfg:
+      d_model: 4096
+      nhead: 32
+      dim_feedforward: 8192
+      dropout: 0
+      activation: gelu
+      layer_norm_eps: 0.00001
+      batch_first: true
+      norm_first: false
+      bias: true
+    layer_transformer_first: true
+    mean_pool_size: 1
+    num_layers: 4
+    couple_num_layers: 0
+    scale: 0.001
+
+hidden_size: -1
+num_layers: -1
+num_mem_token: 4

@@ -1,0 +1,17 @@
+# Data/Task configuration
+dataset: Long_Range_Understanding
+chunk_size: 4096
+debug: false
+seed: 42
+
+# specific configuration
+context_max_length: 1200000                 
+sub_dataset: infbench_sum_eng_shots2      
+generation_max_length: 1200                 
+test_files: ''
+demo_files: ''
+use_chat_template: true
+max_test_samples: 100
+shots: 2
+tag: null
+

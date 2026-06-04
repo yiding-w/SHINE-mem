@@ -1,0 +1,16 @@
+# Data/Task configuration
+dataset: Long_Range_Understanding
+chunk_size: 4096
+debug: false
+seed: 42
+
+#  specific configuration
+context_max_length: 200000           
+sub_dataset: detective_qa
+generation_max_length: 2000             
+test_files: ','
+demo_files: ','
+use_chat_template: true
+max_test_samples: 10
+tag: null
+

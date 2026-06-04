@@ -277,6 +277,35 @@ Turn 4
 
 
 
+## 📊 MemoryAgentBench (AR / TTL / LRU / CR)
+
+This repo includes [MemoryAgentBench](https://github.com/HUST-AI-HYZ/MemoryAgentBench) under `MemoryAgentBench/`, with integrations for:
+
+- **Qwen3-8B long-context baseline** (`HF_local_long_context_agent`)
+- **SHINE** (`SHINE_agent`) — context → LoRA, query without context in prompt
+
+Quick start on a GPU server (edit model paths in `MemoryAgentBench/configs/agent_conf/` first):
+
+```bash
+cd MemoryAgentBench
+conda activate MABench
+export SHINE_ROOT=$(cd .. && pwd)
+
+# Smoke test (EventQA, 5 samples)
+python main.py \
+  --agent_config configs/agent_conf/Local_HF_Agents/HF_long_context_agent_qwen3_8b.yaml \
+  --dataset_config configs/data_conf/Accurate_Retrieval/EventQA/Eventqa_full.yaml
+
+python main.py \
+  --agent_config configs/agent_conf/SHINE_Agents/SHINE_agent_qwen3_8b.yaml \
+  --dataset_config configs/data_conf/Accurate_Retrieval/EventQA/Eventqa_full.yaml
+
+# Batch AR / TTL / LRU / CR
+bash bash_files/sh/run_shine_mab.sh
+```
+
+See [MemoryAgentBench/docs/SHINE_MAB_SETUP.md](MemoryAgentBench/docs/SHINE_MAB_SETUP.md) for full setup.
+
 ## ⚙️ Training
 
 Pretrain
