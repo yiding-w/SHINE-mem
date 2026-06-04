@@ -1,7 +1,9 @@
+.DS_Store
 __pycache__
 .vscode
 checkpoints
 *.txt
+!MemoryAgentBench/bash_files/configs/shine_mab_eval.txt
 tmp.py
 outputs
 data
@@ -42,3 +44,10 @@ visualize.py
 visualize_loradict_statistics.py
 test_human.py
 generated_case_lora.pt
+
+# MemoryAgentBench
+MemoryAgentBench/outputs
+MemoryAgentBench/agents
+MemoryAgentBench/.env
+MemoryAgentBench/cognee
+MemoryAgentBench/letta

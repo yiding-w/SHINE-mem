@@ -1,0 +1,25 @@
+agent_name: SHINE_agent_qwen3_8b
+model: shine-qwen3-8b
+temperature: 0.0
+output_dir: ./outputs/shine-qwen3-8b
+
+# SHINE repo root (this repository); override with env SHINE_ROOT on server
+shine_root: ..
+shine_cfg_path: configs/Qwen3-8B-MAB.yaml
+
+# Base Qwen3-8B weights (directory with config.json)
+base_model_path: /ceph/home/muhan01/huggingfacemodels/Qwen3-8B
+
+# SHINE checkpoint root (folder containing train/checkpoint-* or metanetwork.pth)
+shine_model_root: /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa
+
+# Optional: explicit checkpoint dir; if set, overrides shine_model_root resolution
+# shine_checkpoint_dir: /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa/train/checkpoint-epoch-1
+
+shine_context_max_length: 8192
+shine_conversation_max_length: 512
+max_new_tokens: 128
+device: cuda
+
+# Hydra training run name (used if shine_model_root points to repo checkpoints/ tree)
+name: 8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150
