@@ -114,15 +114,23 @@ START_LINE=18 END_LINE=21 bash bash_files/sh/run_shine_mab.sh
 
 `InfBench_sum` / `LongMemEval` 需另跑 `llm_based_eval/`，不在此脚本默认列表。
 
-## 7. 调参
+## 7. 长度与生成参数（与 Qwen3-8B 标准测试对齐）
 
-`SHINE_agent_qwen3_8b.yaml`：
+与 `scripts/Qwen3-8B/test.sh` 一致（`ift_mqa_1qa` / msmarco 类评测）：
 
-- `shine_context_max_length`：evidence 截断（默认 8192）
-- `shine_conversation_max_length`：问题 prompt 长度
-- `max_new_tokens`：对齐 `generation_max_length`
+| 参数 | SHINE 标准 (`test.sh`) | `SHINE_agent_qwen3_8b.yaml` 默认 |
+|------|------------------------|----------------------------------|
+| evidence 截断 | `test.context_max_length=4500` | `shine_context_max_length: 4500` |
+| 问题 prompt | `test.conversation_max_length=300` | `shine_conversation_max_length: 300` |
+| 生成长度 | `test.max_new_tokens=128`（`configs/Qwen3-8B.yaml`） | 见下 |
 
-与 SHINE 训练一致时，可在 `SHINE-mem/configs/Qwen3-8B.yaml` 中同步 `model.lora_r` / `metanetwork.transformer_cfg.num_layers`，并设环境变量或改 `shine_cfg_path`。
+**8192 不够吗？** 对 **MAB 全局长上下文**（如 SF 262k、AR 数十万 token）来说，仅用 8192/4500 都会**截断** memorized context；这是 SHINE 在 **4500 token 上下文上训练** 的固有限制，不是 MAB 配置写错。要与官方 SHINE 数字可比，应使用 **4500**；若强行加大 `shine_context_max_length` 而未按更长 context 重训，收益不确定且易 OOM。
+
+**max_new_tokens**：MAB 各任务答案很短（SF 常为 10，ICL 为 20）。默认 `use_mab_generation_max_length: true`，按各 `dataset_config` 的 `generation_max_length` 生成；若要与 `test.sh` 完全一致，设 `use_mab_generation_max_length: false` 并固定 `max_new_tokens: 128`。
+
+**HF 长上下文 baseline** 仍按 MAB 的 `context_max_length` 截断（可达 131k），与 SHINE 的 4500 evidence 上限是**有意区分**的（in-context vs 参数化记忆）。
+
+`model.lora_r` / `metanetwork` 等见 `configs/Qwen3-8B-MAB.yaml`。
 
 ## 8. 故障排查
 

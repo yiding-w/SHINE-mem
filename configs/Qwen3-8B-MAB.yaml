@@ -53,3 +53,9 @@ metanetwork:
 hidden_size: -1
 num_layers: -1
 num_mem_token: 4
+
+# Reference: same limits as scripts/Qwen3-8B/test.sh
+test:
+  context_max_length: 4500
+  conversation_max_length: 300
+  max_new_tokens: 128

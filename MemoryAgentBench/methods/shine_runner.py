@@ -159,13 +159,17 @@ class ShineMABRunner:
                 "metanetwork": self.metanetwork,
                 "metalora": self.metalora,
             }
+        # Defaults match scripts/Qwen3-8B/test.sh (CONTEXT_MAX_LENGTH=4500, CONVERSATION_MAX_LENGTH=300)
         self.context_max_length = int(
-            agent_config.get("shine_context_max_length", dataset_config.get("context_max_length", 8192))
+            agent_config.get("shine_context_max_length", 4500)
         )
-        self.conversation_max_length = int(agent_config.get("shine_conversation_max_length", 512))
-        self.max_new_tokens = int(
-            agent_config.get("max_new_tokens", dataset_config.get("generation_max_length", 128))
+        self.conversation_max_length = int(
+            agent_config.get("shine_conversation_max_length", 300)
         )
+        if agent_config.get("use_mab_generation_max_length", True):
+            self.max_new_tokens = int(dataset_config.get("generation_max_length", 128))
+        else:
+            self.max_new_tokens = int(agent_config.get("max_new_tokens", 128))
         self.temperature = float(agent_config.get("temperature", 0.0))
         self.memory_time = 0.0
 
@@ -289,9 +293,10 @@ class HFLocalLongContextRunner:
         self.context_max_length = int(dataset_config.get("context_max_length", 131072))
         self.input_length_limit = int(agent_config.get("input_length_limit", 131072))
         self.buffer_length = int(agent_config.get("buffer_length", 4096))
-        self.max_new_tokens = int(
-            agent_config.get("max_new_tokens", dataset_config.get("generation_max_length", 128))
-        )
+        if agent_config.get("use_mab_generation_max_length", True):
+            self.max_new_tokens = int(dataset_config.get("generation_max_length", 128))
+        else:
+            self.max_new_tokens = int(agent_config.get("max_new_tokens", 128))
         self.temperature = float(agent_config.get("temperature", 0.0))
         self.memory_time = 0.0
         self.context = ""

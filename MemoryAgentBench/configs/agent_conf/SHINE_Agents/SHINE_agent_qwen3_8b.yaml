@@ -16,9 +16,16 @@ shine_model_root: /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa
 # Optional: explicit checkpoint dir; if set, overrides shine_model_root resolution
 # shine_checkpoint_dir: /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa/train/checkpoint-epoch-1
 
-shine_context_max_length: 8192
-shine_conversation_max_length: 512
-max_new_tokens: 128
+# --- Aligned with scripts/Qwen3-8B/test.sh (standard Qwen3-8B + ift_mqa_1qa eval) ---
+#   CONTEXT_MAX_LENGTH=4500, CONVERSATION_MAX_LENGTH=300, max_new_tokens=128 in configs/Qwen3-8B.yaml
+shine_context_max_length: 4500
+shine_conversation_max_length: 300
+
+# MAB tasks use short answers (e.g. SF generation_max_length=10, ICL=20). Set false to force 128 like test.sh.
+use_mab_generation_max_length: true
+# max_new_tokens: 128
+# use_mab_generation_max_length: false
+
 device: cuda
 
 # Hydra training run name (used if shine_model_root points to repo checkpoints/ tree)
