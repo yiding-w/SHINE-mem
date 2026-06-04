@@ -172,7 +172,7 @@ def parse_args():
     parser.add_argument("--phonebook-path", type=str, help="Deprecated alias for --facts-path.")
     parser.add_argument("--output-path", type=str, default="MemoryTest/results/update4_avg_vs_single40.json", help="Where to save comparison results.")
     parser.add_argument("--num-updates", type=int, default=4, help="Number of averaged LoRA updates for condition A.")
-    parser.add_argument("--facts-per-update", type=int, default=10, help="Facts per update for condition A.")
+    parser.add_argument("--facts-per-update", type=int, default=5, help="Facts per update for condition A.")
     parser.add_argument("--save-loras", action="store_true", help="Save A and B generated LoRA dictionaries next to the result JSON.")
     parser.add_argument("--log-context", action="store_true", help="Print the exact A/B contexts before generating LoRA.")
     return parser.parse_args()
