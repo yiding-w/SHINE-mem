@@ -78,7 +78,7 @@ SHINE 行为（与论文一致）：
 1. **Memorize**：各 chunk 拼成 evidence，一次 `generate_lora_dict`
 2. **Query**：仅 user 问题 + 已注入 LoRA，不把长 context 放进 prompt
 
-## 5. 批量 AR / TTL / LRU / CR
+## 5. 批量 AR / TTL / LRU / SF
 
 `bash_files/configs/shine_mab_eval.txt` 中每行一对 agent + dataset。
 
@@ -95,8 +95,8 @@ START_LINE=12 END_LINE=13 bash bash_files/sh/run_shine_mab.sh
 # LRU（DetectiveQA）
 START_LINE=15 END_LINE=16 bash bash_files/sh/run_shine_mab.sh
 
-# CR
-START_LINE=18 END_LINE=19 bash bash_files/sh/run_shine_mab.sh
+# SF (FactConsolidation sh + mh)
+START_LINE=18 END_LINE=21 bash bash_files/sh/run_shine_mab.sh
 
 # 全量（去掉注释行后自行设 START/END）
 ```
