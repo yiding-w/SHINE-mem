@@ -66,6 +66,28 @@ def _shine_cache_key(agent_config: Dict[str, Any], resume_dir: str, cfg_path: st
     return "|".join([resume_dir, cfg_path, base_model, str(agent_config.get("shine_root", ""))])
 
 
+def _resolve_shine_lengths(
+    agent_config: Dict[str, Any], dataset_config: Dict[str, Any]
+) -> tuple[int, int, int]:
+    """Return (evidence_max_len, query_max_len, max_new_tokens)."""
+    if agent_config.get("use_mab_context_max_length", False):
+        evidence_len = int(dataset_config.get("context_max_length", 131072))
+    else:
+        evidence_len = int(agent_config.get("shine_context_max_length", 4500))
+
+    if agent_config.get("use_mab_conversation_max_length", False):
+        query_len = int(agent_config.get("shine_conversation_max_length", 4096))
+    else:
+        query_len = int(agent_config.get("shine_conversation_max_length", 300))
+
+    if agent_config.get("use_mab_generation_max_length", True):
+        max_new = int(dataset_config.get("generation_max_length", 128))
+    else:
+        max_new = int(agent_config.get("max_new_tokens", 128))
+
+    return evidence_len, query_len, max_new
+
+
 class ShineMABRunner:
     """Context -> LoRA once per context; queries use question-only chat (SHINE mode)."""
 
@@ -159,17 +181,17 @@ class ShineMABRunner:
                 "metanetwork": self.metanetwork,
                 "metalora": self.metalora,
             }
-        # Defaults match scripts/Qwen3-8B/test.sh (CONTEXT_MAX_LENGTH=4500, CONVERSATION_MAX_LENGTH=300)
-        self.context_max_length = int(
-            agent_config.get("shine_context_max_length", 4500)
+        self.context_max_length, self.conversation_max_length, self.max_new_tokens = (
+            _resolve_shine_lengths(agent_config, dataset_config)
         )
-        self.conversation_max_length = int(
-            agent_config.get("shine_conversation_max_length", 300)
+        self.sub_dataset = dataset_config.get("sub_dataset", "")
+        print(
+            f"[ShineMABRunner] sub_dataset={self.sub_dataset} "
+            f"evidence_max_len={self.context_max_length} "
+            f"query_max_len={self.conversation_max_length} "
+            f"max_new_tokens={self.max_new_tokens}",
+            flush=True,
         )
-        if agent_config.get("use_mab_generation_max_length", True):
-            self.max_new_tokens = int(dataset_config.get("generation_max_length", 128))
-        else:
-            self.max_new_tokens = int(agent_config.get("max_new_tokens", 128))
         self.temperature = float(agent_config.get("temperature", 0.0))
         self.memory_time = 0.0
 

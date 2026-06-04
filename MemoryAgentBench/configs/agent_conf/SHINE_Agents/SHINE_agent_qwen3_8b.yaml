@@ -3,30 +3,27 @@ model: shine-qwen3-8b
 temperature: 0.0
 output_dir: ./outputs/shine-qwen3-8b
 
-# SHINE repo root (this repository); override with env SHINE_ROOT on server
 shine_root: ..
 shine_cfg_path: configs/Qwen3-8B-MAB.yaml
 
-# Base Qwen3-8B weights (directory with config.json)
 base_model_path: /ceph/home/muhan01/huggingfacemodels/Qwen3-8B
-
-# SHINE checkpoint root (folder containing train/checkpoint-* or metanetwork.pth)
 shine_model_root: /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa
-
-# Optional: explicit checkpoint dir; if set, overrides shine_model_root resolution
 # shine_checkpoint_dir: /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa/train/checkpoint-epoch-1
 
-# --- Aligned with scripts/Qwen3-8B/test.sh (standard Qwen3-8B + ift_mqa_1qa eval) ---
-#   CONTEXT_MAX_LENGTH=4500, CONVERSATION_MAX_LENGTH=300, max_new_tokens=128 in configs/Qwen3-8B.yaml
-shine_context_max_length: 4500
-shine_conversation_max_length: 300
+# --- MAB 全长模式（每个任务的 dataset yaml 里 context_max_length / generation_max_length）---
+use_mab_context_max_length: true
+use_mab_conversation_max_length: true
+shine_conversation_max_length: 4096
 
-# MAB tasks use short answers (e.g. SF generation_max_length=10, ICL=20). Set false to force 128 like test.sh.
 use_mab_generation_max_length: true
-# max_new_tokens: 128
+
+# --- 若改回 SHINE 标准 test.sh，关闭上面两项并启用下面两行 ---
+# use_mab_context_max_length: false
+# use_mab_conversation_max_length: false
+# shine_context_max_length: 4500
+# shine_conversation_max_length: 300
 # use_mab_generation_max_length: false
+# max_new_tokens: 128
 
 device: cuda
-
-# Hydra training run name (used if shine_model_root points to repo checkpoints/ tree)
 name: 8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150
