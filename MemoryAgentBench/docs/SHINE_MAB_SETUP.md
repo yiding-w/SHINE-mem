@@ -1,6 +1,9 @@
 # MemoryAgentBench × Qwen3-8B × SHINE
 
-在 [MemoryAgentBench](https://github.com/HUST-AI-HYZ/MemoryAgentBench) 上评测 **AR / TTL / LRU / CR**（若你说的 SF 指 Conflict Resolution，即 CR）。
+在 [MemoryAgentBench](https://arxiv.org/abs/2507.05257) 上评测论文四类能力：**AR / TTL / LRU / SF（Selective Forgetting）**。
+
+> **命名说明**：论文里第四类是 **Selective Forgetting (SF)**，评测集为 **FactConsolidation**（要求遗忘过时事实、采用更新后信息）。官方开源代码与 HuggingFace 把同一 split 标成 **Conflict_Resolution (CR)**，路径仍是 `configs/data_conf/Conflict_Resolution/Factconsolidation_*.yaml`，与 SF 是同一套任务，不是另一项能力。  
+> 另：[δ-mem (2605.12357)](https://arxiv.org/abs/2605.12357) 是在 MAB 等基准上评测的**记忆方法**论文，不是 SF 的定义；若要做方法对比需单独实现 δ-mem agent。
 
 ## 目录布局（服务器）
 
@@ -107,7 +110,7 @@ START_LINE=18 END_LINE=19 bash bash_files/sh/run_shine_mab.sh
 | AR | EventQA, Ruler | `substring_exact_match` |
 | TTL | ICL_* | `exact_match` |
 | LRU | DetectiveQA | `exact_match` |
-| CR | FactConsolidation | `substring_exact_match` |
+| SF（代码里写 CR） | FactConsolidation (sh/mh) | `substring_exact_match` |
 
 `InfBench_sum` / `LongMemEval` 需另跑 `llm_based_eval/`，不在此脚本默认列表。
 

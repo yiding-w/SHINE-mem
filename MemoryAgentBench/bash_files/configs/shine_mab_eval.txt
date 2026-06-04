@@ -17,6 +17,8 @@ SHINE_agent_qwen3_8b.yaml                                                Test_Ti
 HF_long_context_agent_qwen3_8b.yaml                                      Long_Range_Understanding/Detective_QA.yaml
 SHINE_agent_qwen3_8b.yaml                                                Long_Range_Understanding/Detective_QA.yaml
 
-### CR — Conflict Resolution (你写的 SF 一般指 Conflict Resolution)
+### SF — Selective Forgetting (论文四类之一；数据在 HF/code 里名为 Conflict_Resolution / FactConsolidation)
 HF_long_context_agent_qwen3_8b.yaml                                      Conflict_Resolution/Factconsolidation_sh_262k.yaml
 SHINE_agent_qwen3_8b.yaml                                                Conflict_Resolution/Factconsolidation_sh_262k.yaml
+HF_long_context_agent_qwen3_8b.yaml                                      Conflict_Resolution/Factconsolidation_mh_262k.yaml
+SHINE_agent_qwen3_8b.yaml                                                Conflict_Resolution/Factconsolidation_mh_262k.yaml

@@ -277,7 +277,7 @@ Turn 4
 
 
 
-## 📊 MemoryAgentBench (AR / TTL / LRU / CR)
+## 📊 MemoryAgentBench (AR / TTL / LRU / SF)
 
 This repo includes [MemoryAgentBench](https://github.com/HUST-AI-HYZ/MemoryAgentBench) under `MemoryAgentBench/`, with integrations for:
 
@@ -300,11 +300,11 @@ python main.py \
   --agent_config configs/agent_conf/SHINE_Agents/SHINE_agent_qwen3_8b.yaml \
   --dataset_config configs/data_conf/Accurate_Retrieval/EventQA/Eventqa_full.yaml
 
-# Batch AR / TTL / LRU / CR
+# Batch AR / TTL / LRU / SF (FactConsolidation; HF split 名称为 Conflict_Resolution)
 bash bash_files/sh/run_shine_mab.sh
 ```
 
-See [MemoryAgentBench/docs/SHINE_MAB_SETUP.md](MemoryAgentBench/docs/SHINE_MAB_SETUP.md) for full setup.
+See [MemoryAgentBench/docs/SHINE_MAB_SETUP.md](MemoryAgentBench/docs/SHINE_MAB_SETUP.md) for full setup. Paper: [MemoryAgentBench](https://arxiv.org/abs/2507.05257); related memory method baseline: [δ-mem](https://arxiv.org/abs/2605.12357).
 
 ## ⚙️ Training
 
