@@ -55,6 +55,10 @@ def make_runtime_args(defaults: dict) -> Namespace:
 
 
 def weighted_average_lora(old_lora: Any, new_lora: Any, new_count: int):
+    if old_lora is None or new_lora is None:
+        if old_lora is not None or new_lora is not None:
+            raise ValueError("LoRA structures do not match: one side is None and the other is not.")
+        return None
     old_weight = float(new_count - 1) / float(new_count)
     new_weight = 1.0 / float(new_count)
     if torch.is_tensor(old_lora):
