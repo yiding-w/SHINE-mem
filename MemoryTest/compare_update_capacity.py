@@ -76,11 +76,22 @@ def build_context(rows: list[dict]) -> str:
     return "\n".join(row["text"] for row in rows)
 
 
-def generate_average_lora(fact_chunks, metanetwork, tokenizer, metalora, cfg, device):
+def generate_average_lora(fact_chunks, metanetwork, tokenizer, metalora, cfg, device, log_context: bool = False):
     averaged_lora = None
+    context_records = []
     for update_idx, chunk in enumerate(fact_chunks, start=1):
         context = build_context(chunk)
+        context_records.append(
+            {
+                "update_index": update_idx,
+                "num_facts": len(chunk),
+                "fact_ids": [row["id"] for row in chunk],
+                "context": context,
+            }
+        )
         LOGGER.info("A/update %s: generating LoRA from %s facts", update_idx, len(chunk))
+        if log_context:
+            LOGGER.info("A/update %s context:\n%s", update_idx, context)
         new_lora = generate_context_lora(context, metanetwork, tokenizer, metalora, cfg, device)
         if averaged_lora is None:
             averaged_lora = new_lora
@@ -89,7 +100,7 @@ def generate_average_lora(fact_chunks, metanetwork, tokenizer, metalora, cfg, de
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    return averaged_lora
+    return averaged_lora, context_records
 
 
 def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args, device):
@@ -144,6 +155,7 @@ def parse_args():
     parser.add_argument("--num-updates", type=int, default=4, help="Number of averaged LoRA updates for condition A.")
     parser.add_argument("--facts-per-update", type=int, default=10, help="Facts per update for condition A.")
     parser.add_argument("--save-loras", action="store_true", help="Save A and B generated LoRA dictionaries next to the result JSON.")
+    parser.add_argument("--log-context", action="store_true", help="Print the exact A/B contexts before generating LoRA.")
     return parser.parse_args()
 
 
@@ -181,9 +193,20 @@ def main():
     cfg = build_cfg(runtime_args)
     metanetwork, metalora, tokenizer = load_runtime(cfg, runtime_args.checkpoint_dir, device)
 
-    lora_a = generate_average_lora(fact_chunks, metanetwork, tokenizer, metalora, cfg, device)
+    lora_a, contexts_a = generate_average_lora(
+        fact_chunks,
+        metanetwork,
+        tokenizer,
+        metalora,
+        cfg,
+        device,
+        log_context=args.log_context,
+    )
     LOGGER.info("B/single: generating LoRA from all %s facts at once", total_facts)
-    lora_b = generate_context_lora(build_context(facts), metanetwork, tokenizer, metalora, cfg, device)
+    context_b = build_context(facts)
+    if args.log_context:
+        LOGGER.info("B/single context:\n%s", context_b)
+    lora_b = generate_context_lora(context_b, metanetwork, tokenizer, metalora, cfg, device)
 
     if args.save_loras:
         save_lora_snapshot(output_path.with_name(output_path.stem + "_A_avg_lora.pt"), lora_a)
@@ -204,6 +227,17 @@ def main():
         "summary": {
             result_a["label"]: {"correct": result_a["correct"], "total": result_a["total"], "accuracy": result_a["accuracy"]},
             result_b["label"]: {"correct": result_b["correct"], "total": result_b["total"], "accuracy": result_b["accuracy"]},
+        },
+        "contexts": {
+            result_a["label"]: contexts_a,
+            result_b["label"]: [
+                {
+                    "update_index": 1,
+                    "num_facts": len(facts),
+                    "fact_ids": [row["id"] for row in facts],
+                    "context": context_b,
+                }
+            ],
         },
         "results": [result_a, result_b],
     }
