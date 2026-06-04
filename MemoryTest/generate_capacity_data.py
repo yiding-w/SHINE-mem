@@ -60,6 +60,55 @@ DISTRACTOR_TEMPLATES = [
     "{person} returned the {item} before noon.",
 ]
 
+SEMANTIC_FACT_SPECS = [
+    {
+        "attribute": "favorite_fruit",
+        "question": "What is {person}'s favorite fruit?",
+        "text": "{person}'s favorite fruit is {answer}.",
+        "answers": [
+            "mango", "pear", "peach", "plum", "kiwi", "papaya", "orange", "banana",
+            "apricot", "pineapple", "blueberry", "raspberry",
+        ],
+    },
+    {
+        "attribute": "job",
+        "question": "What is {person}'s job?",
+        "text": "{person} works as a {answer}.",
+        "answers": [
+            "baker", "dentist", "carpenter", "teacher", "pilot", "chemist",
+            "nurse", "tailor", "chef", "gardener", "librarian", "mechanic",
+        ],
+    },
+    {
+        "attribute": "home_city",
+        "question": "Which city does {person} live in?",
+        "text": "{person} lives in {answer}.",
+        "answers": [
+            "Denver", "Austin", "Seattle", "Boston", "Phoenix", "Madison",
+            "Portland", "Dallas", "Chicago", "Raleigh", "Tucson", "Atlanta",
+        ],
+    },
+    {
+        "attribute": "owned_item",
+        "question": "What does {person} own?",
+        "text": "{person} owns a {answer}.",
+        "answers": [
+            "yellow bicycle", "green backpack", "silver camera", "wooden violin",
+            "blue notebook", "red scooter", "white telescope", "black suitcase",
+            "purple kayak", "bronze compass", "striped umbrella", "canvas tent",
+        ],
+    },
+    {
+        "attribute": "favorite_drink",
+        "question": "What is {person}'s favorite drink?",
+        "text": "{person}'s favorite drink is {answer}.",
+        "answers": [
+            "lemon tea", "apple juice", "mint coffee", "grape soda", "coconut water",
+            "ginger milk", "peach tea", "berry smoothie", "iced cocoa", "melon juice",
+        ],
+    },
+]
+
 
 def make_phone(rng: random.Random) -> str:
     return f"{rng.randint(200, 999)}-{rng.randint(1000, 9999)}"
@@ -93,6 +142,25 @@ def make_phonebook(count: int, rng: random.Random):
                 "text": f"{person}'s phone number is {phone}.",
                 "question": f"What is {person}'s phone number?",
                 "answer": phone,
+            }
+        )
+    return rows
+
+
+def make_semantic_facts(count: int, rng: random.Random):
+    people = make_people(count, rng)
+    rows = []
+    for idx, person in enumerate(people, start=1):
+        spec = SEMANTIC_FACT_SPECS[(idx - 1) % len(SEMANTIC_FACT_SPECS)]
+        answer = rng.choice(spec["answers"])
+        rows.append(
+            {
+                "id": f"semantic_{idx:04d}",
+                "person": person,
+                "attribute": spec["attribute"],
+                "text": spec["text"].format(person=person, answer=answer),
+                "question": spec["question"].format(person=person),
+                "answer": answer,
             }
         )
     return rows
@@ -132,8 +200,8 @@ def write_json(path: Path, rows):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Generate phonebook capacity-test source JSON files.")
-    parser.add_argument("--count", type=int, default=100, help="Number of phonebook and distractor rows to generate.")
+    parser = argparse.ArgumentParser(description="Generate capacity-test source JSON files.")
+    parser.add_argument("--count", type=int, default=100, help="Number of rows to generate for each source JSON.")
     parser.add_argument("--seed", type=int, default=20260604, help="Random seed for deterministic data.")
     parser.add_argument("--output-dir", type=str, default="MemoryTest/json_data", help="Directory for generated JSON files.")
     return parser.parse_args()
@@ -144,8 +212,10 @@ def main():
     rng = random.Random(args.seed)
     output_dir = Path(args.output_dir)
     write_json(output_dir / "phonebook.json", make_phonebook(args.count, rng))
+    write_json(output_dir / "semantic_facts.json", make_semantic_facts(args.count, rng))
     write_json(output_dir / "distractors.json", make_distractors(args.count, rng))
     print(f"Wrote {args.count} phone facts to {output_dir / 'phonebook.json'}")
+    print(f"Wrote {args.count} semantic facts to {output_dir / 'semantic_facts.json'}")
     print(f"Wrote {args.count} distractors to {output_dir / 'distractors.json'}")
 
 
