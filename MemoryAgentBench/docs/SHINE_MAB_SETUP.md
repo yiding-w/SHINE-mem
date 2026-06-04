@@ -21,13 +21,22 @@ SHINE-mem/                 # 仓库根目录（SHINE 训练/推理）
 conda create -n MABench python=3.10.16 -y
 conda activate MABench
 
-cd MemoryAgentBench   # 在仓库根目录下
-pip install torch
-pip install -r requirements.txt
-pip install "numpy<2" hydra-core omegaconf
+# 必须在仓库内的 MemoryAgentBench 目录（clone 后路径示例）：
+cd /path/to/SHINE-mem/MemoryAgentBench
+ls requirements.txt   # 若不存在，先 git pull 最新 yiding-w/SHINE-mem
 
-# SHINE 依赖（与 README 一致，版本可按集群调整）
-pip install transformers==4.57.1 datasets scikit-learn
+# 若 pip 报 usercustomize / antlr4（集群 Python 启动脚本问题），先执行：
+pip install antlr4-python3-runtime
+# 或临时绕过： export PYTHONNOUSERSITE=1
+
+# 仅跑 SHINE / Qwen 长上下文 baseline（推荐，依赖少）：
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements-shine-mab.txt
+pip install hydra-core omegaconf scikit-learn transformers==4.57.1
+
+# 跑完整 MAB（含 RAG、mem0 等，很重）：
+# pip install -r requirements.txt
+# pip install "numpy<2"
 ```
 
 ## 2. 模型路径（必改）
@@ -114,15 +123,32 @@ START_LINE=18 END_LINE=21 bash bash_files/sh/run_shine_mab.sh
 
 `InfBench_sum` / `LongMemEval` 需另跑 `llm_based_eval/`，不在此脚本默认列表。
 
-## 7. 调参
+## 7. 长度与生成参数
 
-`SHINE_agent_qwen3_8b.yaml`：
+### 默认：MAB 全长（当前 `SHINE_agent_qwen3_8b.yaml`）
 
-- `shine_context_max_length`：evidence 截断（默认 8192）
-- `shine_conversation_max_length`：问题 prompt 长度
-- `max_new_tokens`：对齐 `generation_max_length`
+| 开关 | 行为 |
+|------|------|
+| `use_mab_context_max_length: true` | evidence 截断 = **该任务** `dataset_config.context_max_length`（如 SF 262k→300000，ICL→131072） |
+| `use_mab_conversation_max_length: true` | 问题侧上限 = `shine_conversation_max_length`（默认 **4096**，容纳长 prompt） |
+| `use_mab_generation_max_length: true` | 生成 = 该任务 `generation_max_length`（SF=10，Detective=2000，…） |
 
-与 SHINE 训练一致时，可在 `SHINE-mem/configs/Qwen3-8B.yaml` 中同步 `model.lora_r` / `metanetwork.transformer_cfg.num_layers`，并设环境变量或改 `shine_cfg_path`。
+启动时会打印：`[ShineMABRunner] sub_dataset=... evidence_max_len=...`
+
+**注意**：全长会显著增加显存与时间；hypernetwork 在约 **4500 token** context 上训练，加长是**试验性**外推，OOM 时可改回下一节的短配置。
+
+### 可选：与 `scripts/Qwen3-8B/test.sh` 对齐（4500 / 300 / 128）
+
+```yaml
+use_mab_context_max_length: false
+use_mab_conversation_max_length: false
+shine_context_max_length: 4500
+shine_conversation_max_length: 300
+use_mab_generation_max_length: false
+max_new_tokens: 128
+```
+
+`model.lora_r` 等见 `configs/Qwen3-8B-MAB.yaml`。
 
 ## 8. 故障排查
 

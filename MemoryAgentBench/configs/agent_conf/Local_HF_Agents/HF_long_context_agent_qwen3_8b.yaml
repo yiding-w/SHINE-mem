@@ -2,9 +2,11 @@ agent_name: HF_local_long_context_agent_qwen3_8b
 model: qwen3-8b-local
 model_path: /ceph/home/muhan01/huggingfacemodels/Qwen3-8B
 temperature: 0.0
+# Long-context baseline: follow each MAB dataset's context_max_length (can be 100k+)
 input_length_limit: 131072
 buffer_length: 4096
-max_new_tokens: 128
+use_mab_generation_max_length: true
+# max_new_tokens: 128
 bf16: true
 device: cuda
 output_dir: ./outputs/qwen3-8b-local-longcontext

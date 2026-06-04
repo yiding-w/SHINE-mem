@@ -1,0 +1,14 @@
+# Minimal deps for SHINE + HF-local agents on MemoryAgentBench (no RAG/mem0/cognee/hipporag).
+# Install SHINE stack separately (see ../README.md): torch, transformers, hydra-core, omegaconf, scikit-learn
+
+numpy<2
+pandas
+tqdm
+python-dotenv
+pyyaml
+datasets
+tiktoken
+openai
+langchain-core
+transformers
+accelerate
