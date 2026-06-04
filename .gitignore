@@ -4,6 +4,8 @@ __pycache__
 checkpoints
 *.txt
 !MemoryAgentBench/bash_files/configs/shine_mab_eval.txt
+!MemoryAgentBench/requirements.txt
+!MemoryAgentBench/requirements-shine-mab.txt
 tmp.py
 outputs
 data

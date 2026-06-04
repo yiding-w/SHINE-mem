@@ -21,13 +21,22 @@ SHINE-mem/                 # 仓库根目录（SHINE 训练/推理）
 conda create -n MABench python=3.10.16 -y
 conda activate MABench
 
-cd MemoryAgentBench   # 在仓库根目录下
-pip install torch
-pip install -r requirements.txt
-pip install "numpy<2" hydra-core omegaconf
+# 必须在仓库内的 MemoryAgentBench 目录（clone 后路径示例）：
+cd /path/to/SHINE-mem/MemoryAgentBench
+ls requirements.txt   # 若不存在，先 git pull 最新 yiding-w/SHINE-mem
 
-# SHINE 依赖（与 README 一致，版本可按集群调整）
-pip install transformers==4.57.1 datasets scikit-learn
+# 若 pip 报 usercustomize / antlr4（集群 Python 启动脚本问题），先执行：
+pip install antlr4-python3-runtime
+# 或临时绕过： export PYTHONNOUSERSITE=1
+
+# 仅跑 SHINE / Qwen 长上下文 baseline（推荐，依赖少）：
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements-shine-mab.txt
+pip install hydra-core omegaconf scikit-learn transformers==4.57.1
+
+# 跑完整 MAB（含 RAG、mem0 等，很重）：
+# pip install -r requirements.txt
+# pip install "numpy<2"
 ```
 
 ## 2. 模型路径（必改）
