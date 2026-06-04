@@ -43,7 +43,7 @@ def main():
 
     runtime_args, device, cfg, metanetwork, metalora, tokenizer = exp.bootstrap_runtime(args.runtime_config)
 
-    lora_c, contexts_c = exp.generate_average_lora(
+    lora_c, contexts_c = exp.generate_merged_lora(
         fact_chunks,
         metanetwork,
         tokenizer,
@@ -54,7 +54,7 @@ def main():
         condition_label="C_clean_4x5",
         merge_method=args.merge_method,
     )
-    lora_d, contexts_d = exp.generate_average_lora(
+    lora_d, contexts_d = exp.generate_merged_lora(
         mixed_chunks,
         metanetwork,
         tokenizer,
@@ -67,11 +67,11 @@ def main():
     )
 
     if args.save_loras:
-        exp.save_lora_snapshot(output_path.with_name(output_path.stem + "_C_clean_lora.pt"), lora_c)
-        exp.save_lora_snapshot(output_path.with_name(output_path.stem + "_D_distractor_lora.pt"), lora_d)
+        exp.save_lora_snapshot(output_path.with_name(output_path.stem + f"_C_clean_{args.merge_method}_lora.pt"), lora_c)
+        exp.save_lora_snapshot(output_path.with_name(output_path.stem + f"_D_distractor_{args.merge_method}_lora.pt"), lora_d)
 
-    result_c = exp.evaluate_lora("C_4x5_fact_only", target_facts, lora_c, metanetwork, tokenizer, runtime_args, device)
-    result_d = exp.evaluate_lora("D_4x5_fact_plus_5_distractor", target_facts, lora_d, metanetwork, tokenizer, runtime_args, device)
+    result_c = exp.evaluate_lora(f"C_4x5_fact_only_{args.merge_method}_lora", target_facts, lora_c, metanetwork, tokenizer, runtime_args, device)
+    result_d = exp.evaluate_lora(f"D_4x5_fact_plus_5_distractor_{args.merge_method}_lora", target_facts, lora_d, metanetwork, tokenizer, runtime_args, device)
 
     payload = {
         "experiment": {

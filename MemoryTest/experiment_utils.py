@@ -172,7 +172,7 @@ def answer_matches(expected_answer: str, model_answer: str, raw_output: str) -> 
     return expected in answer or expected in raw
 
 
-def generate_average_lora(
+def generate_merged_lora(
     fact_chunks,
     metanetwork,
     tokenizer,
@@ -183,8 +183,9 @@ def generate_average_lora(
     condition_label: str = "A",
     merge_method: str = "average",
 ):
-    averaged_lora = None
+    merged_lora = None
     context_records = []
+    LOGGER.info("%s: merge_method=%s", condition_label, merge_method)
     for update_idx, chunk in enumerate(fact_chunks, start=1):
         context = build_context(chunk)
         context_records.append(
@@ -200,14 +201,16 @@ def generate_average_lora(
         if log_context:
             LOGGER.info("%s/update %s context:\n%s", condition_label, update_idx, context)
         new_lora = generate_context_lora(context, metanetwork, tokenizer, metalora, cfg, device)
-        if averaged_lora is None:
-            averaged_lora = new_lora
+        if merged_lora is None:
+            merged_lora = new_lora
         else:
-            averaged_lora = merge_lora(averaged_lora, new_lora, update_idx, merge_method)
+            LOGGER.info("%s/update %s: merging LoRA with method=%s", condition_label, update_idx, merge_method)
+            merged_lora = merge_lora(merged_lora, new_lora, update_idx, merge_method)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    return averaged_lora, context_records
+    return merged_lora, context_records
+
 
 
 def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args, device):
