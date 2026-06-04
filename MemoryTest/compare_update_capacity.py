@@ -76,7 +76,23 @@ def build_context(rows: list[dict]) -> str:
     return "\n".join(row["text"] for row in rows)
 
 
-def generate_average_lora(fact_chunks, metanetwork, tokenizer, metalora, cfg, device, log_context: bool = False):
+def answer_matches(expected_answer: str, model_answer: str, raw_output: str) -> bool:
+    expected = str(expected_answer).casefold()
+    answer = str(model_answer).casefold()
+    raw = str(raw_output).casefold()
+    return expected in answer or expected in raw
+
+
+def generate_average_lora(
+    fact_chunks,
+    metanetwork,
+    tokenizer,
+    metalora,
+    cfg,
+    device,
+    log_context: bool = False,
+    condition_label: str = "A",
+):
     averaged_lora = None
     context_records = []
     for update_idx, chunk in enumerate(fact_chunks, start=1):
@@ -84,14 +100,15 @@ def generate_average_lora(fact_chunks, metanetwork, tokenizer, metalora, cfg, de
         context_records.append(
             {
                 "update_index": update_idx,
-                "num_facts": len(chunk),
+                "num_rows": len(chunk),
+                "num_facts": len([row for row in chunk if "question" in row and "answer" in row]),
                 "fact_ids": [row["id"] for row in chunk],
                 "context": context,
             }
         )
-        LOGGER.info("A/update %s: generating LoRA from %s facts", update_idx, len(chunk))
+        LOGGER.info("%s/update %s: generating LoRA from %s rows", condition_label, update_idx, len(chunk))
         if log_context:
-            LOGGER.info("A/update %s context:\n%s", update_idx, context)
+            LOGGER.info("%s/update %s context:\n%s", condition_label, update_idx, context)
         new_lora = generate_context_lora(context, metanetwork, tokenizer, metalora, cfg, device)
         if averaged_lora is None:
             averaged_lora = new_lora
@@ -118,7 +135,7 @@ def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args,
             max_conversation_length=runtime_args.conversation_max_length,
             use_system_prompt=runtime_args.use_system_prompt,
         )
-        is_correct = fact["answer"] in result["answer"] or fact["answer"] in result["raw"]
+        is_correct = answer_matches(fact["answer"], result["answer"], result["raw"])
         correct += int(is_correct)
         rows.append(
             {
@@ -129,6 +146,7 @@ def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args,
                 "expected_answer": fact["answer"],
                 "model_answer": result["answer"],
                 "raw": result["raw"],
+                "match_mode": "case_insensitive_substring",
                 "correct": is_correct,
             }
         )
