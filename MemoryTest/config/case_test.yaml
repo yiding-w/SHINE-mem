@@ -1,0 +1,24 @@
+# MemoryTest single-case inference defaults.
+# Command-line flags still override these values.
+
+context: "Sam is a boy who loves apple. His phone number is 123456."
+context_file:
+question: "Who is Sam? Does he loves apple? What is his phone number?"
+
+model_path: "/root/data/xyh/SHINE-mem/models/Qwen3-8B"
+checkpoint_dir: "/root/data/xyh/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1"
+save_lora_path: "/root/data/xyh/SHINE-mem/generated_case_lora.pt"
+load_lora_path:
+
+device: cuda
+gpu_id: 1
+seed: 42
+
+context_max_length: 1550
+conversation_max_length: 5000
+max_new_tokens: 128
+
+lora_r: 8
+metalora_r: 128
+metanetwork_layers: 4
+use_system_prompt: false

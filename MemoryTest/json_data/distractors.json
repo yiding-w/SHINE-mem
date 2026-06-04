@@ -1,0 +1,402 @@
+[
+  {
+    "id": "distractor_0001",
+    "text": "The train ticket was beside the north window."
+  },
+  {
+    "id": "distractor_0002",
+    "text": "Caleb returned the silver key before noon."
+  },
+  {
+    "id": "distractor_0003",
+    "text": "The spare charger was stored near the kitchen shelf."
+  },
+  {
+    "id": "distractor_0004",
+    "text": "Jonas moved the spare charger to the office."
+  },
+  {
+    "id": "distractor_0005",
+    "text": "Code F39-109 marked the coffee mug."
+  },
+  {
+    "id": "distractor_0006",
+    "text": "Code F90-611 marked the coffee mug."
+  },
+  {
+    "id": "distractor_0007",
+    "text": "Code B57-738 marked the red umbrella."
+  },
+  {
+    "id": "distractor_0008",
+    "text": "The warehouse notice listed code N86-180."
+  },
+  {
+    "id": "distractor_0009",
+    "text": "Caleb wrote code E97-461 on the spare charger."
+  },
+  {
+    "id": "distractor_0010",
+    "text": "Nina moved the silver key to the theater."
+  },
+  {
+    "id": "distractor_0011",
+    "text": "Theo left the paper map at the workshop."
+  },
+  {
+    "id": "distractor_0012",
+    "text": "The clinic notice listed code K82-705."
+  },
+  {
+    "id": "distractor_0013",
+    "text": "The bookstore notice listed code X41-716."
+  },
+  {
+    "id": "distractor_0014",
+    "text": "The paper map was stored near the kitchen shelf."
+  },
+  {
+    "id": "distractor_0015",
+    "text": "Mara returned the paper map before noon."
+  },
+  {
+    "id": "distractor_0016",
+    "text": "Mara wrote code Y60-344 on the red umbrella."
+  },
+  {
+    "id": "distractor_0017",
+    "text": "The school notice listed code L59-389."
+  },
+  {
+    "id": "distractor_0018",
+    "text": "The red umbrella was beside the second drawer."
+  },
+  {
+    "id": "distractor_0019",
+    "text": "Eli moved the paper map to the workshop."
+  },
+  {
+    "id": "distractor_0020",
+    "text": "Eli left the visitor badge at the market."
+  },
+  {
+    "id": "distractor_0021",
+    "text": "Ronan moved the paper map to the school."
+  },
+  {
+    "id": "distractor_0022",
+    "text": "Ronan returned the silver key before noon."
+  },
+  {
+    "id": "distractor_0023",
+    "text": "Code C39-941 marked the lunch receipt."
+  },
+  {
+    "id": "distractor_0024",
+    "text": "Ronan moved the train ticket to the office."
+  },
+  {
+    "id": "distractor_0025",
+    "text": "The red umbrella was beside the green notebook."
+  },
+  {
+    "id": "distractor_0026",
+    "text": "The travel pass was beside the archive box."
+  },
+  {
+    "id": "distractor_0027",
+    "text": "The clinic notice listed code C93-554."
+  },
+  {
+    "id": "distractor_0028",
+    "text": "Code N28-377 marked the visitor badge."
+  },
+  {
+    "id": "distractor_0029",
+    "text": "Nina wrote code G22-773 on the coffee mug."
+  },
+  {
+    "id": "distractor_0030",
+    "text": "Jonas left the travel pass at the warehouse."
+  },
+  {
+    "id": "distractor_0031",
+    "text": "Owen left the paper map at the theater."
+  },
+  {
+    "id": "distractor_0032",
+    "text": "The red umbrella was stored near the kitchen shelf."
+  },
+  {
+    "id": "distractor_0033",
+    "text": "The gallery notice listed code Y76-577."
+  },
+  {
+    "id": "distractor_0034",
+    "text": "The silver key was stored near the green notebook."
+  },
+  {
+    "id": "distractor_0035",
+    "text": "Mara wrote code T78-333 on the silver key."
+  },
+  {
+    "id": "distractor_0036",
+    "text": "Jonas left the visitor badge at the workshop."
+  },
+  {
+    "id": "distractor_0037",
+    "text": "The spare charger was stored near the hallway desk."
+  },
+  {
+    "id": "distractor_0038",
+    "text": "Sofia returned the paper map before noon."
+  },
+  {
+    "id": "distractor_0039",
+    "text": "Theo returned the canvas bag before noon."
+  },
+  {
+    "id": "distractor_0040",
+    "text": "Owen left the canvas bag at the school."
+  },
+  {
+    "id": "distractor_0041",
+    "text": "Mara left the lunch receipt at the market."
+  },
+  {
+    "id": "distractor_0042",
+    "text": "Owen wrote code N47-670 on the coffee mug."
+  },
+  {
+    "id": "distractor_0043",
+    "text": "The spare charger was stored near the north window."
+  },
+  {
+    "id": "distractor_0044",
+    "text": "Code H30-945 marked the travel pass."
+  },
+  {
+    "id": "distractor_0045",
+    "text": "Code L96-106 marked the train ticket."
+  },
+  {
+    "id": "distractor_0046",
+    "text": "Sofia left the travel pass at the office."
+  },
+  {
+    "id": "distractor_0047",
+    "text": "Nina returned the silver key before noon."
+  },
+  {
+    "id": "distractor_0048",
+    "text": "The red umbrella was stored near the north window."
+  },
+  {
+    "id": "distractor_0049",
+    "text": "Jonas moved the train ticket to the office."
+  },
+  {
+    "id": "distractor_0050",
+    "text": "Ronan wrote code H95-442 on the visitor badge."
+  },
+  {
+    "id": "distractor_0051",
+    "text": "The workshop notice listed code X20-951."
+  },
+  {
+    "id": "distractor_0052",
+    "text": "Jonas wrote code X92-282 on the paper map."
+  },
+  {
+    "id": "distractor_0053",
+    "text": "Priya moved the red umbrella to the market."
+  },
+  {
+    "id": "distractor_0054",
+    "text": "The red umbrella was beside the north window."
+  },
+  {
+    "id": "distractor_0055",
+    "text": "Sofia wrote code V30-989 on the lunch receipt."
+  },
+  {
+    "id": "distractor_0056",
+    "text": "Theo left the paper map at the gallery."
+  },
+  {
+    "id": "distractor_0057",
+    "text": "The canvas bag was stored near the wooden cabinet."
+  },
+  {
+    "id": "distractor_0058",
+    "text": "Owen left the paper map at the theater."
+  },
+  {
+    "id": "distractor_0059",
+    "text": "The clinic notice listed code T60-537."
+  },
+  {
+    "id": "distractor_0060",
+    "text": "Lena left the lunch receipt at the bookstore."
+  },
+  {
+    "id": "distractor_0061",
+    "text": "Ronan returned the lunch receipt before noon."
+  },
+  {
+    "id": "distractor_0062",
+    "text": "The station notice listed code T43-597."
+  },
+  {
+    "id": "distractor_0063",
+    "text": "Code B69-469 marked the visitor badge."
+  },
+  {
+    "id": "distractor_0064",
+    "text": "Owen returned the train ticket before noon."
+  },
+  {
+    "id": "distractor_0065",
+    "text": "Jonas moved the spare charger to the station."
+  },
+  {
+    "id": "distractor_0066",
+    "text": "Mara returned the lunch receipt before noon."
+  },
+  {
+    "id": "distractor_0067",
+    "text": "Mara moved the paper map to the gallery."
+  },
+  {
+    "id": "distractor_0068",
+    "text": "Lena returned the silver key before noon."
+  },
+  {
+    "id": "distractor_0069",
+    "text": "Code G43-842 marked the spare charger."
+  },
+  {
+    "id": "distractor_0070",
+    "text": "The theater notice listed code A65-676."
+  },
+  {
+    "id": "distractor_0071",
+    "text": "The paper map was beside the second drawer."
+  },
+  {
+    "id": "distractor_0072",
+    "text": "The canvas bag was beside the hallway desk."
+  },
+  {
+    "id": "distractor_0073",
+    "text": "Ronan moved the red umbrella to the market."
+  },
+  {
+    "id": "distractor_0074",
+    "text": "Code A41-162 marked the coffee mug."
+  },
+  {
+    "id": "distractor_0075",
+    "text": "Code C38-488 marked the travel pass."
+  },
+  {
+    "id": "distractor_0076",
+    "text": "Code X76-396 marked the canvas bag."
+  },
+  {
+    "id": "distractor_0077",
+    "text": "The coffee mug was stored near the archive box."
+  },
+  {
+    "id": "distractor_0078",
+    "text": "The bookstore notice listed code M34-626."
+  },
+  {
+    "id": "distractor_0079",
+    "text": "The travel pass was stored near the north window."
+  },
+  {
+    "id": "distractor_0080",
+    "text": "Eli left the paper map at the theater."
+  },
+  {
+    "id": "distractor_0081",
+    "text": "Priya left the paper map at the station."
+  },
+  {
+    "id": "distractor_0082",
+    "text": "The workshop notice listed code H54-572."
+  },
+  {
+    "id": "distractor_0083",
+    "text": "Code P33-570 marked the lunch receipt."
+  },
+  {
+    "id": "distractor_0084",
+    "text": "The canvas bag was beside the wooden cabinet."
+  },
+  {
+    "id": "distractor_0085",
+    "text": "Mara returned the canvas bag before noon."
+  },
+  {
+    "id": "distractor_0086",
+    "text": "Eli moved the canvas bag to the market."
+  },
+  {
+    "id": "distractor_0087",
+    "text": "The workshop notice listed code F42-406."
+  },
+  {
+    "id": "distractor_0088",
+    "text": "Eli left the red umbrella at the theater."
+  },
+  {
+    "id": "distractor_0089",
+    "text": "The spare charger was beside the wooden cabinet."
+  },
+  {
+    "id": "distractor_0090",
+    "text": "Caleb moved the paper map to the workshop."
+  },
+  {
+    "id": "distractor_0091",
+    "text": "The workshop notice listed code Q39-380."
+  },
+  {
+    "id": "distractor_0092",
+    "text": "The paper map was beside the hallway desk."
+  },
+  {
+    "id": "distractor_0093",
+    "text": "Ronan left the train ticket at the warehouse."
+  },
+  {
+    "id": "distractor_0094",
+    "text": "The visitor badge was stored near the wooden cabinet."
+  },
+  {
+    "id": "distractor_0095",
+    "text": "The lunch receipt was stored near the wooden cabinet."
+  },
+  {
+    "id": "distractor_0096",
+    "text": "Owen moved the spare charger to the clinic."
+  },
+  {
+    "id": "distractor_0097",
+    "text": "The bookstore notice listed code S52-305."
+  },
+  {
+    "id": "distractor_0098",
+    "text": "The school notice listed code C92-254."
+  },
+  {
+    "id": "distractor_0099",
+    "text": "The station notice listed code Q60-274."
+  },
+  {
+    "id": "distractor_0100",
+    "text": "The theater notice listed code C42-834."
+  }
+]
