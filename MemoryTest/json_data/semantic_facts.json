@@ -1,0 +1,802 @@
+[
+  {
+    "id": "semantic_0001",
+    "person": "Briar Jensen",
+    "attribute": "favorite_fruit",
+    "text": "Briar Jensen's favorite fruit is raspberry.",
+    "question": "What is Briar Jensen's favorite fruit?",
+    "answer": "raspberry"
+  },
+  {
+    "id": "semantic_0002",
+    "person": "Xander Hayes",
+    "attribute": "job",
+    "text": "Xander Hayes works as a gardener.",
+    "question": "What is Xander Hayes's job?",
+    "answer": "gardener"
+  },
+  {
+    "id": "semantic_0003",
+    "person": "Dorian Granger",
+    "attribute": "home_city",
+    "text": "Dorian Granger lives in Raleigh.",
+    "question": "Which city does Dorian Granger live in?",
+    "answer": "Raleigh"
+  },
+  {
+    "id": "semantic_0004",
+    "person": "Briar Sutter",
+    "attribute": "owned_item",
+    "text": "Briar Sutter owns a silver camera.",
+    "question": "What does Briar Sutter own?",
+    "answer": "silver camera"
+  },
+  {
+    "id": "semantic_0005",
+    "person": "Landon Jensen",
+    "attribute": "favorite_drink",
+    "text": "Landon Jensen's favorite drink is mint coffee.",
+    "question": "What is Landon Jensen's favorite drink?",
+    "answer": "mint coffee"
+  },
+  {
+    "id": "semantic_0006",
+    "person": "Silas Abbott",
+    "attribute": "favorite_fruit",
+    "text": "Silas Abbott's favorite fruit is peach.",
+    "question": "What is Silas Abbott's favorite fruit?",
+    "answer": "peach"
+  },
+  {
+    "id": "semantic_0007",
+    "person": "Quinn Carver",
+    "attribute": "job",
+    "text": "Quinn Carver works as a baker.",
+    "question": "What is Quinn Carver's job?",
+    "answer": "baker"
+  },
+  {
+    "id": "semantic_0008",
+    "person": "Briar Osborne",
+    "attribute": "home_city",
+    "text": "Briar Osborne lives in Dallas.",
+    "question": "Which city does Briar Osborne live in?",
+    "answer": "Dallas"
+  },
+  {
+    "id": "semantic_0009",
+    "person": "Keira Rowan",
+    "attribute": "owned_item",
+    "text": "Keira Rowan owns a blue notebook.",
+    "question": "What does Keira Rowan own?",
+    "answer": "blue notebook"
+  },
+  {
+    "id": "semantic_0010",
+    "person": "Iris Ellis",
+    "attribute": "favorite_drink",
+    "text": "Iris Ellis's favorite drink is lemon tea.",
+    "question": "What is Iris Ellis's favorite drink?",
+    "answer": "lemon tea"
+  },
+  {
+    "id": "semantic_0011",
+    "person": "Fintan Lang",
+    "attribute": "favorite_fruit",
+    "text": "Fintan Lang's favorite fruit is pineapple.",
+    "question": "What is Fintan Lang's favorite fruit?",
+    "answer": "pineapple"
+  },
+  {
+    "id": "semantic_0012",
+    "person": "Orla Granger",
+    "attribute": "job",
+    "text": "Orla Granger works as a tailor.",
+    "question": "What is Orla Granger's job?",
+    "answer": "tailor"
+  },
+  {
+    "id": "semantic_0013",
+    "person": "Zane Osborne",
+    "attribute": "home_city",
+    "text": "Zane Osborne lives in Denver.",
+    "question": "Which city does Zane Osborne live in?",
+    "answer": "Denver"
+  },
+  {
+    "id": "semantic_0014",
+    "person": "Quinn Granger",
+    "attribute": "owned_item",
+    "text": "Quinn Granger owns a silver camera.",
+    "question": "What does Quinn Granger own?",
+    "answer": "silver camera"
+  },
+  {
+    "id": "semantic_0015",
+    "person": "Celia Foster",
+    "attribute": "favorite_drink",
+    "text": "Celia Foster's favorite drink is mint coffee.",
+    "question": "What is Celia Foster's favorite drink?",
+    "answer": "mint coffee"
+  },
+  {
+    "id": "semantic_0016",
+    "person": "Vera Keller",
+    "attribute": "favorite_fruit",
+    "text": "Vera Keller's favorite fruit is plum.",
+    "question": "What is Vera Keller's favorite fruit?",
+    "answer": "plum"
+  },
+  {
+    "id": "semantic_0017",
+    "person": "Vera Vance",
+    "attribute": "job",
+    "text": "Vera Vance works as a carpenter.",
+    "question": "What is Vera Vance's job?",
+    "answer": "carpenter"
+  },
+  {
+    "id": "semantic_0018",
+    "person": "Fintan Carver",
+    "attribute": "home_city",
+    "text": "Fintan Carver lives in Portland.",
+    "question": "Which city does Fintan Carver live in?",
+    "answer": "Portland"
+  },
+  {
+    "id": "semantic_0019",
+    "person": "Rhea Iverson",
+    "attribute": "owned_item",
+    "text": "Rhea Iverson owns a canvas tent.",
+    "question": "What does Rhea Iverson own?",
+    "answer": "canvas tent"
+  },
+  {
+    "id": "semantic_0020",
+    "person": "Xander Sutter",
+    "attribute": "favorite_drink",
+    "text": "Xander Sutter's favorite drink is lemon tea.",
+    "question": "What is Xander Sutter's favorite drink?",
+    "answer": "lemon tea"
+  },
+  {
+    "id": "semantic_0021",
+    "person": "Iris Bennett",
+    "attribute": "favorite_fruit",
+    "text": "Iris Bennett's favorite fruit is plum.",
+    "question": "What is Iris Bennett's favorite fruit?",
+    "answer": "plum"
+  },
+  {
+    "id": "semantic_0022",
+    "person": "Quinn Ellis",
+    "attribute": "job",
+    "text": "Quinn Ellis works as a mechanic.",
+    "question": "What is Quinn Ellis's job?",
+    "answer": "mechanic"
+  },
+  {
+    "id": "semantic_0023",
+    "person": "Quinn Osborne",
+    "attribute": "home_city",
+    "text": "Quinn Osborne lives in Austin.",
+    "question": "Which city does Quinn Osborne live in?",
+    "answer": "Austin"
+  },
+  {
+    "id": "semantic_0024",
+    "person": "Xander Ellis",
+    "attribute": "owned_item",
+    "text": "Xander Ellis owns a silver camera.",
+    "question": "What does Xander Ellis own?",
+    "answer": "silver camera"
+  },
+  {
+    "id": "semantic_0025",
+    "person": "Dorian Iverson",
+    "attribute": "favorite_drink",
+    "text": "Dorian Iverson's favorite drink is melon juice.",
+    "question": "What is Dorian Iverson's favorite drink?",
+    "answer": "melon juice"
+  },
+  {
+    "id": "semantic_0026",
+    "person": "Mira Jensen",
+    "attribute": "favorite_fruit",
+    "text": "Mira Jensen's favorite fruit is raspberry.",
+    "question": "What is Mira Jensen's favorite fruit?",
+    "answer": "raspberry"
+  },
+  {
+    "id": "semantic_0027",
+    "person": "Ulric Keller",
+    "attribute": "job",
+    "text": "Ulric Keller works as a chemist.",
+    "question": "What is Ulric Keller's job?",
+    "answer": "chemist"
+  },
+  {
+    "id": "semantic_0028",
+    "person": "Orla Sutter",
+    "attribute": "home_city",
+    "text": "Orla Sutter lives in Madison.",
+    "question": "Which city does Orla Sutter live in?",
+    "answer": "Madison"
+  },
+  {
+    "id": "semantic_0029",
+    "person": "Mira Dunham",
+    "attribute": "owned_item",
+    "text": "Mira Dunham owns a black suitcase.",
+    "question": "What does Mira Dunham own?",
+    "answer": "black suitcase"
+  },
+  {
+    "id": "semantic_0030",
+    "person": "Mira Nash",
+    "attribute": "favorite_drink",
+    "text": "Mira Nash's favorite drink is iced cocoa.",
+    "question": "What is Mira Nash's favorite drink?",
+    "answer": "iced cocoa"
+  },
+  {
+    "id": "semantic_0031",
+    "person": "Orla Bennett",
+    "attribute": "favorite_fruit",
+    "text": "Orla Bennett's favorite fruit is blueberry.",
+    "question": "What is Orla Bennett's favorite fruit?",
+    "answer": "blueberry"
+  },
+  {
+    "id": "semantic_0032",
+    "person": "Jules Lang",
+    "attribute": "job",
+    "text": "Jules Lang works as a librarian.",
+    "question": "What is Jules Lang's job?",
+    "answer": "librarian"
+  },
+  {
+    "id": "semantic_0033",
+    "person": "Celia Hayes",
+    "attribute": "home_city",
+    "text": "Celia Hayes lives in Tucson.",
+    "question": "Which city does Celia Hayes live in?",
+    "answer": "Tucson"
+  },
+  {
+    "id": "semantic_0034",
+    "person": "Jules Rowan",
+    "attribute": "owned_item",
+    "text": "Jules Rowan owns a bronze compass.",
+    "question": "What does Jules Rowan own?",
+    "answer": "bronze compass"
+  },
+  {
+    "id": "semantic_0035",
+    "person": "Harlan Jensen",
+    "attribute": "favorite_drink",
+    "text": "Harlan Jensen's favorite drink is berry smoothie.",
+    "question": "What is Harlan Jensen's favorite drink?",
+    "answer": "berry smoothie"
+  },
+  {
+    "id": "semantic_0036",
+    "person": "Keira Iverson",
+    "attribute": "favorite_fruit",
+    "text": "Keira Iverson's favorite fruit is peach.",
+    "question": "What is Keira Iverson's favorite fruit?",
+    "answer": "peach"
+  },
+  {
+    "id": "semantic_0037",
+    "person": "Quinn Mercer",
+    "attribute": "job",
+    "text": "Quinn Mercer works as a gardener.",
+    "question": "What is Quinn Mercer's job?",
+    "answer": "gardener"
+  },
+  {
+    "id": "semantic_0038",
+    "person": "Silas Sutter",
+    "attribute": "home_city",
+    "text": "Silas Sutter lives in Phoenix.",
+    "question": "Which city does Silas Sutter live in?",
+    "answer": "Phoenix"
+  },
+  {
+    "id": "semantic_0039",
+    "person": "Willa Vance",
+    "attribute": "owned_item",
+    "text": "Willa Vance owns a blue notebook.",
+    "question": "What does Willa Vance own?",
+    "answer": "blue notebook"
+  },
+  {
+    "id": "semantic_0040",
+    "person": "Landon Iverson",
+    "attribute": "favorite_drink",
+    "text": "Landon Iverson's favorite drink is berry smoothie.",
+    "question": "What is Landon Iverson's favorite drink?",
+    "answer": "berry smoothie"
+  },
+  {
+    "id": "semantic_0041",
+    "person": "Fintan Ellis",
+    "attribute": "favorite_fruit",
+    "text": "Fintan Ellis's favorite fruit is kiwi.",
+    "question": "What is Fintan Ellis's favorite fruit?",
+    "answer": "kiwi"
+  },
+  {
+    "id": "semantic_0042",
+    "person": "Pavel Keller",
+    "attribute": "job",
+    "text": "Pavel Keller works as a gardener.",
+    "question": "What is Pavel Keller's job?",
+    "answer": "gardener"
+  },
+  {
+    "id": "semantic_0043",
+    "person": "Briar Nash",
+    "attribute": "home_city",
+    "text": "Briar Nash lives in Seattle.",
+    "question": "Which city does Briar Nash live in?",
+    "answer": "Seattle"
+  },
+  {
+    "id": "semantic_0044",
+    "person": "Iris Carver",
+    "attribute": "owned_item",
+    "text": "Iris Carver owns a striped umbrella.",
+    "question": "What does Iris Carver own?",
+    "answer": "striped umbrella"
+  },
+  {
+    "id": "semantic_0045",
+    "person": "Rhea Lang",
+    "attribute": "favorite_drink",
+    "text": "Rhea Lang's favorite drink is iced cocoa.",
+    "question": "What is Rhea Lang's favorite drink?",
+    "answer": "iced cocoa"
+  },
+  {
+    "id": "semantic_0046",
+    "person": "Talia Mercer",
+    "attribute": "favorite_fruit",
+    "text": "Talia Mercer's favorite fruit is plum.",
+    "question": "What is Talia Mercer's favorite fruit?",
+    "answer": "plum"
+  },
+  {
+    "id": "semantic_0047",
+    "person": "Rhea Mercer",
+    "attribute": "job",
+    "text": "Rhea Mercer works as a gardener.",
+    "question": "What is Rhea Mercer's job?",
+    "answer": "gardener"
+  },
+  {
+    "id": "semantic_0048",
+    "person": "Talia Ellis",
+    "attribute": "home_city",
+    "text": "Talia Ellis lives in Madison.",
+    "question": "Which city does Talia Ellis live in?",
+    "answer": "Madison"
+  },
+  {
+    "id": "semantic_0049",
+    "person": "Celia Iverson",
+    "attribute": "owned_item",
+    "text": "Celia Iverson owns a silver camera.",
+    "question": "What does Celia Iverson own?",
+    "answer": "silver camera"
+  },
+  {
+    "id": "semantic_0050",
+    "person": "Keira Nash",
+    "attribute": "favorite_drink",
+    "text": "Keira Nash's favorite drink is mint coffee.",
+    "question": "What is Keira Nash's favorite drink?",
+    "answer": "mint coffee"
+  },
+  {
+    "id": "semantic_0051",
+    "person": "Greta Iverson",
+    "attribute": "favorite_fruit",
+    "text": "Greta Iverson's favorite fruit is orange.",
+    "question": "What is Greta Iverson's favorite fruit?",
+    "answer": "orange"
+  },
+  {
+    "id": "semantic_0052",
+    "person": "Ulric Abbott",
+    "attribute": "job",
+    "text": "Ulric Abbott works as a carpenter.",
+    "question": "What is Ulric Abbott's job?",
+    "answer": "carpenter"
+  },
+  {
+    "id": "semantic_0053",
+    "person": "Quinn Price",
+    "attribute": "home_city",
+    "text": "Quinn Price lives in Denver.",
+    "question": "Which city does Quinn Price live in?",
+    "answer": "Denver"
+  },
+  {
+    "id": "semantic_0054",
+    "person": "Iris Granger",
+    "attribute": "owned_item",
+    "text": "Iris Granger owns a silver camera.",
+    "question": "What does Iris Granger own?",
+    "answer": "silver camera"
+  },
+  {
+    "id": "semantic_0055",
+    "person": "Yara Rowan",
+    "attribute": "favorite_drink",
+    "text": "Yara Rowan's favorite drink is iced cocoa.",
+    "question": "What is Yara Rowan's favorite drink?",
+    "answer": "iced cocoa"
+  },
+  {
+    "id": "semantic_0056",
+    "person": "Talia Keller",
+    "attribute": "favorite_fruit",
+    "text": "Talia Keller's favorite fruit is blueberry.",
+    "question": "What is Talia Keller's favorite fruit?",
+    "answer": "blueberry"
+  },
+  {
+    "id": "semantic_0057",
+    "person": "Iris Foster",
+    "attribute": "job",
+    "text": "Iris Foster works as a baker.",
+    "question": "What is Iris Foster's job?",
+    "answer": "baker"
+  },
+  {
+    "id": "semantic_0058",
+    "person": "Dorian Vance",
+    "attribute": "home_city",
+    "text": "Dorian Vance lives in Boston.",
+    "question": "Which city does Dorian Vance live in?",
+    "answer": "Boston"
+  },
+  {
+    "id": "semantic_0059",
+    "person": "Jules Vance",
+    "attribute": "owned_item",
+    "text": "Jules Vance owns a silver camera.",
+    "question": "What does Jules Vance own?",
+    "answer": "silver camera"
+  },
+  {
+    "id": "semantic_0060",
+    "person": "Jules Osborne",
+    "attribute": "favorite_drink",
+    "text": "Jules Osborne's favorite drink is ginger milk.",
+    "question": "What is Jules Osborne's favorite drink?",
+    "answer": "ginger milk"
+  },
+  {
+    "id": "semantic_0061",
+    "person": "Yara Vance",
+    "attribute": "favorite_fruit",
+    "text": "Yara Vance's favorite fruit is papaya.",
+    "question": "What is Yara Vance's favorite fruit?",
+    "answer": "papaya"
+  },
+  {
+    "id": "semantic_0062",
+    "person": "Dorian Nash",
+    "attribute": "job",
+    "text": "Dorian Nash works as a tailor.",
+    "question": "What is Dorian Nash's job?",
+    "answer": "tailor"
+  },
+  {
+    "id": "semantic_0063",
+    "person": "Elara Bennett",
+    "attribute": "home_city",
+    "text": "Elara Bennett lives in Seattle.",
+    "question": "Which city does Elara Bennett live in?",
+    "answer": "Seattle"
+  },
+  {
+    "id": "semantic_0064",
+    "person": "Rhea Foster",
+    "attribute": "owned_item",
+    "text": "Rhea Foster owns a blue notebook.",
+    "question": "What does Rhea Foster own?",
+    "answer": "blue notebook"
+  },
+  {
+    "id": "semantic_0065",
+    "person": "Vera Iverson",
+    "attribute": "favorite_drink",
+    "text": "Vera Iverson's favorite drink is melon juice.",
+    "question": "What is Vera Iverson's favorite drink?",
+    "answer": "melon juice"
+  },
+  {
+    "id": "semantic_0066",
+    "person": "Iris Hayes",
+    "attribute": "favorite_fruit",
+    "text": "Iris Hayes's favorite fruit is peach.",
+    "question": "What is Iris Hayes's favorite fruit?",
+    "answer": "peach"
+  },
+  {
+    "id": "semantic_0067",
+    "person": "Keira Sutter",
+    "attribute": "job",
+    "text": "Keira Sutter works as a carpenter.",
+    "question": "What is Keira Sutter's job?",
+    "answer": "carpenter"
+  },
+  {
+    "id": "semantic_0068",
+    "person": "Silas Price",
+    "attribute": "home_city",
+    "text": "Silas Price lives in Phoenix.",
+    "question": "Which city does Silas Price live in?",
+    "answer": "Phoenix"
+  },
+  {
+    "id": "semantic_0069",
+    "person": "Dorian Keller",
+    "attribute": "owned_item",
+    "text": "Dorian Keller owns a green backpack.",
+    "question": "What does Dorian Keller own?",
+    "answer": "green backpack"
+  },
+  {
+    "id": "semantic_0070",
+    "person": "Willa Talbot",
+    "attribute": "favorite_drink",
+    "text": "Willa Talbot's favorite drink is peach tea.",
+    "question": "What is Willa Talbot's favorite drink?",
+    "answer": "peach tea"
+  },
+  {
+    "id": "semantic_0071",
+    "person": "Alden Granger",
+    "attribute": "favorite_fruit",
+    "text": "Alden Granger's favorite fruit is orange.",
+    "question": "What is Alden Granger's favorite fruit?",
+    "answer": "orange"
+  },
+  {
+    "id": "semantic_0072",
+    "person": "Fintan Price",
+    "attribute": "job",
+    "text": "Fintan Price works as a tailor.",
+    "question": "What is Fintan Price's job?",
+    "answer": "tailor"
+  },
+  {
+    "id": "semantic_0073",
+    "person": "Talia Osborne",
+    "attribute": "home_city",
+    "text": "Talia Osborne lives in Portland.",
+    "question": "Which city does Talia Osborne live in?",
+    "answer": "Portland"
+  },
+  {
+    "id": "semantic_0074",
+    "person": "Fintan Granger",
+    "attribute": "owned_item",
+    "text": "Fintan Granger owns a yellow bicycle.",
+    "question": "What does Fintan Granger own?",
+    "answer": "yellow bicycle"
+  },
+  {
+    "id": "semantic_0075",
+    "person": "Yara Hayes",
+    "attribute": "favorite_drink",
+    "text": "Yara Hayes's favorite drink is coconut water.",
+    "question": "What is Yara Hayes's favorite drink?",
+    "answer": "coconut water"
+  },
+  {
+    "id": "semantic_0076",
+    "person": "Quinn Abbott",
+    "attribute": "favorite_fruit",
+    "text": "Quinn Abbott's favorite fruit is peach.",
+    "question": "What is Quinn Abbott's favorite fruit?",
+    "answer": "peach"
+  },
+  {
+    "id": "semantic_0077",
+    "person": "Yara Talbot",
+    "attribute": "job",
+    "text": "Yara Talbot works as a pilot.",
+    "question": "What is Yara Talbot's job?",
+    "answer": "pilot"
+  },
+  {
+    "id": "semantic_0078",
+    "person": "Keira Bennett",
+    "attribute": "home_city",
+    "text": "Keira Bennett lives in Atlanta.",
+    "question": "Which city does Keira Bennett live in?",
+    "answer": "Atlanta"
+  },
+  {
+    "id": "semantic_0079",
+    "person": "Talia Vance",
+    "attribute": "owned_item",
+    "text": "Talia Vance owns a silver camera.",
+    "question": "What does Talia Vance own?",
+    "answer": "silver camera"
+  },
+  {
+    "id": "semantic_0080",
+    "person": "Keira Osborne",
+    "attribute": "favorite_drink",
+    "text": "Keira Osborne's favorite drink is mint coffee.",
+    "question": "What is Keira Osborne's favorite drink?",
+    "answer": "mint coffee"
+  },
+  {
+    "id": "semantic_0081",
+    "person": "Willa Bennett",
+    "attribute": "favorite_fruit",
+    "text": "Willa Bennett's favorite fruit is pear.",
+    "question": "What is Willa Bennett's favorite fruit?",
+    "answer": "pear"
+  },
+  {
+    "id": "semantic_0082",
+    "person": "Keira Talbot",
+    "attribute": "job",
+    "text": "Keira Talbot works as a gardener.",
+    "question": "What is Keira Talbot's job?",
+    "answer": "gardener"
+  },
+  {
+    "id": "semantic_0083",
+    "person": "Silas Keller",
+    "attribute": "home_city",
+    "text": "Silas Keller lives in Portland.",
+    "question": "Which city does Silas Keller live in?",
+    "answer": "Portland"
+  },
+  {
+    "id": "semantic_0084",
+    "person": "Fintan Talbot",
+    "attribute": "owned_item",
+    "text": "Fintan Talbot owns a wooden violin.",
+    "question": "What does Fintan Talbot own?",
+    "answer": "wooden violin"
+  },
+  {
+    "id": "semantic_0085",
+    "person": "Landon Osborne",
+    "attribute": "favorite_drink",
+    "text": "Landon Osborne's favorite drink is berry smoothie.",
+    "question": "What is Landon Osborne's favorite drink?",
+    "answer": "berry smoothie"
+  },
+  {
+    "id": "semantic_0086",
+    "person": "Alden Iverson",
+    "attribute": "favorite_fruit",
+    "text": "Alden Iverson's favorite fruit is orange.",
+    "question": "What is Alden Iverson's favorite fruit?",
+    "answer": "orange"
+  },
+  {
+    "id": "semantic_0087",
+    "person": "Yara Foster",
+    "attribute": "job",
+    "text": "Yara Foster works as a chemist.",
+    "question": "What is Yara Foster's job?",
+    "answer": "chemist"
+  },
+  {
+    "id": "semantic_0088",
+    "person": "Greta Ellis",
+    "attribute": "home_city",
+    "text": "Greta Ellis lives in Raleigh.",
+    "question": "Which city does Greta Ellis live in?",
+    "answer": "Raleigh"
+  },
+  {
+    "id": "semantic_0089",
+    "person": "Harlan Carver",
+    "attribute": "owned_item",
+    "text": "Harlan Carver owns a canvas tent.",
+    "question": "What does Harlan Carver own?",
+    "answer": "canvas tent"
+  },
+  {
+    "id": "semantic_0090",
+    "person": "Talia Sutter",
+    "attribute": "favorite_drink",
+    "text": "Talia Sutter's favorite drink is coconut water.",
+    "question": "What is Talia Sutter's favorite drink?",
+    "answer": "coconut water"
+  },
+  {
+    "id": "semantic_0091",
+    "person": "Silas Mercer",
+    "attribute": "favorite_fruit",
+    "text": "Silas Mercer's favorite fruit is orange.",
+    "question": "What is Silas Mercer's favorite fruit?",
+    "answer": "orange"
+  },
+  {
+    "id": "semantic_0092",
+    "person": "Celia Carver",
+    "attribute": "job",
+    "text": "Celia Carver works as a librarian.",
+    "question": "What is Celia Carver's job?",
+    "answer": "librarian"
+  },
+  {
+    "id": "semantic_0093",
+    "person": "Elara Ellis",
+    "attribute": "home_city",
+    "text": "Elara Ellis lives in Tucson.",
+    "question": "Which city does Elara Ellis live in?",
+    "answer": "Tucson"
+  },
+  {
+    "id": "semantic_0094",
+    "person": "Harlan Mercer",
+    "attribute": "owned_item",
+    "text": "Harlan Mercer owns a black suitcase.",
+    "question": "What does Harlan Mercer own?",
+    "answer": "black suitcase"
+  },
+  {
+    "id": "semantic_0095",
+    "person": "Nolan Vance",
+    "attribute": "favorite_drink",
+    "text": "Nolan Vance's favorite drink is berry smoothie.",
+    "question": "What is Nolan Vance's favorite drink?",
+    "answer": "berry smoothie"
+  },
+  {
+    "id": "semantic_0096",
+    "person": "Jules Granger",
+    "attribute": "favorite_fruit",
+    "text": "Jules Granger's favorite fruit is pineapple.",
+    "question": "What is Jules Granger's favorite fruit?",
+    "answer": "pineapple"
+  },
+  {
+    "id": "semantic_0097",
+    "person": "Willa Nash",
+    "attribute": "job",
+    "text": "Willa Nash works as a dentist.",
+    "question": "What is Willa Nash's job?",
+    "answer": "dentist"
+  },
+  {
+    "id": "semantic_0098",
+    "person": "Elara Abbott",
+    "attribute": "home_city",
+    "text": "Elara Abbott lives in Seattle.",
+    "question": "Which city does Elara Abbott live in?",
+    "answer": "Seattle"
+  },
+  {
+    "id": "semantic_0099",
+    "person": "Vera Mercer",
+    "attribute": "owned_item",
+    "text": "Vera Mercer owns a purple kayak.",
+    "question": "What does Vera Mercer own?",
+    "answer": "purple kayak"
+  },
+  {
+    "id": "semantic_0100",
+    "person": "Xander Jensen",
+    "attribute": "favorite_drink",
+    "text": "Xander Jensen's favorite drink is iced cocoa.",
+    "question": "What is Xander Jensen's favorite drink?",
+    "answer": "iced cocoa"
+  }
+]
