@@ -57,8 +57,10 @@ fi
 
 mkdir -p "${OUTPUT_ROOT}" "${LOG_ROOT}"
 
-# 8 卡节点：未指定时默认用 0–7（与 δ-mem 官方 torchrun --nproc_per_node 8 一致）
-if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+# 8 卡：未指定 CUDA_VISIBLE_DEVICES 时默认 0–7；或显式 USE_ALL_8_GPUS=1
+if [[ "${USE_ALL_8_GPUS:-0}" == "1" ]]; then
+  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+elif [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 fi
 _ngpu=$(echo "${CUDA_VISIBLE_DEVICES}" | awk -F, '{print NF}')
@@ -66,6 +68,9 @@ if [[ "${_ngpu}" -lt "${NPROC_PER_NODE}" ]]; then
   NPROC_PER_NODE="${_ngpu}"
 fi
 echo "GPUs: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} | torchrun nproc=${NPROC_PER_NODE} | ATTN=${ATTN_IMPLEMENTATION}"
+if [[ "${_ngpu}" -lt 8 ]]; then
+  echo "NOTE: 当前仅 ${_ngpu} 张卡可见。要 8 卡并行请申请 8-GPU 作业后运行，或节点空闲时: USE_ALL_8_GPUS=1 bash ..."
+fi
 
 OFFLINE_FLAG=()
 [[ "${LOCAL_FILES_ONLY}" == "1" ]] && OFFLINE_FLAG=(--local-files-only)
@@ -108,7 +113,7 @@ run_distributed() {
   local master_port="$1"
   shift
   if [[ "${NPROC_PER_NODE}" -le 1 ]]; then
-    "$@"
+    "${PYTHON_BIN}" "$@"
     return
   fi
   "${PYTHON_BIN}" -m torch.distributed.run \
