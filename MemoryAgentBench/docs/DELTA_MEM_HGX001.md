@@ -1,99 +1,84 @@
 # hgx001：clone δ-mem，在其代码上跑 baseline + SHINE
 
-## 架构（按你的要求）
+## 架构
 
 ```
-git clone declare-lab/delta-Mem     # 官方仓库
+git clone declare-lab/delta-Mem
+git clone EleutherAI/lm-evaluation-harness   # IFEval 依赖
         ↓
-apply_to_delta_mem.sh             # 打上 SHINE 补丁（在 δ-mem 代码里改）
+apply_to_delta_mem.sh
         ↓
-deltamem.eval.benchmark_compare   # 同一入口、同一 JSON
+deltamem.eval.benchmark_compare
   ├── base   … frozen Qwen3-8B
-  ├── delta  … δ-mem adapter（可选）
-  └── shine  … SHINE agent（我们加的第四节）
+  └── shine  … SHINE（--no-skip-shine）
 ```
 
-**不再**用独立的 `shine_mab_eval.py` 做主路径；它已改为转发到 `benchmark_compare`。
-
-## 补丁内容（在 SHINE-mem 里版本管理）
-
-| 文件 | 作用 |
-|------|------|
-| `deltamem_patches/deltamem/eval/shine_memory_agent_bench.py` | 新模块：SHINE 跑 MAB |
-| `deltamem_patches/benchmark_compare_shine.patch` | 给 `benchmark_compare.py` 加 `--no-skip-shine` |
-| `deltamem_patches/apply_to_delta_mem.sh` | clone 后自动覆盖 |
-
-## 一次性安装（hgx001）
+## 一次性安装
 
 ```bash
 export SHINE_ROOT=/ceph/home/muhan01/wyd/SHINE-mem
 cd $SHINE_ROOT/MemoryAgentBench
-bash bash_files/sh/setup_delta_mem_hgx001.sh
+TORCH_INDEX=cu121 RECREATE_VENV=1 bash bash_files/sh/setup_delta_mem_hgx001.sh
 ```
 
-会：`git clone` → `apply_to_delta_mem.sh` → 建 δ-mem `.venv` → 装 SHINE 依赖。
+默认 **cu121**、**不装 flash-attn**；跑评测时 `ATTN_IMPLEMENTATION=sdpa`（与无 flash-attn 一致）。
 
-## 跑评测
+### 安装失败排查
+
+| 现象 | 处理 |
+|------|------|
+| `NVIDIA driver ... too old (12010)` | `TORCH_INDEX=cu121 RECREATE_VENV=1 bash .../setup_delta_mem_hgx001.sh` |
+| `No module named 'flash_attn'` | 用最新 setup（已跳过 flash-attn verify） |
+| 已有 conda `MABench` | `USE_EXISTING_PYTHON=1 PYTHON_BIN=$(which python) bash .../setup_delta_mem_hgx001.sh` |
+
+## 跑评测 — 与 δ-mem 官方 **完全一致** 的全套
+
+对齐 `run_qasper_multimodel_write8192_benchmark_suite_qwen3_8b.sh`：
+
+| 任务 | 入口 |
+|------|------|
+| LoCoMo | `deltamem.eval.locomo_delta` |
+| HotpotQA | `benchmark_compare --tasks hotpotqa` |
+| GPQA Diamond | `benchmark_compare --tasks gpqa_diamond` |
+| IFEval | `benchmark_compare --tasks ifeval` |
+| MemoryAgentBench | `benchmark_compare --tasks memory_agent_bench`（**4 split、全部 source**） |
+
+协议：`unified prompt`、`max_context_chars=120000`、`T=0.4/top_p=0.9/top_k=10`、HotpotQA/GPQA official decoding、`seed=42`。
 
 ```bash
 export SHINE_ROOT=/ceph/home/muhan01/wyd/SHINE-mem
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7   # 官方 8 卡；单卡则 NPROC_PER_NODE=1
+export PYTHON_BIN=$SHINE_ROOT/third_party/delta-Mem/.venv/bin/python
 
-# δ-mem 官方 frozen baseline（EventQA smoke）
-bash bash_files/sh/run_delta_mem_hgx001.sh smoke
+# 复现 frozen Qwen3-8B 全套（默认，不是 smoke）
+bash bash_files/sh/run_delta_mem_hgx001.sh base
 
-# 只跑 SHINE（同一协议）
-bash bash_files/sh/run_delta_mem_hgx001.sh shine
+# 完整 MAB：base + SHINE 同一 JSON
+bash bash_files/sh/run_delta_mem_hgx001.sh compare-mab
 
-# 完整 MAB：baseline + SHINE 进同一个 JSON
+# base 全套 + SHINE 仅 MAB
 bash bash_files/sh/run_delta_mem_hgx001.sh all
 ```
 
-或直接调用 δ-mem（补丁已打进 clone）：
+输出目录：`$SHINE_ROOT/outputs/delta_mem_qwen3_8b_full/`
 
-```bash
-cd $SHINE_ROOT/third_party/delta-Mem
-export PYTHONPATH=$PWD:$SHINE_ROOT:$SHINE_ROOT/MemoryAgentBench
+| 文件 | 含义 |
+|------|------|
+| `base_model/memory_agent_bench.json` | frozen backbone MAB 总分 → `base.memory_agent_bench.summary.overall` |
+| `base_model/hotpotqa.json` 等 | 其余基准 |
+| `compare_mab/base_and_shine.json` | base 与 SHINE 对比 |
 
-# baseline only
-.venv/bin/python -m deltamem.eval.benchmark_compare \
-  --model-path /ceph/home/muhan01/huggingfacemodels/Qwen3-8B \
-  --tasks memory_agent_bench \
-  --external-memory-agent-bench-root $SHINE_ROOT/MemoryAgentBench \
-  --skip-delta --skip-lora --skip-shine \
-  --no-memory-agent-bench-use-official-prompt \
-  --memory-agent-bench-max-context-chars 120000 \
-  --eval-do-sample --eval-temperature 0.4 \
-  --output-json $SHINE_ROOT/outputs/base_mab.json
+重跑：`FORCE=1 bash ...`；数据已缓存离线：`LOCAL_FILES_ONLY=1 bash ...`
 
-# SHINE only
-.venv/bin/python -m deltamem.eval.benchmark_compare \
-  --model-path /ceph/home/muhan01/huggingfacemodels/Qwen3-8B \
-  --tasks memory_agent_bench \
-  --external-memory-agent-bench-root $SHINE_ROOT/MemoryAgentBench \
-  --shine-root $SHINE_ROOT \
-  --shine-agent-config $SHINE_ROOT/MemoryAgentBench/configs/agent_conf/SHINE_Agents/SHINE_agent_qwen3_8b.yaml \
-  --skip-base --skip-delta --skip-lora --no-skip-shine \
-  --no-memory-agent-bench-use-official-prompt \
-  --memory-agent-bench-max-context-chars 120000 \
-  --eval-do-sample --eval-temperature 0.4 \
-  --output-json $SHINE_ROOT/outputs/shine_mab.json
-```
+## 环境变量
 
-## 看结果
+| 变量 | 默认 |
+|------|------|
+| `BASE_MODEL` | `/ceph/home/muhan01/huggingfacemodels/Qwen3-8B` |
+| `NPROC_PER_NODE` | `8`（单卡自动缩小） |
+| `ATTN_IMPLEMENTATION` | `sdpa` |
+| `SHINE_AGENT_CONFIG` | `SHINE_agent_qwen3_8b_deltamem.yaml`（`T=0.4` 与官方套件一致） |
 
-输出 JSON 结构：
+## 和 MAB `main.py` 的区别
 
-- `base.memory_agent_bench.summary.overall` — δ-mem frozen Qwen3-8B
-- `shine.memory_agent_bench.summary.overall` — SHINE
-
-与 δ-mem 论文 Qwen3-8B 套件一致：`unified prompt`、`max_context_chars=120000`、sampling `T=0.4`。
-
-## 和 MAB `main.py` 的关系
-
-| | δ-mem `benchmark_compare` | MAB `main.py` |
-|--|---------------------------|---------------|
-| 用途 | 对齐 δ-mem 论文 | 对齐 MAB 原论文 / SHINE 日常开发 |
-| SHINE 入口 | `--no-skip-shine` | `SHINE_agent_qwen3_8b.yaml` |
-
-两套协议并存；和 δ-mem 表比数字请用本页流程。
+要比 δ-mem 论文数字，必须用本页 **全套** 流程；`main.py` 对齐的是 MAB 原论文协议。
