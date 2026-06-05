@@ -46,6 +46,18 @@ install_torch() {
     --index-url "https://download.pytorch.org/whl/${TORCH_INDEX}"
 }
 
+install_venv_paths() {
+  local py="$1"
+  local site
+  site="$("${py}" -c "import site; print(site.getsitepackages()[0])")"
+  cat > "${site}/shine_delta_mem_paths.pth" <<EOF
+${DELTA_MEM_ROOT}
+${SHINE_ROOT}
+${MAB_ROOT}
+EOF
+  echo "Wrote ${site}/shine_delta_mem_paths.pth"
+}
+
 install_eval_deps() {
   local py="$1"
   "${py}" -m pip install -r "${MAB_ROOT}/requirements-delta-eval.txt"
@@ -60,6 +72,7 @@ if [[ "${USE_EXISTING_PYTHON:-0}" == "1" ]]; then
   PYTHON_BIN="${PYTHON_BIN:-$(command -v python)}"
   echo "USE_EXISTING_PYTHON=1 → ${PYTHON_BIN}"
   install_eval_deps "${PYTHON_BIN}"
+  install_venv_paths "${PYTHON_BIN}"
 else
   cd "${DELTA_MEM_ROOT}"
   if [[ "${RECREATE_VENV}" == "1" && -d .venv ]]; then
@@ -72,6 +85,7 @@ else
   "${PYTHON_BIN}" -m pip install -U pip setuptools wheel
   install_torch "${PYTHON_BIN}"
   install_eval_deps "${PYTHON_BIN}"
+  install_venv_paths "${PYTHON_BIN}"
 
   if [[ "${INSTALL_FLASH_ATTN}" == "1" ]]; then
     "${PYTHON_BIN}" -m pip install --no-build-isolation flash-attn || true
@@ -103,7 +117,7 @@ Setup complete. Always use this Python for runs (不要只靠 conda 的 python):
   export SHINE_ROOT=${SHINE_ROOT}
   export DELTA_MEM_ROOT=${DELTA_MEM_ROOT}
   export MAB_ROOT=${MAB_ROOT}
-  export PYTHONPATH=\${DELTA_MEM_ROOT}:\${SHINE_ROOT}:\${MAB_ROOT}
+  source ${MAB_ROOT}/bash_files/sh/env_delta_mem.sh
 
   bash ${MAB_ROOT}/bash_files/sh/run_delta_mem_hgx001.sh compare-mab
 

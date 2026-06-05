@@ -63,7 +63,7 @@ fi
 
 mkdir -p "${OUTPUT_ROOT}" "${LOG_ROOT}"
 echo "PYTHON_BIN=${PYTHON_BIN}"
-if ! "${PYTHON_BIN}" -c "import torch, transformers; from deltamem.eval import benchmark_compare; print('preflight OK', torch.__version__, transformers.__version__)"; then
+if ! PYTHONPATH="${DELTA_MEM_ROOT}:${SHINE_ROOT}:${MAB_ROOT}" "${PYTHON_BIN}" -c "import torch, transformers; from deltamem.eval import benchmark_compare; print('preflight OK', torch.__version__, transformers.__version__)"; then
   echo "Fix env: RECREATE_VENV=1 TORCH_INDEX=cu121 bash ${MAB_ROOT}/bash_files/sh/setup_delta_mem_hgx001.sh" >&2
   exit 1
 fi
