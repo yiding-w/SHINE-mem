@@ -1,0 +1,113 @@
+diff --git a/deltamem/eval/benchmark_compare.py b/deltamem/eval/benchmark_compare.py
+index cda0d67..6bf1195 100644
+--- a/deltamem/eval/benchmark_compare.py
++++ b/deltamem/eval/benchmark_compare.py
+@@ -354,18 +354,40 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--skip-base", action="store_true")
+     parser.add_argument("--skip-delta", action="store_true")
+     parser.add_argument("--skip-lora", action="store_true")
++    parser.add_argument("--skip-shine", action="store_true", default=True)
++    parser.add_argument(
++        "--shine-root",
++        type=Path,
++        default=None,
++        help="SHINE-mem repo root (parent of MemoryAgentBench). Defaults to SHINE_ROOT env.",
++    )
++    parser.add_argument(
++        "--shine-agent-config",
++        type=Path,
++        default=None,
++        help="YAML agent config, e.g. MemoryAgentBench/configs/agent_conf/SHINE_Agents/SHINE_agent_qwen3_8b.yaml",
++    )
+     parser.add_argument(
+         "--output-json",
+         type=Path,
+         default=Path("outputs/qwen3_benchmark_compare.json"),
+     )
+     args = parser.parse_args()
+-    if args.skip_base and args.skip_delta and args.skip_lora:
+-        parser.error("at least one of base, delta, or lora evaluation must be enabled")
++    if args.skip_base and args.skip_delta and args.skip_lora and args.skip_shine:
++        parser.error("at least one of base, delta, lora, or shine evaluation must be enabled")
+     if not args.skip_delta and args.delta_adapter_dir is None:
+         parser.error("--delta-adapter-dir is required unless --skip-delta is set")
+     if not args.skip_lora and args.lora_adapter_dir is None:
+         parser.error("--lora-adapter-dir is required unless --skip-lora is set")
++    if not args.skip_shine:
++        if args.shine_agent_config is None:
++            parser.error("--shine-agent-config is required unless --skip-shine is set")
++        if args.shine_root is None:
++            env_shine_root = os.environ.get("SHINE_ROOT")
++            if env_shine_root:
++                args.shine_root = Path(env_shine_root)
++            elif args.external_memory_agent_bench_root is not None:
++                args.shine_root = args.external_memory_agent_bench_root.parent
+     return args
+ 
+ 
+@@ -2852,6 +2874,8 @@ def main() -> None:
+             "model_path": args.model_path,
+             "delta_adapter_dir": None if args.delta_adapter_dir is None else str(args.delta_adapter_dir),
+             "lora_adapter_dir": None if args.lora_adapter_dir is None else str(args.lora_adapter_dir),
++            "shine_root": None if args.shine_root is None else str(args.shine_root),
++            "shine_agent_config": None if args.shine_agent_config is None else str(args.shine_agent_config),
+             "seed": args.seed,
+             "tasks": args.tasks,
+             "datasets_cache_dir": str(args.datasets_cache_dir),
+@@ -3032,6 +3056,56 @@ def main() -> None:
+             del lora_model
+             maybe_empty_cache(context.device)
+ 
++        if context.enabled:
++            barrier_distributed(context)
++
++        if not args.skip_shine:
++            from deltamem.eval.shine_memory_agent_bench import evaluate_shine_memory_agent_bench
++
++            if context.rank == 0:
++                payload["shine"] = {
++                    "shine_root": str(args.shine_root),
++                    "shine_agent_config": str(args.shine_agent_config),
++                }
++            for task_name in args.tasks:
++                if task_name != "memory_agent_bench":
++                    continue
++                items = items_by_task[task_name]
++                memory_agent_bench_row_tasks = local_memory_agent_bench_row_tasks(
++                    items,
++                    context,
++                    default_max_new_tokens=args.memory_agent_bench_max_new_tokens,
++                    use_official_generation_lengths=args.memory_agent_bench_use_official_generation_lengths,
++                    max_questions_per_row_task=args.memory_agent_bench_max_questions_per_row_task,
++                )
++                progress_total = sum(row_task.question_count for row_task in memory_agent_bench_row_tasks)
++                progress_bar = None
++                if context.rank == 0:
++                    progress_bar = tqdm(
++                        total=progress_total,
++                        desc="shine_memory_agent_bench",
++                        dynamic_ncols=True,
++                    )
++                records = evaluate_shine_memory_agent_bench(
++                    row_tasks=memory_agent_bench_row_tasks,
++                    args=args,
++                    context=context,
++                    progress_bar=progress_bar,
++                )
++                if progress_bar is not None:
++                    progress_bar.close()
++                if context.rank == 0:
++                    payload["shine"][task_name] = {
++                        "records": records,
++                        "summary": summarize_task(task_name, records, args=args),
++                    }
++                    persist_benchmark_payload(
++                        output_json=args.output_json,
++                        payload=payload,
++                        section="shine",
++                        task_name=task_name,
++                    )
++
+         if context.rank == 0:
+             persist_benchmark_payload(output_json=args.output_json, payload=payload)
+             print(json.dumps(payload, indent=2))

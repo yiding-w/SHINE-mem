@@ -1,0 +1,20 @@
+# SHINE agent config for δ-mem Qwen3-8B suite protocol (sampling decode).
+agent_name: SHINE_agent_qwen3_8b_deltamem
+model: shine-qwen3-8b
+temperature: 0.4
+top_p: 0.9
+top_k: 10
+output_dir: ./outputs/shine-qwen3-8b-deltamem
+
+shine_root: ..
+shine_cfg_path: configs/Qwen3-8B-MAB.yaml
+
+base_model_path: /ceph/home/muhan01/huggingfacemodels/Qwen3-8B
+shine_model_root: /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa
+
+use_mab_context_max_length: true
+use_mab_conversation_max_length: true
+shine_conversation_max_length: 4096
+use_mab_generation_max_length: true
+
+device: cuda

@@ -47,6 +47,9 @@ visualize_loradict_statistics.py
 test_human.py
 generated_case_lora.pt
 
+# vendored clones (use setup_delta_mem_hgx001.sh)
+third_party/delta-Mem
+
 # MemoryAgentBench
 MemoryAgentBench/outputs
 MemoryAgentBench/agents

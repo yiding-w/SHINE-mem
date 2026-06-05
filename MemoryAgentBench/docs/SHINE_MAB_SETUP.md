@@ -3,7 +3,8 @@
 在 [MemoryAgentBench](https://arxiv.org/abs/2507.05257) 上评测论文四类能力：**AR / TTL / LRU / SF（Selective Forgetting）**。
 
 > **命名说明**：论文里第四类是 **Selective Forgetting (SF)**，评测集为 **FactConsolidation**（要求遗忘过时事实、采用更新后信息）。官方开源代码与 HuggingFace 把同一 split 标成 **Conflict_Resolution (CR)**，路径仍是 `configs/data_conf/Conflict_Resolution/Factconsolidation_*.yaml`，与 SF 是同一套任务，不是另一项能力。  
-> 另：[δ-mem (2605.12357)](https://arxiv.org/abs/2605.12357) 是在 MAB 等基准上评测的**记忆方法**论文，不是 SF 的定义；若要做方法对比需单独实现 δ-mem agent。
+> 另：[δ-mem (2605.12357)](https://arxiv.org/abs/2605.12357) 是在 MAB 等基准上评测的**记忆方法**论文，不是 SF 的定义。  
+> **与 δ-mem 论文数字对比**：请直接 clone 他们的代码跑 frozen baseline，见 [DELTA_MEM_HGX001.md](DELTA_MEM_HGX001.md)（`setup_delta_mem_hgx001.sh` + `run_delta_mem_hgx001.sh`）。本文档的 `main.py` 路径对齐的是 **MAB 官方**协议，不是 δ-mem 套件。
 
 ## 目录布局（服务器）
 

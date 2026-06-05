@@ -192,6 +192,7 @@ class ShineMABRunner:
             f"max_new_tokens={self.max_new_tokens}",
             flush=True,
         )
+        self.agent_config = agent_config
         self.temperature = float(agent_config.get("temperature", 0.0))
         self.memory_time = 0.0
 
@@ -254,17 +255,28 @@ class ShineMABRunner:
         attention_mask = input_enc["attention_mask"].to(self.device)
 
         t0 = time.time()
+        gen_kwargs: Dict[str, Any] = {
+            "max_new_tokens": self.max_new_tokens,
+            "do_sample": self.temperature > 0,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+        }
+        if self.temperature > 0:
+            gen_kwargs["temperature"] = self.temperature
+            top_p = self.agent_config.get("top_p")
+            top_k = self.agent_config.get("top_k")
+            if top_p is not None:
+                gen_kwargs["top_p"] = float(top_p)
+            if top_k is not None:
+                gen_kwargs["top_k"] = int(top_k)
+
         with torch.no_grad():
             outputs = self.metanetwork.metamodel.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 loradict=self._loradict,
                 ignore_mem_token=True,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=self.temperature > 0,
-                temperature=self.temperature if self.temperature > 0 else None,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
+                **gen_kwargs,
             )
         query_time = time.time() - t0
 
