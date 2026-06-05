@@ -6,6 +6,8 @@ checkpoints
 !MemoryAgentBench/bash_files/configs/shine_mab_eval.txt
 !MemoryAgentBench/requirements.txt
 !MemoryAgentBench/requirements-shine-mab.txt
+!MemoryAgentBench/requirements-delta-eval.txt
+!MemoryAgentBench/requirements-delta-eval.txt
 tmp.py
 outputs
 data

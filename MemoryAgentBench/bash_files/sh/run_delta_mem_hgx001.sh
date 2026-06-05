@@ -16,7 +16,18 @@ MODE="${1:-base}"
 SHINE_ROOT="${SHINE_ROOT:-/ceph/home/muhan01/wyd/SHINE-mem}"
 DELTA_MEM_ROOT="${DELTA_MEM_ROOT:-${SHINE_ROOT}/third_party/delta-Mem}"
 MAB_ROOT="${MAB_ROOT:-${SHINE_ROOT}/MemoryAgentBench}"
-PYTHON_BIN="${PYTHON_BIN:-${DELTA_MEM_ROOT}/.venv/bin/python}"
+VENV_PYTHON="${DELTA_MEM_ROOT}/.venv/bin/python"
+PYTHON_BIN="${PYTHON_BIN:-${VENV_PYTHON}}"
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "Missing ${PYTHON_BIN}. Run setup_delta_mem_hgx001.sh first." >&2
+  exit 1
+fi
+# 避免 conda 的 python 混入 .venv 的 site-packages（会出 torch/transformers 版本错乱）
+if [[ -n "${CONDA_PREFIX:-}" ]] && [[ "${PYTHON_BIN}" != "${VENV_PYTHON}" ]]; then
+  echo "WARNING: conda active (${CONDA_PREFIX}) but PYTHON_BIN=${PYTHON_BIN}" >&2
+  echo "         Recommend: export PYTHON_BIN=${VENV_PYTHON}" >&2
+fi
 
 BASE_MODEL="${BASE_MODEL:-/ceph/home/muhan01/huggingfacemodels/Qwen3-8B}"
 HF_HOME="${HF_HOME:-/ceph/home/muhan01/huggingfacemodels}"
@@ -50,12 +61,12 @@ if [[ "${LOCAL_FILES_ONLY}" == "1" ]]; then
   export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
 fi
 
-if [[ ! -x "${PYTHON_BIN}" ]]; then
-  echo "Run: bash ${MAB_ROOT}/bash_files/sh/setup_delta_mem_hgx001.sh" >&2
+mkdir -p "${OUTPUT_ROOT}" "${LOG_ROOT}"
+echo "PYTHON_BIN=${PYTHON_BIN}"
+if ! "${PYTHON_BIN}" -c "import torch, transformers; from deltamem.eval import benchmark_compare; print('preflight OK', torch.__version__, transformers.__version__)"; then
+  echo "Fix env: RECREATE_VENV=1 TORCH_INDEX=cu121 bash ${MAB_ROOT}/bash_files/sh/setup_delta_mem_hgx001.sh" >&2
   exit 1
 fi
-
-mkdir -p "${OUTPUT_ROOT}" "${LOG_ROOT}"
 
 # 8 卡：未指定 CUDA_VISIBLE_DEVICES 时默认 0–7；或显式 USE_ALL_8_GPUS=1
 if [[ "${USE_ALL_8_GPUS:-0}" == "1" ]]; then

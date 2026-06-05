@@ -1,0 +1,23 @@
+# Minimal deps for δ-mem benchmark_compare + SHINE MAB eval (no training stack).
+# Install torch separately first (cu121 on hgx001). Pin transformers for torch 2.5.x.
+
+transformers==4.57.1
+datasets
+accelerate
+peft
+huggingface-hub
+tqdm
+numpy<2
+einops
+pydantic
+psutil
+packaging
+pyyaml
+requests
+aiohttp
+pandas
+pyarrow
+regex
+safetensors
+tokenizers
+filelock

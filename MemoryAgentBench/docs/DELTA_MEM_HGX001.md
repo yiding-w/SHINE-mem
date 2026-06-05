@@ -18,18 +18,38 @@ deltamem.eval.benchmark_compare
 ```bash
 export SHINE_ROOT=/ceph/home/muhan01/wyd/SHINE-mem
 cd $SHINE_ROOT/MemoryAgentBench
-TORCH_INDEX=cu121 RECREATE_VENV=1 bash bash_files/sh/setup_delta_mem_hgx001.sh
+RECREATE_VENV=1 TORCH_INDEX=cu121 bash bash_files/sh/setup_delta_mem_hgx001.sh
 ```
 
-默认 **cu121**、**不装 flash-attn**；跑评测时 `ATTN_IMPLEMENTATION=sdpa`（与无 flash-attn 一致）。
+**不要**用 δ-mem 完整 `requirements.txt`（会装 transformers 5.x，与 torch 2.5+cu121 不兼容 → `float8_e8m0fnu` 报错）。setup 已改用 `requirements-delta-eval.txt`（`transformers==4.57.1`）。
+
+装到一半 Ctrl-C 后务必 `RECREATE_VENV=1` 重装。跑评测前：
+
+```bash
+export PYTHON_BIN=/ceph/home/muhan01/wyd/SHINE-mem/third_party/delta-Mem/.venv/bin/python
+$PYTHON_BIN -c "import torch, transformers; print(torch.__version__, transformers.__version__)"
+# 期望：2.5.1+cu121  4.57.1
+```
+
+固定 **torch 2.5.1+cu121** + **transformers 4.57.1**（勿用 δ-mem 全量 `requirements.txt`，会装 transformers 5.x 导致 `float8_e8m0fnu` 报错）。
+
+跑评测**必须**指定 venv Python：
+
+```bash
+export PYTHON_BIN=$SHINE_ROOT/third_party/delta-Mem/.venv/bin/python
+```
+
+默认 **不装 flash-attn**；`ATTN_IMPLEMENTATION=sdpa`。
 
 ### 安装失败排查
 
 | 现象 | 处理 |
 |------|------|
 | `NVIDIA driver ... too old (12010)` | `TORCH_INDEX=cu121 RECREATE_VENV=1 bash .../setup_delta_mem_hgx001.sh` |
-| `No module named 'flash_attn'` | 用最新 setup（已跳过 flash-attn verify） |
+| `No module named 'flash_attn'` | 用最新 setup（已跳过 flash-attn） |
+| `torch has no attribute float8_e8m0fnu` | transformers 5.x 与 cu121 torch 不兼容 → `RECREATE_VENV=1` 重跑 setup |
 | 已有 conda `MABench` | `USE_EXISTING_PYTHON=1 PYTHON_BIN=$(which python) bash .../setup_delta_mem_hgx001.sh` |
+| `-m: command not found` | `git pull` 后重跑；并 `export PYTHON_BIN=.../.venv/bin/python` |
 
 ## 跑评测 — 与 δ-mem 官方 **完全一致** 的全套
 
