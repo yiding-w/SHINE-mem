@@ -58,7 +58,6 @@ def main():
 
     result_a = exp.evaluate_lora(f"A_{args.num_updates}x{args.facts_per_update}_{args.merge_method}_lora", facts, lora_a, metanetwork, tokenizer, runtime_args, device)
     result_b = exp.evaluate_lora(f"B_1x{total_facts}_single_lora", facts, lora_b, metanetwork, tokenizer, runtime_args, device)
-    result_baseline = exp.evaluate_lora("baseline_no_lora_no_context", facts, None, metanetwork, tokenizer, runtime_args, device)
 
     payload = {
         "experiment": {
@@ -73,7 +72,6 @@ def main():
         "summary": {
             result_a["label"]: exp.summarize_result(result_a),
             result_b["label"]: exp.summarize_result(result_b),
-            result_baseline["label"]: exp.summarize_result(result_baseline),
         },
         "contexts": {
             result_a["label"]: contexts_a,
@@ -86,17 +84,8 @@ def main():
                     "context": context_b,
                 }
             ],
-            result_baseline["label"]: [
-                {
-                    "update_index": 0,
-                    "num_rows": 0,
-                    "num_facts": 0,
-                    "fact_ids": [],
-                    "context": "",
-                }
-            ],
         },
-        "results": [result_a, result_b, result_baseline],
+        "results": [result_a, result_b],
     }
 
     exp.write_payload(output_path, payload)

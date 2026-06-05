@@ -15,6 +15,7 @@ torch = None
 answer_question = None
 generate_context_lora = None
 move_lora_to_cpu = None
+extract_think_and_answer = None
 
 
 def resolve_path(path: str) -> Path:
@@ -57,12 +58,13 @@ def make_runtime_args(defaults: dict) -> Namespace:
 
 
 def bootstrap_runtime(runtime_config_path: str):
-    global torch, answer_question, generate_context_lora, move_lora_to_cpu
+    global torch, answer_question, generate_context_lora, move_lora_to_cpu, extract_think_and_answer
 
     import torch as torch_module
     from case_test import (
         answer_question as answer_question_func,
         build_cfg,
+        extract_think_and_answer as extract_think_and_answer_func,
         generate_context_lora as generate_context_lora_func,
         load_runtime,
         move_lora_to_cpu as move_lora_to_cpu_func,
@@ -73,6 +75,7 @@ def bootstrap_runtime(runtime_config_path: str):
     answer_question = answer_question_func
     generate_context_lora = generate_context_lora_func
     move_lora_to_cpu = move_lora_to_cpu_func
+    extract_think_and_answer = extract_think_and_answer_func
 
     runtime_args = make_runtime_args(load_yaml_defaults(runtime_config_path))
     device = resolve_device(runtime_args.device, runtime_args.gpu_id)
@@ -230,6 +233,95 @@ def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args,
             max_new_tokens=runtime_args.max_new_tokens,
             max_conversation_length=runtime_args.conversation_max_length,
             use_system_prompt=runtime_args.use_system_prompt,
+        )
+        is_correct = answer_matches(fact["answer"], result["answer"], result["raw"])
+        correct += int(is_correct)
+        rows.append(
+            {
+                "index": idx,
+                "id": fact["id"],
+                "person": fact["person"],
+                "question": fact["question"],
+                "expected_answer": fact["answer"],
+                "model_answer": result["answer"],
+                "raw": result["raw"],
+                "match_mode": "case_insensitive_substring",
+                "correct": is_correct,
+            }
+        )
+    return {
+        "label": label,
+        "correct": correct,
+        "total": len(facts),
+        "accuracy": correct / len(facts) if facts else 0.0,
+        "rows": rows,
+    }
+
+
+def answer_question_with_context(
+    context: str,
+    question: str,
+    metanetwork,
+    tokenizer,
+    device,
+    max_new_tokens: int,
+    max_conversation_length: int,
+):
+    user_prompt = (
+        "Context:\n"
+        f"{context}\n\n"
+        "Question:\n"
+        f"{question}\n\n"
+        "Answer the question directly."
+    )
+    input_enc = tokenizer.apply_chat_template(
+        [{"role": "user", "content": user_prompt}],
+        add_generation_prompt=True,
+        tokenize=True,
+        return_tensors="pt",
+        max_length=max_conversation_length,
+        truncation=True,
+        return_dict=True,
+        padding="max_length",
+        enable_thinking=False,
+    )
+    input_ids = input_enc["input_ids"].to(device)
+    attention_mask = input_enc["attention_mask"].to(device)
+    with torch.no_grad():
+        outputs = metanetwork.metamodel.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            do_sample=False,
+            ignore_mem_token=True,
+            loradict=None,
+        )
+    new_tokens = outputs[0, input_ids.shape[1]:]
+    raw_text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+    think_text, answer_text = extract_think_and_answer(raw_text)
+    return {
+        "question": question,
+        "think": think_text,
+        "answer": answer_text,
+        "raw": raw_text,
+    }
+
+
+def evaluate_in_context_baseline(label, facts, context: str, metanetwork, tokenizer, runtime_args, device):
+    LOGGER.info("Evaluating %s on %s questions with prompt context and no LoRA", label, len(facts))
+    rows = []
+    correct = 0
+    for idx, fact in enumerate(facts, start=1):
+        result = answer_question_with_context(
+            context=context,
+            question=fact["question"],
+            metanetwork=metanetwork,
+            tokenizer=tokenizer,
+            device=device,
+            max_new_tokens=runtime_args.max_new_tokens,
+            max_conversation_length=runtime_args.conversation_max_length,
         )
         is_correct = answer_matches(fact["answer"], result["answer"], result["raw"])
         correct += int(is_correct)
