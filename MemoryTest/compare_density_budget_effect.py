@@ -86,6 +86,7 @@ def main():
 
     result_c = exp.evaluate_lora(f"C_2x10_fact_only_{args.merge_method}_lora", target_facts, lora_c, metanetwork, tokenizer, runtime_args, device)
     result_d = exp.evaluate_lora(f"D_4x5_fact_plus_5_distractor_{args.merge_method}_lora", target_facts, lora_d, metanetwork, tokenizer, runtime_args, device)
+    result_baseline = exp.evaluate_lora("baseline_no_lora_no_context", target_facts, None, metanetwork, tokenizer, runtime_args, device)
 
     payload = {
         "experiment": {
@@ -105,12 +106,22 @@ def main():
         "summary": {
             result_c["label"]: exp.summarize_result(result_c),
             result_d["label"]: exp.summarize_result(result_d),
+            result_baseline["label"]: exp.summarize_result(result_baseline),
         },
         "contexts": {
             result_c["label"]: contexts_c,
             result_d["label"]: contexts_d,
+            result_baseline["label"]: [
+                {
+                    "update_index": 0,
+                    "num_rows": 0,
+                    "num_facts": 0,
+                    "fact_ids": [],
+                    "context": "",
+                }
+            ],
         },
-        "results": [result_c, result_d],
+        "results": [result_c, result_d, result_baseline],
     }
     exp.write_payload(output_path, payload)
     print(json.dumps(payload["summary"], indent=2, ensure_ascii=False))

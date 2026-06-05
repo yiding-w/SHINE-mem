@@ -214,7 +214,10 @@ def generate_merged_lora(
 
 
 def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args, device):
-    LOGGER.info("Evaluating %s on %s questions", label, len(facts))
+    if lora_dict is None:
+        LOGGER.info("Evaluating %s on %s questions without LoRA/context", label, len(facts))
+    else:
+        LOGGER.info("Evaluating %s on %s questions", label, len(facts))
     rows = []
     correct = 0
     for idx, fact in enumerate(facts, start=1):
