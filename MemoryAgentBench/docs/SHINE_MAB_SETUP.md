@@ -155,6 +155,32 @@ max_new_tokens: 128
 
 ## 8. 故障排查
 
+### `NVIDIA driver on your system is too old (found version 12010)`
+
+在 `HFLocalLongContextRunner` / `ShineMABRunner` 执行 `.to(cuda)` 加载 Qwen3-8B 时触发：当前 **PyTorch 是按较新的 CUDA（如 cu124）编译的**，而节点驱动只支持更旧的 CUDA（报错里的 `12010` 一般对应 **CUDA 12.1** 级别）。
+
+在计算节点上检查：
+
+```bash
+nvidia-smi          # 右上角 CUDA Version / Driver Version
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+```
+
+**处理办法（二选一）：**
+
+1. **换与驱动匹配的 PyTorch**（常见、无需 root）：
+
+```bash
+pip uninstall torch torchvision torchaudio -y
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+若 `nvidia-smi` 显示 CUDA 11.8，则用 `cu118`。
+
+2. **升级 GPU 驱动**（需管理员 / 换更新驱动的节点）。
+
+装好后重新跑 `python main.py ...`。集群上也可加载已用旧 CUDA 编译好的 conda 环境，避免混用 `cu124` 的 pip 包。
+
 | 现象 | 处理 |
 |------|------|
 | 找不到 `metanetwork.pth` | 设置 `shine_checkpoint_dir` 为具体 checkpoint 目录 |
