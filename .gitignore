@@ -6,6 +6,8 @@ checkpoints
 !MemoryAgentBench/bash_files/configs/shine_mab_eval.txt
 !MemoryAgentBench/requirements.txt
 !MemoryAgentBench/requirements-shine-mab.txt
+!MemoryAgentBench/requirements-delta-eval.txt
+!MemoryAgentBench/requirements-delta-eval.txt
 tmp.py
 outputs
 data
@@ -46,6 +48,10 @@ visualize.py
 visualize_loradict_statistics.py
 test_human.py
 generated_case_lora.pt
+
+# vendored clones (use setup_delta_mem_hgx001.sh)
+third_party/delta-Mem
+third_party/lm-evaluation-harness
 
 # MemoryAgentBench
 MemoryAgentBench/outputs

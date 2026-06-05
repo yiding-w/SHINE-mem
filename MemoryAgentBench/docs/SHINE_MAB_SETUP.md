@@ -3,7 +3,8 @@
 在 [MemoryAgentBench](https://arxiv.org/abs/2507.05257) 上评测论文四类能力：**AR / TTL / LRU / SF（Selective Forgetting）**。
 
 > **命名说明**：论文里第四类是 **Selective Forgetting (SF)**，评测集为 **FactConsolidation**（要求遗忘过时事实、采用更新后信息）。官方开源代码与 HuggingFace 把同一 split 标成 **Conflict_Resolution (CR)**，路径仍是 `configs/data_conf/Conflict_Resolution/Factconsolidation_*.yaml`，与 SF 是同一套任务，不是另一项能力。  
-> 另：[δ-mem (2605.12357)](https://arxiv.org/abs/2605.12357) 是在 MAB 等基准上评测的**记忆方法**论文，不是 SF 的定义；若要做方法对比需单独实现 δ-mem agent。
+> 另：[δ-mem (2605.12357)](https://arxiv.org/abs/2605.12357) 是在 MAB 等基准上评测的**记忆方法**论文，不是 SF 的定义。  
+> **与 δ-mem 论文数字对比**：请直接 clone 他们的代码跑 frozen baseline，见 [DELTA_MEM_HGX001.md](DELTA_MEM_HGX001.md)（`setup_delta_mem_hgx001.sh` + `run_delta_mem_hgx001.sh`）。本文档的 `main.py` 路径对齐的是 **MAB 官方**协议，不是 δ-mem 套件。
 
 ## 目录布局（服务器）
 
@@ -29,10 +30,13 @@ ls requirements.txt   # 若不存在，先 git pull 最新 yiding-w/SHINE-mem
 pip install antlr4-python3-runtime
 # 或临时绕过： export PYTHONNOUSERSITE=1
 
-# 仅跑 SHINE / Qwen 长上下文 baseline（推荐，依赖少）：
+# 仅跑 SHINE / Qwen 长上下文 baseline（推荐）：
 pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements-shine-mab.txt
 pip install hydra-core omegaconf scikit-learn transformers==4.57.1
+
+# SHINE_ROOT 必须是仓库根目录（含 LoraQwen.py），不是 MemoryAgentBench 子目录：
+export SHINE_ROOT=/ceph/home/muhan01/wyd/SHINE-mem
 
 # 跑完整 MAB（含 RAG、mem0 等，很重）：
 # pip install -r requirements.txt
@@ -151,6 +155,32 @@ max_new_tokens: 128
 `model.lora_r` 等见 `configs/Qwen3-8B-MAB.yaml`。
 
 ## 8. 故障排查
+
+### `NVIDIA driver on your system is too old (found version 12010)`
+
+在 `HFLocalLongContextRunner` / `ShineMABRunner` 执行 `.to(cuda)` 加载 Qwen3-8B 时触发：当前 **PyTorch 是按较新的 CUDA（如 cu124）编译的**，而节点驱动只支持更旧的 CUDA（报错里的 `12010` 一般对应 **CUDA 12.1** 级别）。
+
+在计算节点上检查：
+
+```bash
+nvidia-smi          # 右上角 CUDA Version / Driver Version
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+```
+
+**处理办法（二选一）：**
+
+1. **换与驱动匹配的 PyTorch**（常见、无需 root）：
+
+```bash
+pip uninstall torch torchvision torchaudio -y
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+若 `nvidia-smi` 显示 CUDA 11.8，则用 `cu118`。
+
+2. **升级 GPU 驱动**（需管理员 / 换更新驱动的节点）。
+
+装好后重新跑 `python main.py ...`。集群上也可加载已用旧 CUDA 编译好的 conda 环境，避免混用 `cu124` 的 pip 包。
 
 | 现象 | 处理 |
 |------|------|
