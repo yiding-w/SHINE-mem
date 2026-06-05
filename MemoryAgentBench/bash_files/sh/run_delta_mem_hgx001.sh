@@ -57,13 +57,15 @@ fi
 
 mkdir -p "${OUTPUT_ROOT}" "${LOG_ROOT}"
 
-# 若只绑了部分 GPU，自动缩小并行度
-if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-  _ngpu=$(echo "${CUDA_VISIBLE_DEVICES}" | awk -F, '{print NF}')
-  if [[ "${_ngpu}" -lt "${NPROC_PER_NODE}" ]]; then
-    NPROC_PER_NODE="${_ngpu}"
-  fi
+# 8 卡节点：未指定时默认用 0–7（与 δ-mem 官方 torchrun --nproc_per_node 8 一致）
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 fi
+_ngpu=$(echo "${CUDA_VISIBLE_DEVICES}" | awk -F, '{print NF}')
+if [[ "${_ngpu}" -lt "${NPROC_PER_NODE}" ]]; then
+  NPROC_PER_NODE="${_ngpu}"
+fi
+echo "GPUs: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} | torchrun nproc=${NPROC_PER_NODE} | ATTN=${ATTN_IMPLEMENTATION}"
 
 OFFLINE_FLAG=()
 [[ "${LOCAL_FILES_ONLY}" == "1" ]] && OFFLINE_FLAG=(--local-files-only)
