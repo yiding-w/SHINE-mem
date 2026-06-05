@@ -1,5 +1,5 @@
-# Minimal deps for SHINE + HF-local agents on MemoryAgentBench (no RAG/mem0/cognee/hipporag).
-# Install SHINE stack separately (see ../README.md): torch, transformers, hydra-core, omegaconf, scikit-learn
+# Run MemoryAgentBench main.py with SHINE_agent or HF_local_long_context_agent only.
+# Parent repo (SHINE_ROOT) also needs: hydra-core, omegaconf, scikit-learn, transformers==4.57.1
 
 numpy<2
 pandas
@@ -12,3 +12,8 @@ openai
 langchain-core
 transformers
 accelerate
+
+# MAB eval pipeline (utils/eval_*.py, conversation_creator)
+nltk
+rouge_score
+editdistance

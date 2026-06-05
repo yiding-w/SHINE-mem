@@ -29,10 +29,13 @@ ls requirements.txt   # 若不存在，先 git pull 最新 yiding-w/SHINE-mem
 pip install antlr4-python3-runtime
 # 或临时绕过： export PYTHONNOUSERSITE=1
 
-# 仅跑 SHINE / Qwen 长上下文 baseline（推荐，依赖少）：
+# 仅跑 SHINE / Qwen 长上下文 baseline（推荐）：
 pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements-shine-mab.txt
 pip install hydra-core omegaconf scikit-learn transformers==4.57.1
+
+# SHINE_ROOT 必须是仓库根目录（含 LoraQwen.py），不是 MemoryAgentBench 子目录：
+export SHINE_ROOT=/ceph/home/muhan01/wyd/SHINE-mem
 
 # 跑完整 MAB（含 RAG、mem0 等，很重）：
 # pip install -r requirements.txt
