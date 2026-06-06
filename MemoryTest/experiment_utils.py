@@ -127,6 +127,22 @@ def weighted_average_lora(old_lora: Any, new_lora: Any, new_count: int):
     raise TypeError(f"Unsupported LoRA value type for averaging: {type(old_lora)!r}")
 
 
+def sum_lora(old_lora: Any, new_lora: Any):
+    if old_lora is None or new_lora is None:
+        if old_lora is not None or new_lora is not None:
+            raise ValueError("LoRA structures do not match: one side is None and the other is not.")
+        return None
+    if torch.is_tensor(old_lora):
+        return old_lora + new_lora
+    if isinstance(old_lora, dict):
+        return {key: sum_lora(old_lora[key], new_lora[key]) for key in old_lora}
+    if isinstance(old_lora, list):
+        return [sum_lora(old_item, new_item) for old_item, new_item in zip(old_lora, new_lora)]
+    if isinstance(old_lora, tuple):
+        return tuple(sum_lora(old_item, new_item) for old_item, new_item in zip(old_lora, new_lora))
+    raise TypeError(f"Unsupported LoRA value type for summation: {type(old_lora)!r}")
+
+
 def concat_average_lora(old_lora: Any, new_lora: Any, new_count: int):
     if old_lora is None or new_lora is None:
         if old_lora is not None or new_lora is not None:
@@ -160,6 +176,8 @@ def concat_average_lora(old_lora: Any, new_lora: Any, new_count: int):
 def merge_lora(old_lora: Any, new_lora: Any, new_count: int, merge_method: str):
     if merge_method == "average":
         return weighted_average_lora(old_lora, new_lora, new_count)
+    if merge_method == "sum":
+        return sum_lora(old_lora, new_lora)
     if merge_method == "concat":
         return concat_average_lora(old_lora, new_lora, new_count)
     raise ValueError(f"Unknown merge method: {merge_method}")

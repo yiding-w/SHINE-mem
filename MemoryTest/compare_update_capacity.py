@@ -18,7 +18,7 @@ def parse_args():
     parser.add_argument("--facts-per-update", type=int, default=5, help="Facts per update for condition A.")
     parser.add_argument("--save-loras", action="store_true", help="Save A and B generated LoRA dictionaries next to the result JSON.")
     parser.add_argument("--log-context", action="store_true", help="Print the exact A/B contexts before generating LoRA.")
-    parser.add_argument("--merge-method", choices=["average", "concat"], default="average", help="How to merge LoRAs across repeated updates.")
+    parser.add_argument("--merge-method", choices=["average", "sum", "concat"], default="average", help="How to merge LoRAs across repeated updates.")
     return parser.parse_args()
 
 
