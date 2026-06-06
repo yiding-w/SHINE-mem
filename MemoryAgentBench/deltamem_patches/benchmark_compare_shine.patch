@@ -6,7 +6,7 @@ index cda0d67..6bf1195 100644
      parser.add_argument("--skip-base", action="store_true")
      parser.add_argument("--skip-delta", action="store_true")
      parser.add_argument("--skip-lora", action="store_true")
-+    parser.add_argument("--skip-shine", action="store_true", default=True)
++    parser.add_argument("--skip-shine", action=argparse.BooleanOptionalAction, default=True)
 +    parser.add_argument(
 +        "--shine-root",
 +        type=Path,

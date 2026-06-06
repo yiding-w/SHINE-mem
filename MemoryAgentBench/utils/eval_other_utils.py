@@ -7,6 +7,7 @@ import os
 import string
 import re
 import json
+from pathlib import Path
 from collections import Counter
 import numpy as np
 import nltk
@@ -557,11 +558,24 @@ def _process_ruler_memory_merging_dataset(output, answer, dataset_config):
         return default_post_process(output, answer)
 
 
+def _recsys_entity_mapping_path():
+    """Resolve entity2id.json under MemoryAgentBench/processed_data/Recsys_Redial/."""
+    env_root = os.environ.get("MAB_ROOT") or os.environ.get("MEMORY_AGENT_BENCH_ROOT")
+    base = env_root if env_root else str(Path(__file__).resolve().parents[1])
+    return os.path.join(base, "processed_data", "Recsys_Redial", "entity2id.json")
+
+
 def _process_recsys_dataset(output, answer):
     """Process recommendation system dataset outputs."""
     # Load movie entity mapping
-    entity_mapping_path = os.path.join('./processed_data/Recsys_Redial/', 'entity2id.json')
-    name_to_id = json.load(open(entity_mapping_path))
+    entity_mapping_path = _recsys_entity_mapping_path()
+    if not os.path.isfile(entity_mapping_path):
+        raise FileNotFoundError(
+            f"{entity_mapping_path} not found. "
+            "Run: bash MemoryAgentBench/bash_files/sh/download_mab_recsys_entity2id.sh"
+        )
+    with open(entity_mapping_path) as mapping_file:
+        name_to_id = json.load(mapping_file)
     id_to_name = {entity_id: extract_movie_name(name) for name, entity_id in name_to_id.items()}
 
     # Get movie candidates and parse prediction

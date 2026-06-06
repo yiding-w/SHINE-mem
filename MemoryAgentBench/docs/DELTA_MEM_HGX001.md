@@ -50,6 +50,19 @@ export PYTHON_BIN=$SHINE_ROOT/third_party/delta-Mem/.venv/bin/python
 | `torch has no attribute float8_e8m0fnu` | transformers 5.x 与 cu121 torch 不兼容 → `RECREATE_VENV=1` 重跑 setup |
 | 已有 conda `MABench` | `USE_EXISTING_PYTHON=1 PYTHON_BIN=$(which python) bash .../setup_delta_mem_hgx001.sh` |
 | `-m: command not found` | `git pull` 后重跑；并 `export PYTHON_BIN=.../.venv/bin/python` |
+| `entity2id.json` not found（recsys） | `bash bash_files/sh/download_mab_recsys_entity2id.sh`（setup/run 脚本已自动调用） |
+
+### recsys 依赖（完整 MAB 必装）
+
+`memory_agent_bench` 含 `recsys_redial_full`，评分需要：
+
+`MemoryAgentBench/processed_data/Recsys_Redial/entity2id.json`
+
+来源：[ai-hyz/MemoryAgentBench](https://huggingface.co/datasets/ai-hyz/MemoryAgentBench) 根目录 `entity2id.json`。一键下载：
+
+```bash
+bash $SHINE_ROOT/MemoryAgentBench/bash_files/sh/download_mab_recsys_entity2id.sh
+```
 
 ## 跑评测 — 与 δ-mem 官方 **完全一致** 的全套
 
@@ -67,7 +80,8 @@ export PYTHON_BIN=$SHINE_ROOT/third_party/delta-Mem/.venv/bin/python
 
 ```bash
 export SHINE_ROOT=/ceph/home/muhan01/wyd/SHINE-mem
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7   # 官方 8 卡；单卡则 NPROC_PER_NODE=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3   # 默认 4 卡；改 8 卡: NUM_GPUS=8
+export NUM_GPUS=4
 export PYTHON_BIN=$SHINE_ROOT/third_party/delta-Mem/.venv/bin/python
 
 # 复现 frozen Qwen3-8B 全套（默认，不是 smoke）
@@ -95,7 +109,7 @@ bash bash_files/sh/run_delta_mem_hgx001.sh all
 | 变量 | 默认 |
 |------|------|
 | `BASE_MODEL` | `/ceph/home/muhan01/huggingfacemodels/Qwen3-8B` |
-| `NPROC_PER_NODE` | `8`（单卡自动缩小） |
+| `NUM_GPUS` / `NPROC_PER_NODE` | `4`（作业只分到更少卡时自动缩小） |
 | `ATTN_IMPLEMENTATION` | `sdpa` |
 | `SHINE_AGENT_CONFIG` | `SHINE_agent_qwen3_8b_deltamem.yaml`（`T=0.4` 与官方套件一致） |
 
