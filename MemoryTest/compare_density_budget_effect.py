@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--distractors-per-update", type=int, default=1)
     parser.add_argument("--save-loras", action="store_true")
     parser.add_argument("--log-context", action="store_true")
-    parser.add_argument("--merge-method", choices=["average", "concat"], default="average")
+    parser.add_argument("--merge-method", choices=["average", "sum", "concat"], default="average")
     return parser.parse_args()
 
 
