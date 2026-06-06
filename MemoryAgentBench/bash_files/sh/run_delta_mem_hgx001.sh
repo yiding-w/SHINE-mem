@@ -44,7 +44,8 @@ SEED="${SEED:-42}"
 # 无 flash-attn 时用 sdpa；有 flash-attn 可设 flash_attention_2
 ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-0}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+NUM_GPUS="${NUM_GPUS:-4}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-${NUM_GPUS}}"
 
 SHINE_AGENT_CONFIG="${SHINE_AGENT_CONFIG:-${MAB_ROOT}/configs/agent_conf/SHINE_Agents/SHINE_agent_qwen3_8b_deltamem.yaml}"
 LOCOMO_DATA_FILE="${LOCOMO_DATA_FILE:-${DELTA_MEM_ROOT}/data/locomo10.json}"
@@ -62,25 +63,30 @@ if [[ "${LOCAL_FILES_ONLY}" == "1" ]]; then
 fi
 
 mkdir -p "${OUTPUT_ROOT}" "${LOG_ROOT}"
+bash "${MAB_ROOT}/bash_files/sh/download_mab_recsys_entity2id.sh"
 echo "PYTHON_BIN=${PYTHON_BIN}"
 if ! PYTHONPATH="${DELTA_MEM_ROOT}:${SHINE_ROOT}:${MAB_ROOT}" "${PYTHON_BIN}" -c "import torch, transformers; from deltamem.eval import benchmark_compare; print('preflight OK', torch.__version__, transformers.__version__)"; then
   echo "Fix env: RECREATE_VENV=1 TORCH_INDEX=cu121 bash ${MAB_ROOT}/bash_files/sh/setup_delta_mem_hgx001.sh" >&2
   exit 1
 fi
 
-# 8 卡：未指定 CUDA_VISIBLE_DEVICES 时默认 0–7；或显式 USE_ALL_8_GPUS=1
-if [[ "${USE_ALL_8_GPUS:-0}" == "1" ]]; then
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-elif [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+# 默认 4 卡（0–3）。申请 4-GPU 作业后调度器通常会设 CUDA_VISIBLE_DEVICES=0,1,2,3
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  if [[ "${NUM_GPUS}" -ge 8 ]]; then
+    export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  elif [[ "${NUM_GPUS}" -ge 4 ]]; then
+    export CUDA_VISIBLE_DEVICES=0,1,2,3
+  else
+    export CUDA_VISIBLE_DEVICES=0
+  fi
 fi
 _ngpu=$(echo "${CUDA_VISIBLE_DEVICES}" | awk -F, '{print NF}')
 if [[ "${_ngpu}" -lt "${NPROC_PER_NODE}" ]]; then
   NPROC_PER_NODE="${_ngpu}"
 fi
-echo "GPUs: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} | torchrun nproc=${NPROC_PER_NODE} | ATTN=${ATTN_IMPLEMENTATION}"
-if [[ "${_ngpu}" -lt 8 ]]; then
-  echo "NOTE: 当前仅 ${_ngpu} 张卡可见。要 8 卡并行请申请 8-GPU 作业后运行，或节点空闲时: USE_ALL_8_GPUS=1 bash ..."
+echo "GPUs: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} | torchrun nproc=${NPROC_PER_NODE} (target NUM_GPUS=${NUM_GPUS}) | ATTN=${ATTN_IMPLEMENTATION}"
+if [[ "${_ngpu}" -lt "${NUM_GPUS}" ]]; then
+  echo "NOTE: 仅 ${_ngpu} 张卡可见，期望 ${NUM_GPUS} 张。请用 4-GPU 作业提交，例如: srun --gres=gpu:4 ... 或 export CUDA_VISIBLE_DEVICES=0,1,2,3" >&2
 fi
 
 OFFLINE_FLAG=()

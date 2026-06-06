@@ -8,6 +8,7 @@ outputs
 outputs_4o
 outputs_timecompute
 raw_dataset
+processed_data
 logs
 test
 mirix_wrapper
