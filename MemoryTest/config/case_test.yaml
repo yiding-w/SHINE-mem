@@ -16,9 +16,10 @@ seed: 42
 
 context_max_length: 1550
 conversation_max_length: 5000
-max_new_tokens: 128
+max_new_tokens: 512
 
 lora_r: 8
 metalora_r: 128
 metanetwork_layers: 4
 use_system_prompt: false
+enable_thinking: false

@@ -54,6 +54,7 @@ def make_runtime_args(defaults: dict) -> Namespace:
         metalora_r=int(defaults.get("metalora_r", 128)),
         metanetwork_layers=int(defaults.get("metanetwork_layers", 4)),
         use_system_prompt=bool(defaults.get("use_system_prompt", False)),
+        enable_thinking=bool(defaults.get("enable_thinking", False)),
     )
 
 
@@ -168,11 +169,10 @@ def build_context(rows: list[dict]) -> str:
     return "\n".join(row["text"] for row in rows)
 
 
-def answer_matches(expected_answer: str, model_answer: str, raw_output: str) -> bool:
+def answer_matches(expected_answer: str, model_answer: str) -> bool:
     expected = str(expected_answer).casefold()
     answer = str(model_answer).casefold()
-    raw = str(raw_output).casefold()
-    return expected in answer or expected in raw
+    return expected in answer
 
 
 def generate_merged_lora(
@@ -233,8 +233,9 @@ def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args,
             max_new_tokens=runtime_args.max_new_tokens,
             max_conversation_length=runtime_args.conversation_max_length,
             use_system_prompt=runtime_args.use_system_prompt,
+            enable_thinking=runtime_args.enable_thinking,
         )
-        is_correct = answer_matches(fact["answer"], result["answer"], result["raw"])
+        is_correct = answer_matches(fact["answer"], result["answer"])
         correct += int(is_correct)
         rows.append(
             {
@@ -245,7 +246,7 @@ def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args,
                 "expected_answer": fact["answer"],
                 "model_answer": result["answer"],
                 "raw": result["raw"],
-                "match_mode": "case_insensitive_substring",
+                "match_mode": "case_insensitive_answer_substring",
                 "correct": is_correct,
             }
         )
@@ -266,6 +267,7 @@ def answer_question_with_context(
     device,
     max_new_tokens: int,
     max_conversation_length: int,
+    enable_thinking: bool,
 ):
     user_prompt = (
         "Context:\n"
@@ -283,7 +285,7 @@ def answer_question_with_context(
         truncation=True,
         return_dict=True,
         padding="max_length",
-        enable_thinking=False,
+        enable_thinking=enable_thinking,
     )
     input_ids = input_enc["input_ids"].to(device)
     attention_mask = input_enc["attention_mask"].to(device)
@@ -322,8 +324,9 @@ def evaluate_in_context_baseline(label, facts, context: str, metanetwork, tokeni
             device=device,
             max_new_tokens=runtime_args.max_new_tokens,
             max_conversation_length=runtime_args.conversation_max_length,
+            enable_thinking=runtime_args.enable_thinking,
         )
-        is_correct = answer_matches(fact["answer"], result["answer"], result["raw"])
+        is_correct = answer_matches(fact["answer"], result["answer"])
         correct += int(is_correct)
         rows.append(
             {
@@ -334,7 +337,7 @@ def evaluate_in_context_baseline(label, facts, context: str, metanetwork, tokeni
                 "expected_answer": fact["answer"],
                 "model_answer": result["answer"],
                 "raw": result["raw"],
-                "match_mode": "case_insensitive_substring",
+                "match_mode": "case_insensitive_answer_substring",
                 "correct": is_correct,
             }
         )

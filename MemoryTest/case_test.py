@@ -39,6 +39,9 @@ MINIMAL_CHAT_TEMPLATE = """{%- for message in messages %}
 {%- endfor %}
 {%- if add_generation_prompt %}
 {{- '<|im_start|>assistant\n' }}
+{%- if enable_thinking is defined and not enable_thinking %}
+{{- '<think>\n\n</think>\n\n' }}
+{%- endif %}
 {%- endif %}
 """
 
@@ -131,7 +134,9 @@ def parse_args() -> argparse.Namespace:
     _add_configurable_argument(parser, defaults, "--metalora-r", type=int, config_key="metalora_r", help="Meta-LoRA rank used by the SHINE checkpoint.")
     _add_configurable_argument(parser, defaults, "--metanetwork-layers", type=int, config_key="metanetwork_layers", help="Number of metanetwork transformer layers.")
     parser.set_defaults(use_system_prompt=bool(defaults.get("use_system_prompt", False)))
+    parser.set_defaults(enable_thinking=bool(defaults.get("enable_thinking", False)))
     parser.add_argument("--use-system-prompt", action="store_true", help="Optionally prepend a short system prompt.")
+    parser.add_argument("--enable-thinking", action="store_true", help="Allow Qwen thinking output during answer generation.")
     return parser.parse_args()
 
 
@@ -368,6 +373,7 @@ def answer_question(
     max_new_tokens: int,
     max_conversation_length: int,
     use_system_prompt: bool,
+    enable_thinking: bool,
 ):
     messages = build_initial_messages(use_system_prompt)
     messages.append({"role": "user", "content": question})
@@ -380,7 +386,7 @@ def answer_question(
         truncation=True,
         return_dict=True,
         padding="max_length",
-        enable_thinking=False,
+        enable_thinking=enable_thinking,
     )
     input_ids = input_enc["input_ids"].to(device)
     attention_mask = input_enc["attention_mask"].to(device)
@@ -440,6 +446,7 @@ def main():
         max_new_tokens=args.max_new_tokens,
         max_conversation_length=args.conversation_max_length,
         use_system_prompt=args.use_system_prompt,
+        enable_thinking=args.enable_thinking,
     )
 
     print(f"Question: {result['question']}")
