@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
 
 def generate_answer(model, tokenizer, lora_dict, question: str, device, max_new_tokens: int, max_length: int) -> dict:
     from MemoryTest.case_test import extract_think_and_answer
-    from MemoryTest.data.prompt_templates import question_prompt
+    from MemoryTest.prepare_data.prompt_templates import question_prompt
 
     enc = tokenizer.apply_chat_template(
         [{"role": "user", "content": question_prompt(question)}],

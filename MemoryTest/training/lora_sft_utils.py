@@ -8,7 +8,7 @@ from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
-from MemoryTest.data.prompt_templates import lora_sft_examples_for_fact
+from MemoryTest.prepare_data.prompt_templates import lora_sft_examples_for_fact
 
 
 MEMORY_TEST_ROOT = Path(__file__).resolve().parents[1]

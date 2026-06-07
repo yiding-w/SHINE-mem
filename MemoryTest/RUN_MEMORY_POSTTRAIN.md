@@ -7,8 +7,8 @@ Run these commands from the repository root on the server. The local workspace d
 The runnable scripts are grouped by responsibility:
 
 ```text
-MemoryTest/data/prepare_memory_data.py
-MemoryTest/data/generate_capacity_data.py
+MemoryTest/prepare_data/prepare_memory_data.py
+MemoryTest/prepare_data/generate_capacity_data.py
 MemoryTest/training/run_lora_upper_bound.py
 MemoryTest/training/posttrain_shine_memory.py
 MemoryTest/evaluation/eval_shine_memory.py
@@ -21,7 +21,7 @@ Prefer `python -m ...` from the repository root so imports resolve consistently 
 ## 1. Prepare Splits
 
 ```bash
-python -m MemoryTest.data.prepare_memory_data \
+python -m MemoryTest.prepare_data.prepare_memory_data \
   --input MemoryTest/json_data/semantic_facts.json \
   --seed 42 \
   --generate-synthetic-train 5000

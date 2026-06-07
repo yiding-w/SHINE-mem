@@ -1,6 +1,6 @@
 #!/bin/bash
 
-python -m MemoryTest.data.prepare_memory_data \
+python -m MemoryTest.prepare_data.prepare_memory_data \
   --input MemoryTest/json_data/semantic_facts.json \
   --seed 42 \
   --generate-synthetic-train 100

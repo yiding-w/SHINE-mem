@@ -16,5 +16,5 @@ The comparison scripts still default to `MemoryTest/json_data/semantic_facts.jso
 Capacity source data generation now lives at:
 
 ```bash
-python -m MemoryTest.data.generate_capacity_data
+python -m MemoryTest.prepare_data.generate_capacity_data
 ```

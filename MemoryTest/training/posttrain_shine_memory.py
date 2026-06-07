@@ -10,7 +10,7 @@ from pathlib import Path
 
 import torch
 
-from MemoryTest.data.prompt_templates import build_context
+from MemoryTest.prepare_data.prompt_templates import build_context
 from MemoryTest.evaluation.metrics import make_eval_row, summarize_examples
 from MemoryTest.training.lora_sft_utils import load_runtime_args
 from MemoryTest.training.shine_train_utils import (
@@ -145,7 +145,7 @@ def compute_contrastive_loss(context_rows, qa_rows, lora_dict, metanetwork, toke
 
 def generate_answer(metanetwork, tokenizer, lora_dict, question: str, device, max_new_tokens: int, max_length: int):
     from MemoryTest.case_test import extract_think_and_answer
-    from MemoryTest.data.prompt_templates import question_prompt
+    from MemoryTest.prepare_data.prompt_templates import question_prompt
 
     enc = tokenizer.apply_chat_template(
         [{"role": "user", "content": question_prompt(question)}],

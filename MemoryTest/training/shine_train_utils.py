@@ -8,7 +8,7 @@ from typing import Any
 
 import torch
 
-from MemoryTest.data.prompt_templates import (
+from MemoryTest.prepare_data.prompt_templates import (
     build_context,
     format_answer,
     question_prompt,

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import torch
 
-from MemoryTest.data.prompt_templates import build_context, question_prompt
+from MemoryTest.prepare_data.prompt_templates import build_context, question_prompt
 from MemoryTest.evaluation.metrics import make_eval_row, relation_breakdown, summarize_examples, wrong_examples
 from MemoryTest.training.lora_sft_utils import load_runtime_args, read_facts, resolve_path
 
