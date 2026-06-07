@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--eval-every", type=int, default=500)
     parser.add_argument("--eval-trials", type=int, default=20)
+    parser.add_argument("--eval-fact-counts", type=int, nargs="+", default=None)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--answer-max-length", type=int, default=1024)
@@ -70,6 +71,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--gpu-id", type=int, default=None)
     return parser.parse_args()
+
+
+def usable_fact_counts(requested_counts: list[int], rows: list[dict], split_name: str) -> list[int]:
+    usable = [count for count in requested_counts if count <= len(rows)]
+    dropped = [count for count in requested_counts if count > len(rows)]
+    if dropped:
+        LOGGER.warning(
+            "Dropping %s fact-counts %s because %s has only %s rows.",
+            split_name,
+            dropped,
+            split_name,
+            len(rows),
+        )
+    if not usable:
+        raise ValueError(f"No usable {split_name} fact-counts for {len(rows)} rows. Requested: {requested_counts}")
+    return usable
 
 
 def build_training_records(context_rows: list[dict], qa_rows: list[dict], use_contrastive: bool, use_reconstruction: bool) -> list[dict]:
@@ -253,6 +270,8 @@ def generate_answer(metanetwork, tokenizer, lora_dict, question: str, device, ma
 def evaluate_current(metanetwork, metalora, tokenizer, cfg, rows, args, runtime_args, device, rng) -> dict:
     metanetwork.eval()
     eval_rows = []
+    requested_counts = args.eval_fact_counts if args.eval_fact_counts is not None else args.fact_counts
+    eval_fact_counts = usable_fact_counts(requested_counts, rows, "val")
     progress = tqdm(
         range(args.eval_trials),
         desc="posttrain val",
@@ -261,7 +280,7 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, rows, args, runtime_
     ) if tqdm is not None else range(args.eval_trials)
     with torch.no_grad():
         for trial in progress:
-            context_rows, qa_rows = sample_context(rows, args.fact_counts, args.qa_per_context, rng)
+            context_rows, qa_rows = sample_context(rows, eval_fact_counts, args.qa_per_context, rng)
             context = build_context(context_rows, context_format=args.context_format)
             from MemoryTest.case_test import generate_context_lora
 
@@ -337,6 +356,24 @@ def main() -> None:
             loss = loss + args.contrastive_weight * contrastive_loss
         if args.use_reconstruction:
             loss = loss + args.recon_weight * recon_loss
+
+        if not torch.isfinite(loss):
+            bad_record = {
+                "step": step,
+                "loss": float(loss.detach().cpu()),
+                "answer_loss": float(answer_loss.detach().cpu()),
+                "contrastive_loss": float(contrastive_loss.detach().cpu()) if contrastive_loss is not None else None,
+                "reconstruction_loss": float(recon_loss.detach().cpu()) if recon_loss is not None else None,
+                "context_fact_ids": [row["id"] for row in context_rows],
+                "qa_fact_ids": [row["id"] for row in qa_rows],
+                "context_format": context_format,
+                "nonfinite": True,
+            }
+            append_jsonl(log_path, bad_record)
+            raise FloatingPointError(
+                f"Non-finite loss at step {step}. "
+                "Try lowering --learning-rate, reducing --qa-per-context, or disabling/reweighting auxiliary losses."
+            )
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
