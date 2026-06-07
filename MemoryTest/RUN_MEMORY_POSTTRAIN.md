@@ -135,14 +135,20 @@ Single-card 80GB memory-friendly start:
 ```bash
 python -m MemoryTest.training.posttrain_shine_memory \
   --config MemoryTest/config/case_test.yaml \
-  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --checkpoint-dir /home/wangyiding/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1 \
   --train-file MemoryTest/json_data/splits/semantic_train_augmented.json \
   --val-file MemoryTest/json_data/splits/semantic_val.json \
   --output-dir MemoryTest/checkpoints/shine_memory_posttrain \
   --fact-counts 1 2 4 8 12 \
-  --qa-per-context 1 \
+  --qa-per-context 4 \
+  --max-steps 2000 \
+  --learning-rate 1e-5 \
+  --eval-every 500 \
   --answer-max-length 256 \
-  --context-max-length 768 \
+  --context-max-length 1024 \
+  --conversation-max-length 512 \
+  --use-contrastive \
+  --use-reconstruction \
   --torch-dtype bf16 \
   --use-gradient-checkpoint
 ```
