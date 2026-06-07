@@ -50,7 +50,6 @@ def load_runtime_args(runtime_config_path: str | Path) -> Namespace:
 def load_frozen_lora_model(runtime_config_path: str | Path, rank: int, device_name: str | None = None, gpu_id: int | None = None):
     import torch
     from MemoryTest.case_test import build_cfg, load_tokenizer, resolve_device
-    from utils.myfreeze import freeze
     from utils.myinit import _import_class
     from utils.myseed import set_seed
 
@@ -77,7 +76,7 @@ def load_frozen_lora_model(runtime_config_path: str | Path, rank: int, device_na
     tokenizer = load_tokenizer(cfg)
     model = MetaModelCls.from_pretrained(cfg.model.model_from, config=config)
     model.resize_token_embeddings(len(tokenizer))
-    freeze(model)
+    freeze_backbone_for_lora_upper_bound(model)
     model.to(device)
     model.train()
 
@@ -85,6 +84,11 @@ def load_frozen_lora_model(runtime_config_path: str | Path, rank: int, device_na
         model.set_generate_func(cfg.metanetwork.method)
     lora_dict = model.init_lora_dict(int(rank), scale=cfg.metanetwork.transformer_cfg.scale, device=device)
     return args, cfg, device, model, tokenizer, lora_dict
+
+
+def freeze_backbone_for_lora_upper_bound(model) -> None:
+    for param in model.parameters():
+        param.requires_grad_(False)
 
 
 def iter_lora_tensors(tree: Any):
