@@ -164,6 +164,9 @@ class Metanetwork(nn.Module):
     def generate_lora_dict(self, evidence_ids, evidence_attention_mask, metalora, use_gradient_checkpoint = False, return_plain = False) -> dict:
         outputs = self.metamodel(input_ids=evidence_ids, attention_mask=evidence_attention_mask, loradict=metalora, use_gradient_checkpoint=use_gradient_checkpoint)
         memory_states = outputs.memory_states
+        target_dtype = next(self.metanetwork.parameters()).dtype
+        if memory_states.dtype != target_dtype:
+            memory_states = memory_states.to(dtype=target_dtype)
         plain_output = self.metanetwork(memory_states)  # (batch_size, output_dim)
         loradict = self.metamodel.generate_lora_dict(self.lora_r, scale=self.scale, plain_tensor=plain_output)
         return loradict if not return_plain else (loradict, plain_output)
