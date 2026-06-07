@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conversation-max-length", type=int, default=None)
     parser.add_argument("--torch-dtype", choices=["auto", "bf16", "bfloat16", "fp16", "float16", "fp32", "float32"], default="bf16")
     parser.add_argument("--use-gradient-checkpoint", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use-answer-gradient-checkpoint", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--empty-cache-every", type=int, default=0)
     parser.add_argument("--use-contrastive", action="store_true")
     parser.add_argument("--contrastive-weight", type=float, default=0.5)
@@ -152,7 +153,7 @@ def load_shine_for_training(args: argparse.Namespace):
         metalora = cast_floating_tensors(metalora, dtype)
     if hasattr(metanetwork.metamodel, "config"):
         metanetwork.metamodel.config.use_cache = False
-    if hasattr(metanetwork.metamodel, "gradient_checkpointing_enable") and args.use_gradient_checkpoint:
+    if hasattr(metanetwork.metamodel, "gradient_checkpointing_enable") and args.use_answer_gradient_checkpoint:
         metanetwork.metamodel.gradient_checkpointing_enable()
     metanetwork.train()
     trainable = set_posttrain_requires_grad(metanetwork, metalora)
@@ -326,7 +327,7 @@ def main() -> None:
             tokenizer,
             device,
             args.answer_max_length,
-            use_gradient_checkpoint=args.use_gradient_checkpoint,
+            use_gradient_checkpoint=args.use_answer_gradient_checkpoint,
         )
         answer_loss = category_losses["answer"]
         loss = answer_loss
