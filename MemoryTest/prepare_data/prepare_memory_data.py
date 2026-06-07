@@ -317,6 +317,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--test-ratio", type=float, default=0.2)
     parser.add_argument("--generate-synthetic-train", type=int, default=0)
+    parser.add_argument("--generate-synthetic-test", type=int, default=0)
     return parser.parse_args()
 
 
@@ -370,8 +371,14 @@ def make_unique_person(rng: random.Random, used_people: set[str]) -> str:
     )
 
 
-def generate_synthetic_rows(count: int, seed: int, existing_rows: list[dict], protected_rows: list[dict]) -> list[dict]:
-    rng = random.Random(seed + 1009)
+def generate_synthetic_rows(
+    count: int,
+    seed: int,
+    existing_rows: list[dict],
+    protected_rows: list[dict],
+    id_prefix: str = "synthetic_semantic",
+) -> list[dict]:
+    rng = random.Random(seed)
     protected_people = {row["person"] for row in protected_rows}
     protected_answers = {str(row["answer"]).casefold() for row in protected_rows}
     used_people = {row["person"] for row in existing_rows} | protected_people
@@ -391,7 +398,7 @@ def generate_synthetic_rows(count: int, seed: int, existing_rows: list[dict], pr
         question = rng.choice(spec["question"]).format(**template_args)
         generated.append(
             {
-                "id": f"synthetic_semantic_{idx + 1:05d}",
+                "id": f"{id_prefix}_{idx + 1:05d}",
                 "person": person,
                 "attribute": attribute,
                 "text": text,
@@ -404,29 +411,42 @@ def generate_synthetic_rows(count: int, seed: int, existing_rows: list[dict], pr
     return generated
 
 
-def split_meta(seed: int, train: list[dict], val: list[dict], test: list[dict], synthetic: list[dict]) -> dict:
+def split_meta(
+    seed: int,
+    train: list[dict],
+    val: list[dict],
+    test: list[dict],
+    synthetic_train: list[dict],
+    synthetic_test: list[dict],
+) -> dict:
     all_rows = train + val + test
+    test_augmented = test + synthetic_test
     return {
         "seed": seed,
         "counts": {
             "train": len(train),
             "val": len(val),
             "test": len(test),
-            "synthetic": len(synthetic),
-            "train_augmented": len(train) + len(synthetic),
+            "synthetic_train": len(synthetic_train),
+            "synthetic_test": len(synthetic_test),
+            "train_augmented": len(train) + len(synthetic_train),
+            "test_augmented": len(test_augmented),
         },
         "persons": {
             "train": sorted({row["person"] for row in train}),
             "val": sorted({row["person"] for row in val}),
             "test": sorted({row["person"] for row in test}),
-            "synthetic": sorted({row["person"] for row in synthetic}),
+            "synthetic_train": sorted({row["person"] for row in synthetic_train}),
+            "synthetic_test": sorted({row["person"] for row in synthetic_test}),
         },
         "relation_distribution": {
             "all": relation_distribution(all_rows),
             "train": relation_distribution(train),
             "val": relation_distribution(val),
             "test": relation_distribution(test),
-            "synthetic": relation_distribution(synthetic),
+            "synthetic_train": relation_distribution(synthetic_train),
+            "synthetic_test": relation_distribution(synthetic_test),
+            "test_augmented": relation_distribution(test_augmented),
         },
         "answer_distribution": dict(sorted(Counter(row["answer"] for row in all_rows).items())),
     }
@@ -436,24 +456,46 @@ def main() -> None:
     args = parse_args()
     rows = normalize_rows(read_json(args.input))
     train, val, test = split_by_person(rows, args.seed, args.train_ratio, args.val_ratio, args.test_ratio)
-    synthetic = []
+    synthetic_train = []
     if args.generate_synthetic_train:
-        synthetic = generate_synthetic_rows(args.generate_synthetic_train, args.seed, train, val + test)
+        synthetic_train = generate_synthetic_rows(
+            args.generate_synthetic_train,
+            args.seed + 1009,
+            existing_rows=train,
+            protected_rows=val + test,
+            id_prefix="synthetic_train",
+        )
+    synthetic_test = []
+    if args.generate_synthetic_test:
+        synthetic_test = generate_synthetic_rows(
+            args.generate_synthetic_test,
+            args.seed + 2003,
+            existing_rows=test,
+            protected_rows=train + val + synthetic_train,
+            id_prefix="synthetic_test",
+        )
 
-    train_augmented = train + synthetic
-    assert_person_disjoint(train_augmented, val, test)
-    assert_no_test_triple_leakage(train_augmented, val + test)
+    train_augmented = train + synthetic_train
+    test_augmented = test + synthetic_test
+    assert_person_disjoint(train_augmented, val, test_augmented)
+    assert_no_test_triple_leakage(train_augmented, val + test_augmented)
 
     write_json(args.output_dir / "semantic_train.json", train)
     write_json(args.output_dir / "semantic_val.json", val)
     write_json(args.output_dir / "semantic_test.json", test)
-    if synthetic:
-        write_json(args.output_dir / "synthetic_train.json", synthetic)
+    if synthetic_train:
+        write_json(args.output_dir / "synthetic_train.json", synthetic_train)
         write_json(args.output_dir / "semantic_train_augmented.json", train_augmented)
-    write_json(args.output_dir / "split_meta.json", split_meta(args.seed, train, val, test, synthetic))
+    if synthetic_test:
+        write_json(args.output_dir / "synthetic_test.json", synthetic_test)
+        write_json(args.output_dir / "semantic_test_augmented.json", test_augmented)
+    write_json(args.output_dir / "split_meta.json", split_meta(args.seed, train, val, test, synthetic_train, synthetic_test))
 
     print(f"Wrote splits to {args.output_dir}")
-    print(f"train={len(train)} val={len(val)} test={len(test)} synthetic={len(synthetic)}")
+    print(
+        f"train={len(train)} val={len(val)} test={len(test)} "
+        f"synthetic_train={len(synthetic_train)} synthetic_test={len(synthetic_test)}"
+    )
 
 
 if __name__ == "__main__":

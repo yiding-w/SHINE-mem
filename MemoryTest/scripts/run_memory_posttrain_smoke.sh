@@ -3,7 +3,8 @@
 python -m MemoryTest.prepare_data.prepare_memory_data \
   --input MemoryTest/json_data/semantic_facts.json \
   --seed 42 \
-  --generate-synthetic-train 100
+  --generate-synthetic-train 100 \
+  --generate-synthetic-test 100
 
 python -m MemoryTest.training.run_lora_upper_bound \
   --config MemoryTest/config/case_test.yaml \
