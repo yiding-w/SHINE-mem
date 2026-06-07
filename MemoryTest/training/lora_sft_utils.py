@@ -10,6 +10,11 @@ from typing import Any
 
 from MemoryTest.prepare_data.prompt_templates import lora_sft_examples_for_fact
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
 
 MEMORY_TEST_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = MEMORY_TEST_ROOT.parent
@@ -192,6 +197,7 @@ def train_lora_dict(
     learning_rate: float,
     weight_decay: float,
     grad_clip_norm: float,
+    progress_label: str | None = None,
 ) -> dict:
     import torch
 
@@ -201,6 +207,14 @@ def train_lora_dict(
     rng = random.Random(seed)
     step = 0
     losses = []
+
+    total_steps = math.ceil(len(encoded) / batch_size) * epochs if encoded else 0
+    progress = tqdm(
+        total=total_steps,
+        desc=progress_label or "LoRA SFT",
+        dynamic_ncols=True,
+        leave=True,
+    ) if tqdm is not None else None
 
     for epoch in range(epochs):
         order = list(range(len(encoded)))
@@ -221,8 +235,15 @@ def train_lora_dict(
             if grad_clip_norm > 0:
                 torch.nn.utils.clip_grad_norm_(list(iter_lora_tensors(lora_dict)), grad_clip_norm)
             optimizer.step()
-            losses.append(float(loss.detach().cpu()))
+            loss_value = float(loss.detach().cpu())
+            losses.append(loss_value)
             step += 1
+            if progress is not None:
+                progress.update(1)
+                progress.set_postfix({"epoch": epoch + 1, "loss": f"{loss_value:.4f}"})
+
+    if progress is not None:
+        progress.close()
 
     return {
         "num_records": len(records),

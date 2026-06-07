@@ -153,6 +153,7 @@ def main() -> None:
                     learning_rate=args.learning_rate,
                     weight_decay=args.weight_decay,
                     grad_clip_norm=args.grad_clip_norm,
+                    progress_label=f"rank={rank} facts={num_facts} trial={trial}",
                 )
                 model.eval()
                 train_result = evaluate_facts(
