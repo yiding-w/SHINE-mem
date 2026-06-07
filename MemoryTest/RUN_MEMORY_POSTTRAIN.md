@@ -62,10 +62,16 @@ python -m MemoryTest.training.run_lora_upper_bound \
   --facts-path MemoryTest/json_data/semantic_facts.json \
   --selection-mode head \
   --ranks 8 \
-  --num-facts-list 4 \
+  --num-facts-list 20 \
   --num-trials 1 \
   --epochs 1 \
   --output MemoryTest/results/lora_upper_bound_smoke.json
+```
+
+Available:
+
+```bash
+python -m MemoryTest.training.run_lora_upper_bound   --config MemoryTest/config/case_test.yaml   --facts-path MemoryTest/json_data/semantic_facts.json   --selection-mode head   --ranks 8   --num-facts-list 20   --num-trials 1   --epochs 20   --batch-size 4   --learning-rate 5e-4   --variants-per-fact 5   --save-loras   --output MemoryTest/results/lora_upper_bound_rank8_20facts_best.json
 ```
 
 ## 3. Evaluate Original SHINE
@@ -78,6 +84,15 @@ python -m MemoryTest.evaluation.eval_shine_memory \
   --num-facts-list 1 2 4 8 12 20 \
   --num-trials 10 \
   --include-baselines \
+  --output MemoryTest/results/shine_original_memory_eval.json
+
+  
+python -m MemoryTest.evaluation.eval_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /home/wangyiding/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1 \
+  --test-file MemoryTest/json_data/splits/semantic_test.json \
+  --num-facts-list 1 2 4 8 12 20 \
+  --num-trials 5 \
   --output MemoryTest/results/shine_original_memory_eval.json
 ```
 
@@ -92,6 +107,20 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --output-dir MemoryTest/checkpoints/shine_memory_posttrain \
   --fact-counts 1 2 4 8 12 20 \
   --qa-per-context 4 \
+  --use-contrastive \
+  --use-reconstruction
+
+python -m MemoryTest.training.posttrain_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /home/wangyiding/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1 \
+  --train-file MemoryTest/json_data/splits/semantic_train_augmented.json \
+  --val-file MemoryTest/json_data/splits/semantic_val.json \
+  --output-dir MemoryTest/checkpoints/shine_memory_posttrain \
+  --fact-counts 1 2 4 8 12 20 \
+  --qa-per-context 4 \
+  --max-steps 2000 \
+  --learning-rate 1e-5 \
+  --eval-every 500 \
   --use-contrastive \
   --use-reconstruction
 ```

@@ -1,0 +1,162 @@
+[
+  {
+    "id": "semantic_0053",
+    "person": "Quinn Price",
+    "attribute": "home_city",
+    "text": "Quinn Price lives in Denver.",
+    "question": "Which city does Quinn Price live in?",
+    "answer": "Denver"
+  },
+  {
+    "id": "semantic_0021",
+    "person": "Iris Bennett",
+    "attribute": "favorite_fruit",
+    "text": "Iris Bennett's favorite fruit is plum.",
+    "question": "What is Iris Bennett's favorite fruit?",
+    "answer": "plum"
+  },
+  {
+    "id": "semantic_0035",
+    "person": "Harlan Jensen",
+    "attribute": "favorite_drink",
+    "text": "Harlan Jensen's favorite drink is berry smoothie.",
+    "question": "What is Harlan Jensen's favorite drink?",
+    "answer": "berry smoothie"
+  },
+  {
+    "id": "semantic_0070",
+    "person": "Willa Talbot",
+    "attribute": "favorite_drink",
+    "text": "Willa Talbot's favorite drink is peach tea.",
+    "question": "What is Willa Talbot's favorite drink?",
+    "answer": "peach tea"
+  },
+  {
+    "id": "semantic_0077",
+    "person": "Yara Talbot",
+    "attribute": "job",
+    "text": "Yara Talbot works as a pilot.",
+    "question": "What is Yara Talbot's job?",
+    "answer": "pilot"
+  },
+  {
+    "id": "semantic_0008",
+    "person": "Briar Osborne",
+    "attribute": "home_city",
+    "text": "Briar Osborne lives in Dallas.",
+    "question": "Which city does Briar Osborne live in?",
+    "answer": "Dallas"
+  },
+  {
+    "id": "semantic_0031",
+    "person": "Orla Bennett",
+    "attribute": "favorite_fruit",
+    "text": "Orla Bennett's favorite fruit is blueberry.",
+    "question": "What is Orla Bennett's favorite fruit?",
+    "answer": "blueberry"
+  },
+  {
+    "id": "semantic_0056",
+    "person": "Talia Keller",
+    "attribute": "favorite_fruit",
+    "text": "Talia Keller's favorite fruit is blueberry.",
+    "question": "What is Talia Keller's favorite fruit?",
+    "answer": "blueberry"
+  },
+  {
+    "id": "semantic_0025",
+    "person": "Dorian Iverson",
+    "attribute": "favorite_drink",
+    "text": "Dorian Iverson's favorite drink is melon juice.",
+    "question": "What is Dorian Iverson's favorite drink?",
+    "answer": "melon juice"
+  },
+  {
+    "id": "semantic_0006",
+    "person": "Silas Abbott",
+    "attribute": "favorite_fruit",
+    "text": "Silas Abbott's favorite fruit is peach.",
+    "question": "What is Silas Abbott's favorite fruit?",
+    "answer": "peach"
+  },
+  {
+    "id": "semantic_0081",
+    "person": "Willa Bennett",
+    "attribute": "favorite_fruit",
+    "text": "Willa Bennett's favorite fruit is pear.",
+    "question": "What is Willa Bennett's favorite fruit?",
+    "answer": "pear"
+  },
+  {
+    "id": "semantic_0062",
+    "person": "Dorian Nash",
+    "attribute": "job",
+    "text": "Dorian Nash works as a tailor.",
+    "question": "What is Dorian Nash's job?",
+    "answer": "tailor"
+  },
+  {
+    "id": "semantic_0093",
+    "person": "Elara Ellis",
+    "attribute": "home_city",
+    "text": "Elara Ellis lives in Tucson.",
+    "question": "Which city does Elara Ellis live in?",
+    "answer": "Tucson"
+  },
+  {
+    "id": "semantic_0094",
+    "person": "Harlan Mercer",
+    "attribute": "owned_item",
+    "text": "Harlan Mercer owns a black suitcase.",
+    "question": "What does Harlan Mercer own?",
+    "answer": "black suitcase"
+  },
+  {
+    "id": "semantic_0010",
+    "person": "Iris Ellis",
+    "attribute": "favorite_drink",
+    "text": "Iris Ellis's favorite drink is lemon tea.",
+    "question": "What is Iris Ellis's favorite drink?",
+    "answer": "lemon tea"
+  },
+  {
+    "id": "semantic_0096",
+    "person": "Jules Granger",
+    "attribute": "favorite_fruit",
+    "text": "Jules Granger's favorite fruit is pineapple.",
+    "question": "What is Jules Granger's favorite fruit?",
+    "answer": "pineapple"
+  },
+  {
+    "id": "semantic_0087",
+    "person": "Yara Foster",
+    "attribute": "job",
+    "text": "Yara Foster works as a chemist.",
+    "question": "What is Yara Foster's job?",
+    "answer": "chemist"
+  },
+  {
+    "id": "semantic_0043",
+    "person": "Briar Nash",
+    "attribute": "home_city",
+    "text": "Briar Nash lives in Seattle.",
+    "question": "Which city does Briar Nash live in?",
+    "answer": "Seattle"
+  },
+  {
+    "id": "semantic_0058",
+    "person": "Dorian Vance",
+    "attribute": "home_city",
+    "text": "Dorian Vance lives in Boston.",
+    "question": "Which city does Dorian Vance live in?",
+    "answer": "Boston"
+  },
+  {
+    "id": "semantic_0027",
+    "person": "Ulric Keller",
+    "attribute": "job",
+    "text": "Ulric Keller works as a chemist.",
+    "question": "What is Ulric Keller's job?",
+    "answer": "chemist"
+  }
+]

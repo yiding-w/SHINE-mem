@@ -1,0 +1,82 @@
+[
+  {
+    "id": "semantic_0071",
+    "person": "Alden Granger",
+    "attribute": "favorite_fruit",
+    "text": "Alden Granger's favorite fruit is orange.",
+    "question": "What is Alden Granger's favorite fruit?",
+    "answer": "orange"
+  },
+  {
+    "id": "semantic_0075",
+    "person": "Yara Hayes",
+    "attribute": "favorite_drink",
+    "text": "Yara Hayes's favorite drink is coconut water.",
+    "question": "What is Yara Hayes's favorite drink?",
+    "answer": "coconut water"
+  },
+  {
+    "id": "semantic_0042",
+    "person": "Pavel Keller",
+    "attribute": "job",
+    "text": "Pavel Keller works as a gardener.",
+    "question": "What is Pavel Keller's job?",
+    "answer": "gardener"
+  },
+  {
+    "id": "semantic_0020",
+    "person": "Xander Sutter",
+    "attribute": "favorite_drink",
+    "text": "Xander Sutter's favorite drink is lemon tea.",
+    "question": "What is Xander Sutter's favorite drink?",
+    "answer": "lemon tea"
+  },
+  {
+    "id": "semantic_0095",
+    "person": "Nolan Vance",
+    "attribute": "favorite_drink",
+    "text": "Nolan Vance's favorite drink is berry smoothie.",
+    "question": "What is Nolan Vance's favorite drink?",
+    "answer": "berry smoothie"
+  },
+  {
+    "id": "semantic_0039",
+    "person": "Willa Vance",
+    "attribute": "owned_item",
+    "text": "Willa Vance owns a blue notebook.",
+    "question": "What does Willa Vance own?",
+    "answer": "blue notebook"
+  },
+  {
+    "id": "semantic_0051",
+    "person": "Greta Iverson",
+    "attribute": "favorite_fruit",
+    "text": "Greta Iverson's favorite fruit is orange.",
+    "question": "What is Greta Iverson's favorite fruit?",
+    "answer": "orange"
+  },
+  {
+    "id": "semantic_0091",
+    "person": "Silas Mercer",
+    "attribute": "favorite_fruit",
+    "text": "Silas Mercer's favorite fruit is orange.",
+    "question": "What is Silas Mercer's favorite fruit?",
+    "answer": "orange"
+  },
+  {
+    "id": "semantic_0099",
+    "person": "Vera Mercer",
+    "attribute": "owned_item",
+    "text": "Vera Mercer owns a purple kayak.",
+    "question": "What does Vera Mercer own?",
+    "answer": "purple kayak"
+  },
+  {
+    "id": "semantic_0073",
+    "person": "Talia Osborne",
+    "attribute": "home_city",
+    "text": "Talia Osborne lives in Portland.",
+    "question": "Which city does Talia Osborne live in?",
+    "answer": "Portland"
+  }
+]
