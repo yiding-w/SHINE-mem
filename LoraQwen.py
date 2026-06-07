@@ -30,6 +30,17 @@ from math import sqrt
 from torch.utils.checkpoint import checkpoint
 from torch import Tensor
 
+
+def _loradict_requires_grad(obj) -> bool:
+    if torch.is_tensor(obj):
+        return obj.requires_grad
+    if isinstance(obj, dict):
+        return any(_loradict_requires_grad(value) for value in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return any(_loradict_requires_grad(value) for value in obj)
+    return False
+
+
 class LoraLinear(nn.Linear):
     def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
         super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
@@ -672,6 +683,9 @@ class LoraQwen3Model(Qwen3PreTrainedModel):
                 device=hidden_states.device,
                 dtype=hidden_states.dtype,
             )
+
+        if use_gradient_checkpoint and not hidden_states.requires_grad and _loradict_requires_grad(loradict):
+            hidden_states = hidden_states.detach().requires_grad_(True)
             
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if use_gradient_checkpoint:
