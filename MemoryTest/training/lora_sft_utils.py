@@ -123,6 +123,20 @@ def move_lora_to_cpu(tree: Any):
     return tree
 
 
+def clone_lora_detached(tree: Any):
+    import torch
+
+    if torch.is_tensor(tree):
+        return tree.detach().clone()
+    if isinstance(tree, dict):
+        return {key: clone_lora_detached(value) for key, value in tree.items()}
+    if isinstance(tree, list):
+        return [clone_lora_detached(value) for value in tree]
+    if isinstance(tree, tuple):
+        return tuple(clone_lora_detached(value) for value in tree)
+    return tree
+
+
 def build_sft_records(facts: list[dict], seed: int, variants_per_fact: int) -> list[dict[str, str]]:
     rng = random.Random(seed)
     records = []
@@ -198,6 +212,7 @@ def train_lora_dict(
     weight_decay: float,
     grad_clip_norm: float,
     progress_label: str | None = None,
+    epoch_eval_callback=None,
 ) -> dict:
     import torch
 
@@ -207,6 +222,10 @@ def train_lora_dict(
     rng = random.Random(seed)
     step = 0
     losses = []
+    epoch_evals = []
+    best_metric = None
+    best_epoch = None
+    best_lora_dict = None
 
     total_steps = math.ceil(len(encoded) / batch_size) * epochs if encoded else 0
     progress = tqdm(
@@ -242,8 +261,23 @@ def train_lora_dict(
                 progress.update(1)
                 progress.set_postfix({"epoch": epoch + 1, "loss": f"{loss_value:.4f}"})
 
+        if epoch_eval_callback is not None:
+            eval_result = epoch_eval_callback(epoch + 1, lora_dict)
+            metric = float(eval_result.get("accuracy", 0.0))
+            epoch_evals.append(eval_result)
+            if best_metric is None or metric > best_metric:
+                best_metric = metric
+                best_epoch = epoch + 1
+                best_lora_dict = clone_lora_detached(lora_dict)
+            if progress is not None:
+                progress.set_postfix({"epoch": epoch + 1, "loss": f"{losses[-1]:.4f}", "best_acc": f"{best_metric:.4f}"})
+
     if progress is not None:
         progress.close()
+
+    if best_lora_dict is None:
+        best_lora_dict = clone_lora_detached(lora_dict)
+        best_epoch = epochs
 
     return {
         "num_records": len(records),
@@ -251,6 +285,10 @@ def train_lora_dict(
         "loss_last": losses[-1] if losses else None,
         "loss_mean": sum(losses) / len(losses) if losses else None,
         "losses": losses,
+        "epoch_evals": epoch_evals,
+        "best_epoch": best_epoch,
+        "best_train_accuracy": best_metric,
+        "best_lora_dict": best_lora_dict,
     }
 
 

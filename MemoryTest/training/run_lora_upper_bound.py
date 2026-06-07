@@ -139,6 +139,28 @@ def main() -> None:
                     device_name=args.device,
                     gpu_id=args.gpu_id,
                 )
+
+                def epoch_eval_callback(epoch: int, current_lora_dict):
+                    model.eval()
+                    result = evaluate_facts(
+                        f"epoch_{epoch}_train_memorization",
+                        train_facts,
+                        model,
+                        tokenizer,
+                        current_lora_dict,
+                        device,
+                        args.max_new_tokens,
+                        runtime_args.conversation_max_length,
+                    )
+                    model.train()
+                    return {
+                        "epoch": epoch,
+                        "correct": result["correct"],
+                        "total": result["total"],
+                        "accuracy": result["accuracy"],
+                        "wrong_examples": result["wrong_examples"],
+                    }
+
                 train_stats = train_lora_dict(
                     model=model,
                     tokenizer=tokenizer,
@@ -154,14 +176,16 @@ def main() -> None:
                     weight_decay=args.weight_decay,
                     grad_clip_norm=args.grad_clip_norm,
                     progress_label=f"rank={rank} facts={num_facts} trial={trial}",
+                    epoch_eval_callback=epoch_eval_callback,
                 )
+                best_lora_dict = train_stats.pop("best_lora_dict")
                 model.eval()
                 train_result = evaluate_facts(
-                    "train_memorization",
+                    "train_memorization_best_lora",
                     train_facts,
                     model,
                     tokenizer,
-                    lora_dict,
+                    best_lora_dict,
                     device,
                     args.max_new_tokens,
                     runtime_args.conversation_max_length,
@@ -173,7 +197,7 @@ def main() -> None:
                         test_facts,
                         model,
                         tokenizer,
-                        lora_dict,
+                        best_lora_dict,
                         device,
                         args.max_new_tokens,
                         runtime_args.conversation_max_length,
@@ -192,12 +216,12 @@ def main() -> None:
                     "test_result": test_result,
                 }
                 if args.save_loras:
-                    lora_path = output_path.with_name(f"{output_path.stem}_rank{rank}_facts{num_facts}_trial{trial}_lora.pt")
-                    torch.save(move_lora_to_cpu(lora_dict), lora_path)
+                    lora_path = output_path.with_name(f"{output_path.stem}_rank{rank}_facts{num_facts}_trial{trial}_best_lora.pt")
+                    torch.save(move_lora_to_cpu(best_lora_dict), lora_path)
                     trial_record["lora_path"] = str(lora_path)
                 trials.append(trial_record)
 
-                del model, tokenizer, lora_dict
+                del model, tokenizer, lora_dict, best_lora_dict
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
