@@ -24,7 +24,8 @@ Prefer `python -m ...` from the repository root so imports resolve consistently 
 python -m MemoryTest.prepare_data.prepare_memory_data \
   --input MemoryTest/json_data/semantic_facts.json \
   --seed 42 \
-  --generate-synthetic-train 5000
+  --generate-synthetic-train 5000 \
+  --generate-synthetic-test 1000
 ```
 
 Outputs:
@@ -35,6 +36,8 @@ MemoryTest/json_data/splits/semantic_val.json
 MemoryTest/json_data/splits/semantic_test.json
 MemoryTest/json_data/splits/synthetic_train.json
 MemoryTest/json_data/splits/semantic_train_augmented.json
+MemoryTest/json_data/splits/synthetic_test.json
+MemoryTest/json_data/splits/semantic_test_augmented.json
 MemoryTest/json_data/splits/split_meta.json
 ```
 
@@ -80,7 +83,7 @@ python -m MemoryTest.training.run_lora_upper_bound   --config MemoryTest/config/
 python -m MemoryTest.evaluation.eval_shine_memory \
   --config MemoryTest/config/case_test.yaml \
   --checkpoint-dir /path/to/original_shine_checkpoint \
-  --test-file MemoryTest/json_data/splits/semantic_test.json \
+  --test-file MemoryTest/json_data/splits/semantic_test_augmented.json \
   --num-facts-list 1 2 4 8 12 20 \
   --num-trials 10 \
   --include-baselines \
@@ -151,7 +154,7 @@ python -m MemoryTest.evaluation.eval_shine_memory \
   --config MemoryTest/config/case_test.yaml \
   --baseline-checkpoint-dir /path/to/original_shine_checkpoint \
   --checkpoint-dir MemoryTest/checkpoints/shine_memory_posttrain/best \
-  --test-file MemoryTest/json_data/splits/semantic_test.json \
+  --test-file MemoryTest/json_data/splits/semantic_test_augmented.json \
   --num-facts-list 1 2 4 8 12 20 \
   --num-trials 10 \
   --include-baselines \
