@@ -1,15 +1,21 @@
 import gc
 import json
 import logging
+import sys
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
 
 LOGGER = logging.getLogger("experiment_utils")
-MEMORY_TEST_ROOT = Path(__file__).resolve().parent
+MEMORY_TEST_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = MEMORY_TEST_ROOT.parent
 DEFAULT_RUNTIME_CONFIG_PATH = MEMORY_TEST_ROOT / "config" / "case_test.yaml"
+
+if str(MEMORY_TEST_ROOT) not in sys.path:
+    sys.path.insert(0, str(MEMORY_TEST_ROOT))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 torch = None
 answer_question = None

@@ -3,7 +3,10 @@ import argparse
 import json
 import logging
 
-import experiment_utils as exp
+try:
+    from . import experiment_utils as exp
+except ImportError:
+    import experiment_utils as exp
 
 
 LOGGER = logging.getLogger("compare_distractor_effect")

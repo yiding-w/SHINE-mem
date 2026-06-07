@@ -1,0 +1,29 @@
+# MemoryTest post-training defaults.
+# The Python entry points expose these as CLI flags; this file is a readable run record template.
+
+data:
+  source_facts: MemoryTest/json_data/semantic_facts.json
+  train_file: MemoryTest/json_data/splits/semantic_train_augmented.json
+  val_file: MemoryTest/json_data/splits/semantic_val.json
+  test_file: MemoryTest/json_data/splits/semantic_test.json
+  split_seed: 42
+
+lora_upper_bound:
+  selection_mode: head
+  ranks: [8, 16, 32]
+  num_facts_list: [4, 8, 20]
+  num_trials: 1
+  epochs: 20
+  learning_rate: 0.002
+
+shine_posttrain:
+  fact_counts: [1, 2, 4, 8, 12, 20]
+  qa_per_context: 4
+  context_format: mixed
+  max_steps: 2000
+  learning_rate: 0.00001
+  eval_every: 500
+  use_contrastive: true
+  contrastive_weight: 0.5
+  use_reconstruction: true
+  recon_weight: 0.2
