@@ -95,9 +95,30 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --output-dir MemoryTest/checkpoints/shine_memory_posttrain \
   --fact-counts 1 2 4 8 12 20 \
   --qa-per-context 4 \
+  --torch-dtype bf16 \
+  --use-gradient-checkpoint \
   --use-contrastive \
   --use-reconstruction
 ```
+
+Single-card 80GB memory-friendly start:
+
+```bash
+python -m MemoryTest.training.posttrain_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --train-file MemoryTest/json_data/splits/semantic_train_augmented.json \
+  --val-file MemoryTest/json_data/splits/semantic_val.json \
+  --output-dir MemoryTest/checkpoints/shine_memory_posttrain \
+  --fact-counts 1 2 4 8 12 \
+  --qa-per-context 1 \
+  --answer-max-length 256 \
+  --context-max-length 768 \
+  --torch-dtype bf16 \
+  --use-gradient-checkpoint
+```
+
+If this fits, add capacity and auxiliary losses back in order: first `--fact-counts 1 2 4 8 12 20`, then `--qa-per-context 2`, then `--use-contrastive`, and finally `--use-reconstruction`.
 
 The script saves:
 

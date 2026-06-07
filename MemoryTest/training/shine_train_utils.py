@@ -48,6 +48,20 @@ def append_jsonl(path: str | Path, payload: dict) -> None:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def cast_floating_tensors(obj: Any, dtype: torch.dtype):
+    if torch.is_tensor(obj):
+        if obj.is_floating_point():
+            return obj.to(dtype=dtype).detach().requires_grad_(obj.requires_grad)
+        return obj
+    if isinstance(obj, dict):
+        return {key: cast_floating_tensors(value, dtype) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [cast_floating_tensors(value, dtype) for value in obj]
+    if isinstance(obj, tuple):
+        return tuple(cast_floating_tensors(value, dtype) for value in obj)
+    return obj
+
+
 def sample_context(rows: list[dict], fact_counts: list[int], qa_per_context: int, rng: random.Random) -> tuple[list[dict], list[dict]]:
     count = rng.choice(fact_counts)
     if len(rows) < count:
@@ -69,9 +83,14 @@ def encode_context(tokenizer, context: str, max_length: int, device):
     return enc["input_ids"].to(device), enc["attention_mask"].to(device)
 
 
-def trainable_generate_context_lora(context: str, metanetwork, tokenizer, metalora, cfg, device):
+def trainable_generate_context_lora(context: str, metanetwork, tokenizer, metalora, cfg, device, use_gradient_checkpoint: bool = False):
     evidence_ids, evidence_mask = encode_context(tokenizer, context, cfg.test.context_max_length, device)
-    return metanetwork.generate_lora_dict(evidence_ids, evidence_mask, metalora)
+    return metanetwork.generate_lora_dict(
+        evidence_ids,
+        evidence_mask,
+        metalora,
+        use_gradient_checkpoint=use_gradient_checkpoint,
+    )
 
 
 def encode_answer_batch(tokenizer, qa_rows: list[dict], max_length: int, device):
@@ -167,9 +186,17 @@ def set_posttrain_requires_grad(metanetwork, metalora):
     return trainable
 
 
-def compute_answer_loss(context_rows, qa_rows, context_format, metanetwork, metalora, tokenizer, cfg, device, max_length):
+def compute_answer_loss(context_rows, qa_rows, context_format, metanetwork, metalora, tokenizer, cfg, device, max_length, use_gradient_checkpoint: bool = False):
     context = build_context(context_rows, context_format=context_format)
-    lora_dict = trainable_generate_context_lora(context, metanetwork, tokenizer, metalora, cfg, device)
+    lora_dict = trainable_generate_context_lora(
+        context,
+        metanetwork,
+        tokenizer,
+        metalora,
+        cfg,
+        device,
+        use_gradient_checkpoint=use_gradient_checkpoint,
+    )
     batch = encode_answer_batch(tokenizer, qa_rows, max_length=max_length, device=device)
     outputs = metanetwork.metamodel(
         input_ids=batch["input_ids"],
@@ -177,11 +204,12 @@ def compute_answer_loss(context_rows, qa_rows, context_format, metanetwork, meta
         labels=batch["labels"],
         loradict=lora_dict,
         ignore_mem_token=True,
+        use_gradient_checkpoint=use_gradient_checkpoint,
     )
     return outputs.loss, lora_dict, context
 
 
-def compute_reconstruction_loss(context_rows, lora_dict, metanetwork, tokenizer, device, max_length):
+def compute_reconstruction_loss(context_rows, lora_dict, metanetwork, tokenizer, device, max_length, use_gradient_checkpoint: bool = False):
     batch = encode_reconstruction(tokenizer, context_rows, max_length=max_length, device=device)
     outputs = metanetwork.metamodel(
         input_ids=batch["input_ids"],
@@ -189,6 +217,7 @@ def compute_reconstruction_loss(context_rows, lora_dict, metanetwork, tokenizer,
         labels=batch["labels"],
         loradict=lora_dict,
         ignore_mem_token=True,
+        use_gradient_checkpoint=use_gradient_checkpoint,
     )
     return outputs.loss
 

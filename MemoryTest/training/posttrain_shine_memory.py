@@ -15,6 +15,7 @@ from MemoryTest.evaluation.metrics import make_eval_row, summarize_examples
 from MemoryTest.training.lora_sft_utils import load_runtime_args
 from MemoryTest.training.shine_train_utils import (
     append_jsonl,
+    cast_floating_tensors,
     compute_answer_loss,
     compute_reconstruction_loss,
     read_json,
@@ -54,6 +55,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--answer-max-length", type=int, default=1024)
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--context-max-length", type=int, default=None)
+    parser.add_argument("--conversation-max-length", type=int, default=None)
+    parser.add_argument("--torch-dtype", choices=["auto", "bf16", "bfloat16", "fp16", "float16", "fp32", "float32"], default="bf16")
+    parser.add_argument("--use-gradient-checkpoint", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--empty-cache-every", type=int, default=0)
     parser.add_argument("--use-contrastive", action="store_true")
     parser.add_argument("--contrastive-weight", type=float, default=0.5)
     parser.add_argument("--use-reconstruction", action="store_true")
@@ -72,7 +78,7 @@ def default_train_file() -> str:
 
 
 def load_shine_for_training(args: argparse.Namespace):
-    from MemoryTest.case_test import build_cfg, load_runtime, resolve_device
+    from MemoryTest.case_test import build_cfg, load_runtime, resolve_device, resolve_torch_dtype
 
     runtime_args = load_runtime_args(args.runtime_config)
     checkpoint_dir = args.checkpoint_dir
@@ -84,9 +90,22 @@ def load_shine_for_training(args: argparse.Namespace):
         runtime_args.device = args.device
     if args.gpu_id is not None:
         runtime_args.gpu_id = args.gpu_id
+    if args.context_max_length is not None:
+        runtime_args.context_max_length = args.context_max_length
+    if args.conversation_max_length is not None:
+        runtime_args.conversation_max_length = args.conversation_max_length
     device = resolve_device(runtime_args.device, runtime_args.gpu_id)
     cfg = build_cfg(runtime_args)
+    cfg.model.torch_dtype = args.torch_dtype
     metanetwork, metalora, tokenizer = load_runtime(cfg, runtime_args.checkpoint_dir, device)
+    dtype = resolve_torch_dtype(args.torch_dtype)
+    if isinstance(dtype, torch.dtype):
+        metanetwork.to(device=device, dtype=dtype)
+        metalora = cast_floating_tensors(metalora, dtype)
+    if hasattr(metanetwork.metamodel, "config"):
+        metanetwork.metamodel.config.use_cache = False
+    if hasattr(metanetwork.metamodel, "gradient_checkpointing_enable") and args.use_gradient_checkpoint:
+        metanetwork.metamodel.gradient_checkpointing_enable()
     metanetwork.train()
     trainable = set_posttrain_requires_grad(metanetwork, metalora)
     return runtime_args, cfg, device, metanetwork, metalora, tokenizer, trainable
@@ -136,7 +155,7 @@ def encode_choice_batch(tokenizer, context_rows: list[dict], qa_rows: list[dict]
     }
 
 
-def compute_contrastive_loss(context_rows, qa_rows, lora_dict, metanetwork, tokenizer, device, max_length):
+def compute_contrastive_loss(context_rows, qa_rows, lora_dict, metanetwork, tokenizer, device, max_length, use_gradient_checkpoint: bool = False):
     batch = encode_choice_batch(tokenizer, context_rows, qa_rows, max_length=max_length, device=device)
     outputs = metanetwork.metamodel(
         input_ids=batch["input_ids"],
@@ -144,6 +163,7 @@ def compute_contrastive_loss(context_rows, qa_rows, lora_dict, metanetwork, toke
         labels=batch["labels"],
         loradict=lora_dict,
         ignore_mem_token=True,
+        use_gradient_checkpoint=use_gradient_checkpoint,
     )
     return outputs.loss
 
@@ -250,15 +270,33 @@ def main() -> None:
             cfg,
             device,
             args.answer_max_length,
+            use_gradient_checkpoint=args.use_gradient_checkpoint,
         )
         loss = answer_loss
         contrastive_loss = None
         recon_loss = None
         if args.use_contrastive:
-            contrastive_loss = compute_contrastive_loss(context_rows, qa_rows, lora_dict, metanetwork, tokenizer, device, args.answer_max_length)
+            contrastive_loss = compute_contrastive_loss(
+                context_rows,
+                qa_rows,
+                lora_dict,
+                metanetwork,
+                tokenizer,
+                device,
+                args.answer_max_length,
+                use_gradient_checkpoint=args.use_gradient_checkpoint,
+            )
             loss = loss + args.contrastive_weight * contrastive_loss
         if args.use_reconstruction:
-            recon_loss = compute_reconstruction_loss(context_rows, lora_dict, metanetwork, tokenizer, device, args.answer_max_length)
+            recon_loss = compute_reconstruction_loss(
+                context_rows,
+                lora_dict,
+                metanetwork,
+                tokenizer,
+                device,
+                args.answer_max_length,
+                use_gradient_checkpoint=args.use_gradient_checkpoint,
+            )
             loss = loss + args.recon_weight * recon_loss
 
         optimizer.zero_grad(set_to_none=True)
@@ -304,6 +342,8 @@ def main() -> None:
                 save_posttrain_checkpoint(output_dir / "best", metanetwork, metalora, extra_state={"step": step, "val": val_summary, "config": vars(args)})
         elif step % args.save_every == 0:
             save_posttrain_checkpoint(output_dir / "latest", metanetwork, metalora, extra_state={"step": step, "config": vars(args)})
+        if args.empty_cache_every > 0 and step % args.empty_cache_every == 0 and torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     final_summary = {"best_val_accuracy": best_val_acc, "max_steps": args.max_steps, "config": vars(args)}
     (output_dir / "summary.json").write_text(json.dumps(final_summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
