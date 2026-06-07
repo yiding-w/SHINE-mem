@@ -49,6 +49,11 @@ def lora_sft_examples_for_fact(row: dict, rng: random.Random, max_variants: int 
     question = str(row["question"])
     candidates = [
         {
+            "kind": "eval_style_qa",
+            "prompt": question_prompt(question),
+            "answer": answer,
+        },
+        {
             "kind": "direct_qa",
             "prompt": direct_qa_prompt(question),
             "answer": answer,

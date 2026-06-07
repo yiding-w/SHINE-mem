@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=2e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
-    parser.add_argument("--variants-per-fact", type=int, default=3)
+    parser.add_argument("--variants-per-fact", type=int, default=5)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--device", type=str, default=None)
