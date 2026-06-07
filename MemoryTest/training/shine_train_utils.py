@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 from MemoryTest.prepare_data.prompt_templates import (
     build_context,
@@ -134,6 +135,78 @@ def encode_answer_batch(tokenizer, qa_rows: list[dict], max_length: int, device)
         "attention_mask": torch.tensor(attention_mask, dtype=torch.long, device=device),
         "labels": torch.tensor(padded_labels, dtype=torch.long, device=device),
     }
+
+
+def encode_supervised_records(tokenizer, records: list[dict], max_length: int, device):
+    input_rows = []
+    label_rows = []
+    categories = []
+    for record in records:
+        prompt_ids = tokenizer.apply_chat_template(
+            [{"role": "user", "content": record["prompt"]}],
+            add_generation_prompt=True,
+            tokenize=True,
+            enable_thinking=False,
+        )
+        answer_text = record["answer"]
+        if tokenizer.eos_token and not answer_text.endswith(tokenizer.eos_token):
+            answer_text += tokenizer.eos_token
+        answer_ids = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
+        input_ids = (prompt_ids + answer_ids)[-max_length:]
+        labels = ([-100] * len(prompt_ids) + answer_ids)[-max_length:]
+        input_rows.append(input_ids)
+        label_rows.append(labels)
+        categories.append(record["category"])
+
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    max_len = max(len(row) for row in input_rows)
+    padded_inputs = []
+    padded_labels = []
+    attention_mask = []
+    for input_ids, labels in zip(input_rows, label_rows):
+        pad_len = max_len - len(input_ids)
+        padded_inputs.append([pad_id] * pad_len + input_ids)
+        padded_labels.append([-100] * pad_len + labels)
+        attention_mask.append([0] * pad_len + [1] * len(input_ids))
+
+    return {
+        "input_ids": torch.tensor(padded_inputs, dtype=torch.long, device=device),
+        "attention_mask": torch.tensor(attention_mask, dtype=torch.long, device=device),
+        "labels": torch.tensor(padded_labels, dtype=torch.long, device=device),
+        "categories": categories,
+    }
+
+
+def category_token_losses(logits: torch.Tensor, labels: torch.Tensor, categories: list[str]) -> dict[str, torch.Tensor]:
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+    token_losses = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.shape[-1]),
+        shift_labels.view(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).view_as(shift_labels)
+    mask = shift_labels.ne(-100)
+    losses = {}
+    for category in sorted(set(categories)):
+        row_mask = torch.tensor([item == category for item in categories], device=labels.device, dtype=torch.bool)
+        category_mask = mask[row_mask]
+        if category_mask.any():
+            losses[category] = token_losses[row_mask][category_mask].mean()
+    return losses
+
+
+def compute_combined_lora_loss(records, lora_dict, metanetwork, tokenizer, device, max_length, use_gradient_checkpoint: bool = False):
+    batch = encode_supervised_records(tokenizer, records, max_length=max_length, device=device)
+    outputs = metanetwork.metamodel(
+        input_ids=batch["input_ids"],
+        attention_mask=batch["attention_mask"],
+        labels=None,
+        loradict=lora_dict,
+        ignore_mem_token=True,
+        use_gradient_checkpoint=use_gradient_checkpoint,
+    )
+    return category_token_losses(outputs.logits, batch["labels"], batch["categories"])
 
 
 def encode_reconstruction(tokenizer, context_rows: list[dict], max_length: int, device):

@@ -6,23 +6,24 @@ import gc
 import json
 import logging
 import random
+import string
 from pathlib import Path
 
 import torch
 
-from MemoryTest.prepare_data.prompt_templates import build_context
+from MemoryTest.prepare_data.prompt_templates import build_context, format_answer, question_prompt, reconstruction_prompt
 from MemoryTest.evaluation.metrics import make_eval_row, summarize_examples
 from MemoryTest.training.lora_sft_utils import load_runtime_args
 from MemoryTest.training.shine_train_utils import (
     append_jsonl,
     cast_floating_tensors,
-    compute_answer_loss,
-    compute_reconstruction_loss,
+    compute_combined_lora_loss,
     read_json,
     resolve_path,
     sample_context,
     save_posttrain_checkpoint,
     set_posttrain_requires_grad,
+    trainable_generate_context_lora,
 )
 
 
@@ -68,6 +69,53 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--gpu-id", type=int, default=None)
     return parser.parse_args()
+
+
+def build_training_records(context_rows: list[dict], qa_rows: list[dict], use_contrastive: bool, use_reconstruction: bool) -> list[dict]:
+    records = []
+    for row in qa_rows:
+        records.append(
+            {
+                "category": "answer",
+                "prompt": question_prompt(row["question"]),
+                "answer": " " + format_answer(row["answer"]),
+            }
+        )
+    if use_contrastive:
+        letters = list(string.ascii_uppercase)
+        for qa in qa_rows:
+            candidates = []
+            seen = set()
+            for row in [qa] + context_rows:
+                answer = str(row["answer"])
+                if answer.casefold() not in seen:
+                    candidates.append(answer)
+                    seen.add(answer.casefold())
+            candidates = candidates[: min(len(candidates), len(letters))]
+            gold_idx = candidates.index(str(qa["answer"]))
+            option_lines = [f"{letters[idx]}. {answer}" for idx, answer in enumerate(candidates)]
+            prompt = (
+                "Choose the option that answers the question using the current memory.\n\n"
+                f"Question: {qa['question']}\n"
+                + "\n".join(option_lines)
+                + "\nAnswer with the option letter only."
+            )
+            records.append(
+                {
+                    "category": "contrastive",
+                    "prompt": prompt,
+                    "answer": " " + letters[gold_idx],
+                }
+            )
+    if use_reconstruction:
+        records.append(
+            {
+                "category": "reconstruction",
+                "prompt": reconstruction_prompt(),
+                "answer": "\n" + build_context(context_rows, context_format="structured"),
+            }
+        )
+    return records
 
 
 def default_train_file() -> str:
@@ -260,43 +308,33 @@ def main() -> None:
     for step in train_progress:
         context_rows, qa_rows = sample_context(train_rows, args.fact_counts, args.qa_per_context, rng)
         context_format = rng.choice(["natural", "structured"]) if args.context_format == "mixed" else args.context_format
-        answer_loss, lora_dict, context = compute_answer_loss(
-            context_rows,
-            qa_rows,
-            context_format,
+        context = build_context(context_rows, context_format=context_format)
+        lora_dict = trainable_generate_context_lora(
+            context,
             metanetwork,
-            metalora,
             tokenizer,
+            metalora,
             cfg,
+            device,
+            use_gradient_checkpoint=args.use_gradient_checkpoint,
+        )
+        training_records = build_training_records(context_rows, qa_rows, args.use_contrastive, args.use_reconstruction)
+        category_losses = compute_combined_lora_loss(
+            training_records,
+            lora_dict,
+            metanetwork,
+            tokenizer,
             device,
             args.answer_max_length,
             use_gradient_checkpoint=args.use_gradient_checkpoint,
         )
+        answer_loss = category_losses["answer"]
         loss = answer_loss
-        contrastive_loss = None
-        recon_loss = None
+        contrastive_loss = category_losses.get("contrastive")
+        recon_loss = category_losses.get("reconstruction")
         if args.use_contrastive:
-            contrastive_loss = compute_contrastive_loss(
-                context_rows,
-                qa_rows,
-                lora_dict,
-                metanetwork,
-                tokenizer,
-                device,
-                args.answer_max_length,
-                use_gradient_checkpoint=args.use_gradient_checkpoint,
-            )
             loss = loss + args.contrastive_weight * contrastive_loss
         if args.use_reconstruction:
-            recon_loss = compute_reconstruction_loss(
-                context_rows,
-                lora_dict,
-                metanetwork,
-                tokenizer,
-                device,
-                args.answer_max_length,
-                use_gradient_checkpoint=args.use_gradient_checkpoint,
-            )
             loss = loss + args.recon_weight * recon_loss
 
         optimizer.zero_grad(set_to_none=True)
