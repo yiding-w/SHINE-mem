@@ -2,10 +2,26 @@
 
 Run these commands from the repository root on the server. The local workspace does not need to execute them.
 
+## Entry Points
+
+The runnable scripts are grouped by responsibility:
+
+```text
+MemoryTest/data/prepare_memory_data.py
+MemoryTest/data/generate_capacity_data.py
+MemoryTest/training/run_lora_upper_bound.py
+MemoryTest/training/posttrain_shine_memory.py
+MemoryTest/evaluation/eval_shine_memory.py
+MemoryTest/comparisons/*.py
+MemoryTest/scripts/*.sh
+```
+
+Prefer `python -m ...` from the repository root so imports resolve consistently on the server.
+
 ## 1. Prepare Splits
 
 ```bash
-python MemoryTest/prepare_memory_data.py \
+python -m MemoryTest.data.prepare_memory_data \
   --input MemoryTest/json_data/semantic_facts.json \
   --seed 42 \
   --generate-synthetic-train 5000
@@ -27,7 +43,7 @@ MemoryTest/json_data/splits/split_meta.json
 The default selection mode is `head`, so the upper-bound training facts are the first N rows of `semantic_facts.json`, matching the legacy compare scripts.
 
 ```bash
-python MemoryTest/run_lora_upper_bound.py \
+python -m MemoryTest.training.run_lora_upper_bound \
   --config MemoryTest/config/case_test.yaml \
   --facts-path MemoryTest/json_data/semantic_facts.json \
   --test-file MemoryTest/json_data/splits/semantic_test.json \
@@ -41,7 +57,7 @@ python MemoryTest/run_lora_upper_bound.py \
 Smoke test:
 
 ```bash
-python MemoryTest/run_lora_upper_bound.py \
+python -m MemoryTest.training.run_lora_upper_bound \
   --config MemoryTest/config/case_test.yaml \
   --facts-path MemoryTest/json_data/semantic_facts.json \
   --selection-mode head \
@@ -55,7 +71,7 @@ python MemoryTest/run_lora_upper_bound.py \
 ## 3. Evaluate Original SHINE
 
 ```bash
-python MemoryTest/eval_shine_memory.py \
+python -m MemoryTest.evaluation.eval_shine_memory \
   --config MemoryTest/config/case_test.yaml \
   --checkpoint-dir /path/to/original_shine_checkpoint \
   --test-file MemoryTest/json_data/splits/semantic_test.json \
@@ -68,7 +84,7 @@ python MemoryTest/eval_shine_memory.py \
 ## 4. Post-Train SHINE
 
 ```bash
-python MemoryTest/posttrain_shine_memory.py \
+python -m MemoryTest.training.posttrain_shine_memory \
   --config MemoryTest/config/case_test.yaml \
   --checkpoint-dir /path/to/original_shine_checkpoint \
   --train-file MemoryTest/json_data/splits/semantic_train_augmented.json \
@@ -92,7 +108,7 @@ MemoryTest/checkpoints/shine_memory_posttrain/summary.json
 Resume:
 
 ```bash
-python MemoryTest/posttrain_shine_memory.py \
+python -m MemoryTest.training.posttrain_shine_memory \
   --config MemoryTest/config/case_test.yaml \
   --checkpoint-dir /path/to/original_shine_checkpoint \
   --resume \
@@ -102,7 +118,7 @@ python MemoryTest/posttrain_shine_memory.py \
 ## 5. Evaluate Post-Trained SHINE
 
 ```bash
-python MemoryTest/eval_shine_memory.py \
+python -m MemoryTest.evaluation.eval_shine_memory \
   --config MemoryTest/config/case_test.yaml \
   --baseline-checkpoint-dir /path/to/original_shine_checkpoint \
   --checkpoint-dir MemoryTest/checkpoints/shine_memory_posttrain/best \

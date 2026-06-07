@@ -1,11 +1,11 @@
 #!/bin/bash
 
-python MemoryTest/prepare_memory_data.py \
+python -m MemoryTest.data.prepare_memory_data \
   --input MemoryTest/json_data/semantic_facts.json \
   --seed 42 \
   --generate-synthetic-train 100
 
-python MemoryTest/run_lora_upper_bound.py \
+python -m MemoryTest.training.run_lora_upper_bound \
   --config MemoryTest/config/case_test.yaml \
   --facts-path MemoryTest/json_data/semantic_facts.json \
   --test-file MemoryTest/json_data/splits/semantic_test.json \

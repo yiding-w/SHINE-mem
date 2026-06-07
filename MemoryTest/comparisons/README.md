@@ -12,3 +12,9 @@ python -m MemoryTest.comparisons.compare_baselines
 ```
 
 The comparison scripts still default to `MemoryTest/json_data/semantic_facts.json` and read facts from the head of that file, matching the LoRA upper-bound default `--selection-mode head`.
+
+Capacity source data generation now lives at:
+
+```bash
+python -m MemoryTest.data.generate_capacity_data
+```
