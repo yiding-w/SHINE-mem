@@ -17,6 +17,11 @@ from MemoryTest.training.lora_sft_utils import load_runtime_args, read_facts, re
 
 LOGGER = logging.getLogger("eval_shine_memory")
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate SHINE memory behavior on MemoryTest semantic facts.")
@@ -124,7 +129,13 @@ def evaluate_checkpoint(label: str, args: argparse.Namespace, checkpoint_dir: st
 
     for num_facts in args.num_facts_list:
         trial_results = []
-        for trial in range(args.num_trials):
+        trial_iter = tqdm(
+            range(args.num_trials),
+            desc=f"{label} facts={num_facts}",
+            dynamic_ncols=True,
+            leave=False,
+        ) if tqdm is not None else range(args.num_trials)
+        for trial in trial_iter:
             if len(facts) < num_facts:
                 raise ValueError(f"Need {num_facts} facts, found {len(facts)}")
             context_rows = rng.sample(facts, num_facts)
@@ -178,6 +189,8 @@ def evaluate_checkpoint(label: str, args: argparse.Namespace, checkpoint_dir: st
                     ),
                 )
             trial_results.append(trial_payload)
+            if tqdm is not None:
+                trial_iter.set_postfix({"shine_acc": f"{shine_result['accuracy']:.4f}"})
         shine_acc = [trial["shine"]["accuracy"] for trial in trial_results]
         curves.append(
             {

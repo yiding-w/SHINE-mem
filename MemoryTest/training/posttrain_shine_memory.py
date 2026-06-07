@@ -27,6 +27,11 @@ from MemoryTest.training.shine_train_utils import (
 
 LOGGER = logging.getLogger("posttrain_shine_memory")
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Post-train SHINE on MemoryTest semantic facts.")
@@ -179,8 +184,14 @@ def generate_answer(metanetwork, tokenizer, lora_dict, question: str, device, ma
 def evaluate_current(metanetwork, metalora, tokenizer, cfg, rows, args, runtime_args, device, rng) -> dict:
     metanetwork.eval()
     eval_rows = []
+    progress = tqdm(
+        range(args.eval_trials),
+        desc="posttrain val",
+        dynamic_ncols=True,
+        leave=False,
+    ) if tqdm is not None else range(args.eval_trials)
     with torch.no_grad():
-        for trial in range(args.eval_trials):
+        for trial in progress:
             context_rows, qa_rows = sample_context(rows, args.fact_counts, args.qa_per_context, rng)
             context = build_context(context_rows, context_format=args.context_format)
             from MemoryTest.case_test import generate_context_lora
@@ -197,6 +208,9 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, rows, args, runtime_
                     runtime_args.conversation_max_length,
                 )
                 eval_rows.append(make_eval_row(len(eval_rows) + 1, fact, answer, raw=raw))
+            if tqdm is not None:
+                summary = summarize_examples(eval_rows)
+                progress.set_postfix({"acc": f"{summary['accuracy']:.4f}", "n": summary["total"]})
     metanetwork.train()
     return summarize_examples(eval_rows)
 
@@ -216,7 +230,14 @@ def main() -> None:
     optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate, weight_decay=args.weight_decay)
     best_val_acc = -1.0
 
-    for step in range(1, args.max_steps + 1):
+    train_progress = tqdm(
+        range(1, args.max_steps + 1),
+        desc="SHINE posttrain",
+        dynamic_ncols=True,
+        leave=True,
+    ) if tqdm is not None else range(1, args.max_steps + 1)
+
+    for step in train_progress:
         context_rows, qa_rows = sample_context(train_rows, args.fact_counts, args.qa_per_context, rng)
         context_format = rng.choice(["natural", "structured"]) if args.context_format == "mixed" else args.context_format
         answer_loss, lora_dict, context = compute_answer_loss(
@@ -256,6 +277,16 @@ def main() -> None:
             "qa_fact_ids": [row["id"] for row in qa_rows],
             "context_format": context_format,
         }
+        if tqdm is not None:
+            postfix = {
+                "loss": f"{log_record['loss']:.4f}",
+                "answer": f"{log_record['answer_loss']:.4f}",
+            }
+            if contrastive_loss is not None:
+                postfix["choice"] = f"{log_record['contrastive_loss']:.4f}"
+            if recon_loss is not None:
+                postfix["recon"] = f"{log_record['reconstruction_loss']:.4f}"
+            train_progress.set_postfix(postfix)
         if step % 10 == 0 or step == 1:
             append_jsonl(log_path, log_record)
             LOGGER.info("step=%s loss=%.6f answer=%.6f", step, log_record["loss"], log_record["answer_loss"])
@@ -265,6 +296,8 @@ def main() -> None:
             log_record["val"] = val_summary
             append_jsonl(log_path, log_record)
             LOGGER.info("val step=%s accuracy=%.4f", step, val_summary["accuracy"])
+            if tqdm is not None:
+                train_progress.set_postfix({"loss": f"{log_record['loss']:.4f}", "val_acc": f"{val_summary['accuracy']:.4f}", "best": f"{max(best_val_acc, val_summary['accuracy']):.4f}"})
             save_posttrain_checkpoint(output_dir / "latest", metanetwork, metalora, extra_state={"step": step, "val": val_summary, "config": vars(args)})
             if val_summary["accuracy"] > best_val_acc:
                 best_val_acc = val_summary["accuracy"]
