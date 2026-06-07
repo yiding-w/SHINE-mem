@@ -266,6 +266,23 @@ def load_tokenizer(cfg):
     return tokenizer
 
 
+def resolve_torch_dtype(dtype_name: str | None):
+    if dtype_name is None:
+        return None
+    normalized = str(dtype_name).lower()
+    if normalized in {"", "none"}:
+        return None
+    if normalized == "auto":
+        return "auto"
+    if normalized in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if normalized in {"fp16", "float16", "half"}:
+        return torch.float16
+    if normalized in {"fp32", "float32", "full"}:
+        return torch.float32
+    raise ValueError(f"Unsupported torch dtype: {dtype_name}")
+
+
 def load_runtime(cfg, checkpoint_dir: str, device: torch.device):
     set_seed(int(cfg.run.seed))
     MetaModelCls = _import_class(cfg.model.metamodel_class_path)
@@ -293,8 +310,14 @@ def load_runtime(cfg, checkpoint_dir: str, device: torch.device):
 
     tokenizer = load_tokenizer(cfg)
 
-    LOGGER.info("Loading main model from %s", cfg.model.model_from)
-    metamodel = MetaModelCls.from_pretrained(cfg.model.model_from, config=config)
+    dtype = resolve_torch_dtype(getattr(cfg.model, "torch_dtype", None))
+    model_kwargs = {}
+    if dtype is not None:
+        model_kwargs["torch_dtype"] = dtype
+        LOGGER.info("Loading main model from %s with torch_dtype=%s", cfg.model.model_from, dtype)
+    else:
+        LOGGER.info("Loading main model from %s", cfg.model.model_from)
+    metamodel = MetaModelCls.from_pretrained(cfg.model.model_from, config=config, **model_kwargs)
     metamodel.reset_mem_tokens()
     metamodel.resize_token_embeddings(len(tokenizer))
 
