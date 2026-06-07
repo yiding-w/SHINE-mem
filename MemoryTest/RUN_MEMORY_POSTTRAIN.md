@@ -93,7 +93,7 @@ python -m MemoryTest.evaluation.eval_shine_memory \
 python -m MemoryTest.evaluation.eval_shine_memory \
   --config MemoryTest/config/case_test.yaml \
   --checkpoint-dir /home/wangyiding/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1 \
-  --test-file MemoryTest/json_data/splits/semantic_test.json \
+  --test-file MemoryTest/json_data/splits/semantic_test_augmented.json.json \
   --num-facts-list 1 2 4 8 12 20 \
   --num-trials 5 \
   --output MemoryTest/results/shine_original_memory_eval.json
