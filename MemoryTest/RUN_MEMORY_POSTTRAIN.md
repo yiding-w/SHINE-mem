@@ -122,6 +122,32 @@ If this fits, add capacity and auxiliary losses back in order: first `--fact-cou
 
 `--use-gradient-checkpoint` is applied to the context-to-LoRA generation path. The supervised answer/contrastive/reconstruction forward uses the generated LoRA and keeps checkpointing off by default, because per-layer checkpointing can backprop through the same generated LoRA graph multiple times. Only enable `--use-answer-gradient-checkpoint` for debugging experiments.
 
+If loss becomes NaN, start more conservatively by freezing the loaded Meta-LoRA and clamping generated LoRA values:
+
+```bash
+python -m MemoryTest.training.posttrain_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --train-file MemoryTest/json_data/splits/semantic_train_augmented.json \
+  --val-file MemoryTest/json_data/splits/semantic_val.json \
+  --output-dir MemoryTest/checkpoints/shine_memory_posttrain \
+  --fact-counts 1 2 4 8 \
+  --eval-fact-counts 1 2 4 8 \
+  --qa-per-context 2 \
+  --max-steps 2000 \
+  --learning-rate 2e-6 \
+  --grad-clip-norm 0.5 \
+  --answer-max-length 256 \
+  --context-max-length 1024 \
+  --conversation-max-length 512 \
+  --torch-dtype bf16 \
+  --use-gradient-checkpoint \
+  --freeze-metalora \
+  --generated-lora-clamp 5.0
+```
+
+After this is stable, try unfreezing Meta-LoRA with a smaller LR such as `--metalora-learning-rate 5e-7`.
+
 The script saves:
 
 ```text
