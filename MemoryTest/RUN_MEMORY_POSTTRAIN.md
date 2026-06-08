@@ -139,16 +139,14 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --train-file MemoryTest/json_data/splits/semantic_train_augmented.json \
   --val-file MemoryTest/json_data/splits/semantic_val.json \
   --output-dir MemoryTest/checkpoints/shine_memory_posttrain \
-  --fact-counts 1 2 4 8 12 \
+  --fact-counts 1 2 4 8 \
   --qa-per-context 4 \
   --max-steps 2000 \
-  --learning-rate 1e-5 \
+  --learning-rate 5e-6 \
   --eval-every 500 \
   --answer-max-length 256 \
   --context-max-length 1024 \
   --conversation-max-length 512 \
-  --use-contrastive \
-  --use-reconstruction \
   --torch-dtype bf16 \
   --use-gradient-checkpoint
 ```
@@ -185,8 +183,17 @@ python -m MemoryTest.evaluation.eval_shine_memory \
   --checkpoint-dir MemoryTest/checkpoints/shine_memory_posttrain/best \
   --test-file MemoryTest/json_data/splits/semantic_test_augmented.json \
   --num-facts-list 1 2 4 8 12 20 \
-  --num-trials 10 \
+  --num-trials 5 \
   --include-baselines \
+  --output MemoryTest/results/shine_posttrained_memory_eval.json
+
+python -m MemoryTest.evaluation.eval_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --baseline-checkpoint-dir /home/wangyiding/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1 \
+  --checkpoint-dir MemoryTest/checkpoints/shine_memory_posttrain/best \
+  --test-file MemoryTest/json_data/splits/semantic_test_augmented.json \
+  --num-facts-list 1 2 4 8 12 20 \
+  --num-trials 5 \
   --output MemoryTest/results/shine_posttrained_memory_eval.json
 ```
 
