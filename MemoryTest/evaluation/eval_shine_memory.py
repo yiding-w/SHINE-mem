@@ -13,6 +13,7 @@ import torch
 from MemoryTest.prepare_data.prompt_templates import build_context, question_prompt
 from MemoryTest.evaluation.metrics import make_eval_row, relation_breakdown, summarize_examples, wrong_examples
 from MemoryTest.training.lora_sft_utils import load_runtime_args, read_facts, resolve_path
+from MemoryTest.training.shine_train_utils import cast_floating_tensors
 
 
 LOGGER = logging.getLogger("eval_shine_memory")
@@ -35,14 +36,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--context-format", choices=["natural", "structured", "mixed"], default="mixed")
     parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--torch-dtype", choices=["auto", "bf16", "bfloat16", "fp16", "float16", "fp32", "float32"], default="bf16")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--gpu-id", type=int, default=None)
     parser.add_argument("--include-baselines", action="store_true")
     return parser.parse_args()
 
 
-def load_shine(runtime_config_path: str, checkpoint_dir: str, device_name: str | None, gpu_id: int | None):
-    from MemoryTest.case_test import build_cfg, load_runtime, resolve_device
+def model_lora_dtype(metanetwork) -> torch.dtype:
+    return metanetwork.metamodel.get_input_embeddings().weight.dtype
+
+
+def cast_lora_to_model_dtype(lora_dict, metanetwork):
+    return cast_floating_tensors(lora_dict, model_lora_dtype(metanetwork))
+
+
+def load_shine(runtime_config_path: str, checkpoint_dir: str, device_name: str | None, gpu_id: int | None, torch_dtype: str):
+    from MemoryTest.case_test import build_cfg, load_runtime, resolve_device, resolve_torch_dtype
 
     runtime_args = load_runtime_args(runtime_config_path)
     if checkpoint_dir:
@@ -53,7 +63,12 @@ def load_shine(runtime_config_path: str, checkpoint_dir: str, device_name: str |
         runtime_args.gpu_id = gpu_id
     device = resolve_device(runtime_args.device, runtime_args.gpu_id)
     cfg = build_cfg(runtime_args)
+    cfg.model.torch_dtype = torch_dtype
     metanetwork, metalora, tokenizer = load_runtime(cfg, runtime_args.checkpoint_dir, device)
+    dtype = resolve_torch_dtype(torch_dtype)
+    if isinstance(dtype, torch.dtype):
+        metanetwork.to(device=device, dtype=dtype)
+        metalora = cast_floating_tensors(metalora, dtype)
     metanetwork.eval()
     return runtime_args, cfg, device, metanetwork, metalora, tokenizer
 
@@ -98,7 +113,8 @@ def answer_in_context(metanetwork, tokenizer, context: str, question: str, devic
 def generate_lora(context: str, metanetwork, tokenizer, metalora, cfg, device):
     from MemoryTest.case_test import generate_context_lora
 
-    return generate_context_lora(context, metanetwork, tokenizer, metalora, cfg, device)
+    lora_dict = generate_context_lora(context, metanetwork, tokenizer, metalora, cfg, device)
+    return cast_lora_to_model_dtype(lora_dict, metanetwork)
 
 
 def evaluate_rows(label: str, rows: list[dict], answer_fn) -> dict:
@@ -122,6 +138,7 @@ def evaluate_checkpoint(label: str, args: argparse.Namespace, checkpoint_dir: st
         checkpoint_dir,
         args.device,
         args.gpu_id,
+        args.torch_dtype,
     )
     max_new_tokens = args.max_new_tokens or runtime_args.max_new_tokens
     rng = random.Random(args.seed)
