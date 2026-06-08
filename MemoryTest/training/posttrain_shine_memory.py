@@ -17,7 +17,9 @@ from MemoryTest.training.lora_sft_utils import load_runtime_args
 from MemoryTest.training.shine_train_utils import (
     append_jsonl,
     cast_floating_tensors,
+    clamp_lora_tensors,
     compute_combined_lora_loss,
+    lora_tensor_stats,
     read_json,
     resolve_path,
     sample_context,
@@ -48,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-format", choices=["natural", "structured", "mixed"], default="mixed")
     parser.add_argument("--max-steps", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument("--metalora-learning-rate", type=float, default=None)
+    parser.add_argument("--mem-token-learning-rate", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--eval-every", type=int, default=500)
@@ -67,6 +71,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--contrastive-weight", type=float, default=0.5)
     parser.add_argument("--use-reconstruction", action="store_true")
     parser.add_argument("--recon-weight", type=float, default=0.2)
+    parser.add_argument("--generated-lora-clamp", type=float, default=10.0)
+    parser.add_argument("--freeze-metalora", action="store_true")
+    parser.add_argument("--freeze-mem-tokens", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--gpu-id", type=int, default=None)
@@ -173,8 +180,51 @@ def load_shine_for_training(args: argparse.Namespace):
     if hasattr(metanetwork.metamodel, "gradient_checkpointing_enable") and args.use_answer_gradient_checkpoint:
         metanetwork.metamodel.gradient_checkpointing_enable()
     metanetwork.train()
-    trainable = set_posttrain_requires_grad(metanetwork, metalora)
+    trainable = set_posttrain_requires_grad(
+        metanetwork,
+        metalora,
+        train_metalora=not args.freeze_metalora,
+        train_mem_tokens=not args.freeze_mem_tokens,
+    )
     return runtime_args, cfg, device, metanetwork, metalora, tokenizer, trainable
+
+
+def build_optimizer(trainable: dict[str, list[torch.Tensor]], args: argparse.Namespace):
+    param_groups = []
+    if trainable["metanetwork"]:
+        param_groups.append(
+            {
+                "params": trainable["metanetwork"],
+                "lr": args.learning_rate,
+                "weight_decay": args.weight_decay,
+                "name": "metanetwork",
+            }
+        )
+    if trainable["mem_tokens"]:
+        param_groups.append(
+            {
+                "params": trainable["mem_tokens"],
+                "lr": args.mem_token_learning_rate if args.mem_token_learning_rate is not None else args.learning_rate,
+                "weight_decay": args.weight_decay,
+                "name": "mem_tokens",
+            }
+        )
+    if trainable["metalora"]:
+        param_groups.append(
+            {
+                "params": trainable["metalora"],
+                "lr": args.metalora_learning_rate if args.metalora_learning_rate is not None else args.learning_rate,
+                "weight_decay": args.weight_decay,
+                "name": "metalora",
+            }
+        )
+    if not param_groups:
+        raise ValueError("No trainable parameters selected.")
+    LOGGER.info(
+        "Optimizer groups: %s",
+        ", ".join(f"{group['name']} n={sum(param.numel() for param in group['params'])} lr={group['lr']}" for group in param_groups),
+    )
+    return torch.optim.AdamW(param_groups)
 
 
 def encode_choice_batch(tokenizer, context_rows: list[dict], qa_rows: list[dict], max_length: int, device):
@@ -285,6 +335,7 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, rows, args, runtime_
             from MemoryTest.case_test import generate_context_lora
 
             lora_dict = generate_context_lora(context, metanetwork, tokenizer, metalora, cfg, device)
+            lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
             for fact in qa_rows:
                 answer, raw = generate_answer(
                     metanetwork,
@@ -315,7 +366,7 @@ def main() -> None:
     rng = random.Random(args.seed)
 
     runtime_args, cfg, device, metanetwork, metalora, tokenizer, trainable = load_shine_for_training(args)
-    optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(trainable, args)
     best_val_acc = -1.0
 
     train_progress = tqdm(
@@ -338,6 +389,10 @@ def main() -> None:
             device,
             use_gradient_checkpoint=args.use_gradient_checkpoint,
         )
+        lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
+        lora_stats = lora_tensor_stats(lora_dict)
+        if lora_stats["finite"] < 1.0:
+            raise FloatingPointError(f"Generated LoRA is non-finite at step {step}.")
         training_records = build_training_records(context_rows, qa_rows, args.use_contrastive, args.use_reconstruction)
         category_losses = compute_combined_lora_loss(
             training_records,
@@ -368,6 +423,7 @@ def main() -> None:
                 "qa_fact_ids": [row["id"] for row in qa_rows],
                 "context_format": context_format,
                 "nonfinite": True,
+                "lora_stats": lora_stats,
             }
             append_jsonl(log_path, bad_record)
             raise FloatingPointError(
@@ -378,7 +434,8 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if args.grad_clip_norm > 0:
-            torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip_norm)
+            trainable_params = [param for group in trainable.values() for param in group]
+            torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip_norm)
         optimizer.step()
 
         log_record = {
@@ -390,11 +447,13 @@ def main() -> None:
             "context_fact_ids": [row["id"] for row in context_rows],
             "qa_fact_ids": [row["id"] for row in qa_rows],
             "context_format": context_format,
+            "lora_stats": lora_stats,
         }
         if tqdm is not None:
             postfix = {
                 "loss": f"{log_record['loss']:.4f}",
                 "answer": f"{log_record['answer_loss']:.4f}",
+                "lora_max": f"{lora_stats['max_abs']:.2f}",
             }
             if contrastive_loss is not None:
                 postfix["choice"] = f"{log_record['contrastive_loss']:.4f}"

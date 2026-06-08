@@ -63,6 +63,46 @@ def cast_floating_tensors(obj: Any, dtype: torch.dtype):
     return obj
 
 
+def iter_lora_tensors(obj: Any):
+    if torch.is_tensor(obj):
+        yield obj
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            yield from iter_lora_tensors(value)
+    elif isinstance(obj, (list, tuple)):
+        for value in obj:
+            yield from iter_lora_tensors(value)
+
+
+def clamp_lora_tensors(obj: Any, max_abs: float):
+    if max_abs <= 0:
+        return obj
+    if torch.is_tensor(obj):
+        return torch.clamp(obj, min=-max_abs, max=max_abs)
+    if isinstance(obj, dict):
+        return {key: clamp_lora_tensors(value, max_abs) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [clamp_lora_tensors(value, max_abs) for value in obj]
+    if isinstance(obj, tuple):
+        return tuple(clamp_lora_tensors(value, max_abs) for value in obj)
+    return obj
+
+
+def lora_tensor_stats(obj: Any) -> dict[str, float]:
+    tensors = [tensor.detach() for tensor in iter_lora_tensors(obj) if tensor.is_floating_point()]
+    if not tensors:
+        return {"max_abs": 0.0, "mean_abs": 0.0, "finite": 1.0}
+    max_abs = max(float(tensor.abs().max().cpu()) for tensor in tensors)
+    total_abs = sum(float(tensor.abs().sum().cpu()) for tensor in tensors)
+    total_numel = sum(tensor.numel() for tensor in tensors)
+    finite = all(bool(torch.isfinite(tensor).all().cpu()) for tensor in tensors)
+    return {
+        "max_abs": max_abs,
+        "mean_abs": total_abs / max(total_numel, 1),
+        "finite": 1.0 if finite else 0.0,
+    }
+
+
 def sample_context(rows: list[dict], fact_counts: list[int], qa_per_context: int, rng: random.Random) -> tuple[list[dict], list[dict]]:
     count = rng.choice(fact_counts)
     if len(rows) < count:
@@ -232,13 +272,18 @@ def encode_reconstruction(tokenizer, context_rows: list[dict], max_length: int, 
     }
 
 
-def set_posttrain_requires_grad(metanetwork, metalora):
-    trainable = []
+def set_posttrain_requires_grad(metanetwork, metalora, train_metalora: bool = True, train_mem_tokens: bool = True):
+    groups = {
+        "metanetwork": [],
+        "mem_tokens": [],
+        "metalora": [],
+    }
 
     def add_lora_tensors(obj: Any):
         if torch.is_tensor(obj):
-            obj.requires_grad_(True)
-            trainable.append(obj)
+            obj.requires_grad_(train_metalora)
+            if train_metalora:
+                groups["metalora"].append(obj)
         elif isinstance(obj, dict):
             for value in obj.values():
                 add_lora_tensors(value)
@@ -250,13 +295,14 @@ def set_posttrain_requires_grad(metanetwork, metalora):
         param.requires_grad_(False)
     for param in metanetwork.metanetwork.parameters():
         param.requires_grad_(True)
-        trainable.append(param)
+        groups["metanetwork"].append(param)
     for name, param in metanetwork.metamodel.named_parameters():
         if "mem_tokens" in name:
-            param.requires_grad_(True)
-            trainable.append(param)
+            param.requires_grad_(train_mem_tokens)
+            if train_mem_tokens:
+                groups["mem_tokens"].append(param)
     add_lora_tensors(metalora)
-    return trainable
+    return groups
 
 
 def compute_answer_loss(context_rows, qa_rows, context_format, metanetwork, metalora, tokenizer, cfg, device, max_length, use_gradient_checkpoint: bool = False):
