@@ -59,25 +59,38 @@ python -m MemoryTest.training.run_lora_upper_bound \
   --output MemoryTest/results/lora_upper_bound.json
 ```
 
+```bash
+python -m MemoryTest.training.run_lora_upper_bound \
+  --config MemoryTest/config/case_test.yaml \
+  --facts-path MemoryTest/json_data/semantic_facts.json \
+  --selection-mode head \
+  --ranks 8 \
+  --num-facts-list 20 \
+  --num-trials 1 \
+  --epochs 20 \
+  --batch-size 2 \
+  --learning-rate 5e-4 \
+  --output MemoryTest/results/lora_upper_bound_rank8_20facts_best.json
+```
+
 NTP upper bound trains only on fact/context text and still evaluates with QA generation:
 
 ```bash
 python -m MemoryTest.training.run_lora_upper_bound \
   --config MemoryTest/config/case_test.yaml \
   --facts-path MemoryTest/json_data/semantic_facts.json \
-  --test-file MemoryTest/json_data/splits/semantic_test_augmented.json \
   --selection-mode head \
   --training-objective ntp \
   --ntp-record-mode both \
   --ntp-context-format mixed \
   --ntp-context-variants 5 \
   --ranks 8 \
-  --num-facts-list 4 8 20 \
+  --num-facts-list 20 \
   --num-trials 1 \
   --epochs 20 \
   --batch-size 2 \
   --learning-rate 5e-4 \
-  --output MemoryTest/results/lora_upper_bound_ntp.json
+  --output MemoryTest/results/lora_upper_bound_ntp_rank8_20facts_best.json
 ```
 
 Smoke test:
