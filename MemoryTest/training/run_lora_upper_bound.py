@@ -37,7 +37,7 @@ TARGET_MODULES = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train ordinary SFT LoRA as a MemoryTest memorization upper bound.")
+    parser = argparse.ArgumentParser(description="Train ordinary LoRA as a MemoryTest memorization upper bound.")
     parser.add_argument("--runtime-config", "--config", dest="runtime_config", type=str, default="MemoryTest/config/case_test.yaml")
     parser.add_argument("--facts-path", "--train-file", dest="facts_path", type=str, default="MemoryTest/json_data/semantic_facts.json")
     parser.add_argument("--test-file", type=str, default="")
@@ -52,7 +52,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=2e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--training-objective", choices=["qa_sft", "ntp"], default="qa_sft")
     parser.add_argument("--variants-per-fact", type=int, default=5)
+    parser.add_argument("--ntp-context-format", choices=["natural", "structured", "mixed"], default="mixed")
+    parser.add_argument("--ntp-context-variants", type=int, default=5)
+    parser.add_argument("--ntp-record-mode", choices=["packed", "per_fact", "both"], default="both")
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--device", type=str, default=None)
@@ -175,6 +179,10 @@ def main() -> None:
                     learning_rate=args.learning_rate,
                     weight_decay=args.weight_decay,
                     grad_clip_norm=args.grad_clip_norm,
+                    training_objective=args.training_objective,
+                    ntp_context_format=args.ntp_context_format,
+                    ntp_context_variants=args.ntp_context_variants,
+                    ntp_record_mode=args.ntp_record_mode,
                     progress_label=f"rank={rank} facts={num_facts} trial={trial}",
                     epoch_eval_callback=epoch_eval_callback,
                 )
@@ -210,13 +218,16 @@ def main() -> None:
                     "num_facts": num_facts,
                     "trial": trial,
                     "selection_mode": args.selection_mode,
+                    "training_objective": args.training_objective,
                     "train_fact_ids": [row["id"] for row in train_facts],
                     "train_stats": train_stats,
                     "train_result": train_result,
                     "test_result": test_result,
                 }
                 if args.save_loras:
-                    lora_path = output_path.with_name(f"{output_path.stem}_rank{rank}_facts{num_facts}_trial{trial}_best_lora.pt")
+                    lora_path = output_path.with_name(
+                        f"{output_path.stem}_{args.training_objective}_rank{rank}_facts{num_facts}_trial{trial}_best_lora.pt"
+                    )
                     torch.save(move_lora_to_cpu(best_lora_dict), lora_path)
                     trial_record["lora_path"] = str(lora_path)
                 trials.append(trial_record)
@@ -242,7 +253,7 @@ def main() -> None:
     payload = {
         "config": vars(args),
         "target_modules": TARGET_MODULES,
-        "note": "Ordinary SFT LoRA uses the same LoraQwen injection surface as SHINE generated LoRA: every decoder layer q/k/v/o/gate/up/down.",
+        "note": "Ordinary LoRA uses the same LoraQwen injection surface as SHINE generated LoRA: every decoder layer q/k/v/o/gate/up/down. qa_sft trains on question-answer records; ntp trains only on fact/context text and is evaluated with QA generation.",
         "data": {
             "facts_path": str(resolve_path(args.facts_path)),
             "test_file": str(resolve_path(args.test_file)) if args.test_file else None,

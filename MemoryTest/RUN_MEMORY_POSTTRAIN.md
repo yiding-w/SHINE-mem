@@ -45,6 +45,8 @@ MemoryTest/json_data/splits/split_meta.json
 
 The default selection mode is `head`, so the upper-bound training facts are the first N rows of `semantic_facts.json`, matching the legacy compare scripts.
 
+QA-SFT upper bound directly trains on question-answer records:
+
 ```bash
 python -m MemoryTest.training.run_lora_upper_bound \
   --config MemoryTest/config/case_test.yaml \
@@ -55,6 +57,27 @@ python -m MemoryTest.training.run_lora_upper_bound \
   --num-facts-list 4 8 20 \
   --num-trials 1 \
   --output MemoryTest/results/lora_upper_bound.json
+```
+
+NTP upper bound trains only on fact/context text and still evaluates with QA generation:
+
+```bash
+python -m MemoryTest.training.run_lora_upper_bound \
+  --config MemoryTest/config/case_test.yaml \
+  --facts-path MemoryTest/json_data/semantic_facts.json \
+  --test-file MemoryTest/json_data/splits/semantic_test_augmented.json \
+  --selection-mode head \
+  --training-objective ntp \
+  --ntp-record-mode both \
+  --ntp-context-format mixed \
+  --ntp-context-variants 5 \
+  --ranks 8 \
+  --num-facts-list 4 8 20 \
+  --num-trials 1 \
+  --epochs 20 \
+  --batch-size 2 \
+  --learning-rate 5e-4 \
+  --output MemoryTest/results/lora_upper_bound_ntp.json
 ```
 
 Smoke test:

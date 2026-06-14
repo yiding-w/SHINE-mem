@@ -8,7 +8,7 @@ from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
-from MemoryTest.prepare_data.prompt_templates import lora_sft_examples_for_fact
+from MemoryTest.prepare_data.prompt_templates import build_context, lora_sft_examples_for_fact
 
 try:
     from tqdm.auto import tqdm
@@ -155,6 +155,48 @@ def build_sft_records(facts: list[dict], seed: int, variants_per_fact: int) -> l
     return records
 
 
+def resolve_mixed_context_format(index: int) -> str:
+    return "structured" if index % 2 else "natural"
+
+
+def build_ntp_records(
+    facts: list[dict],
+    seed: int,
+    context_variants: int,
+    context_format: str,
+    record_mode: str,
+) -> list[dict[str, str]]:
+    rng = random.Random(seed)
+    records = []
+    if record_mode in {"packed", "both"}:
+        for variant_idx in range(max(1, context_variants)):
+            rows = list(facts)
+            rng.shuffle(rows)
+            fmt = resolve_mixed_context_format(variant_idx) if context_format == "mixed" else context_format
+            records.append(
+                {
+                    "fact_id": "packed_context",
+                    "attribute": "packed_context",
+                    "text": build_context(rows, context_format=fmt),
+                    "kind": f"ntp_packed_{fmt}",
+                }
+            )
+    if record_mode in {"per_fact", "both"}:
+        for fact in facts:
+            records.append(
+                {
+                    "fact_id": str(fact["id"]),
+                    "attribute": str(fact.get("attribute", fact.get("relation", "unknown"))),
+                    "text": str(fact["text"]),
+                    "kind": "ntp_fact_text",
+                }
+            )
+    if record_mode not in {"packed", "per_fact", "both"}:
+        raise ValueError(f"Unknown NTP record mode: {record_mode}")
+    rng.shuffle(records)
+    return records
+
+
 def encode_answer_only(tokenizer, prompt: str, answer: str, max_length: int):
     user_messages = [{"role": "user", "content": prompt}]
     prompt_ids = tokenizer.apply_chat_template(
@@ -169,6 +211,20 @@ def encode_answer_only(tokenizer, prompt: str, answer: str, max_length: int):
     answer_ids = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
     input_ids = (prompt_ids + answer_ids)[-max_length:]
     labels = ([-100] * len(prompt_ids) + answer_ids)[-max_length:]
+    attention_mask = [1] * len(input_ids)
+    return {
+        "input_ids": input_ids,
+        "labels": labels,
+        "attention_mask": attention_mask,
+    }
+
+
+def encode_ntp_text(tokenizer, text: str, max_length: int):
+    text = str(text).strip()
+    if tokenizer.eos_token:
+        text += tokenizer.eos_token
+    input_ids = tokenizer(text, add_special_tokens=False)["input_ids"][-max_length:]
+    labels = list(input_ids)
     attention_mask = [1] * len(input_ids)
     return {
         "input_ids": input_ids,
@@ -211,13 +267,29 @@ def train_lora_dict(
     learning_rate: float,
     weight_decay: float,
     grad_clip_norm: float,
+    training_objective: str = "qa_sft",
+    ntp_context_format: str = "mixed",
+    ntp_context_variants: int = 5,
+    ntp_record_mode: str = "both",
     progress_label: str | None = None,
     epoch_eval_callback=None,
 ) -> dict:
     import torch
 
-    records = build_sft_records(facts, seed=seed, variants_per_fact=variants_per_fact)
-    encoded = [encode_answer_only(tokenizer, row["prompt"], row["answer"], max_length=max_length) for row in records]
+    if training_objective == "qa_sft":
+        records = build_sft_records(facts, seed=seed, variants_per_fact=variants_per_fact)
+        encoded = [encode_answer_only(tokenizer, row["prompt"], row["answer"], max_length=max_length) for row in records]
+    elif training_objective == "ntp":
+        records = build_ntp_records(
+            facts,
+            seed=seed,
+            context_variants=ntp_context_variants,
+            context_format=ntp_context_format,
+            record_mode=ntp_record_mode,
+        )
+        encoded = [encode_ntp_text(tokenizer, row["text"], max_length=max_length) for row in records]
+    else:
+        raise ValueError(f"Unknown LoRA upper-bound training objective: {training_objective}")
     optimizer = torch.optim.AdamW(list(iter_lora_tensors(lora_dict)), lr=learning_rate, weight_decay=weight_decay)
     rng = random.Random(seed)
     step = 0
