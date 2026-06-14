@@ -137,6 +137,23 @@ def clone_lora_detached(tree: Any):
     return tree
 
 
+def make_lora_trainable(tree: Any):
+    import torch
+
+    if torch.is_tensor(tree):
+        tensor = tree.detach().clone()
+        if tensor.is_floating_point():
+            tensor.requires_grad_(True)
+        return tensor
+    if isinstance(tree, dict):
+        return {key: make_lora_trainable(value) for key, value in tree.items()}
+    if isinstance(tree, list):
+        return [make_lora_trainable(value) for value in tree]
+    if isinstance(tree, tuple):
+        return tuple(make_lora_trainable(value) for value in tree)
+    return tree
+
+
 def build_sft_records(facts: list[dict], seed: int, variants_per_fact: int) -> list[dict[str, str]]:
     rng = random.Random(seed)
     records = []

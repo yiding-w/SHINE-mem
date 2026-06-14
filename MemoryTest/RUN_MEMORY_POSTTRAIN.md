@@ -10,6 +10,7 @@ The runnable scripts are grouped by responsibility:
 MemoryTest/prepare_data/prepare_memory_data.py
 MemoryTest/prepare_data/generate_capacity_data.py
 MemoryTest/training/run_lora_upper_bound.py
+MemoryTest/training/run_shine_initialized_lora_sft.py
 MemoryTest/training/posttrain_shine_memory.py
 MemoryTest/evaluation/eval_shine_memory.py
 MemoryTest/comparisons/*.py
@@ -94,7 +95,50 @@ python -m MemoryTest.training.run_lora_upper_bound \
   --output MemoryTest/results/lora_upper_bound_smoke.json
 ```
 
-## 3. Evaluate Original SHINE
+## 3. SHINE-Initialized LoRA SFT
+
+This freezes SHINE and Qwen, generates `LoRA = SHINE(context)`, then updates only that LoRA dictionary for a small QA-SFT or NTP run. It measures whether SHINE is a better initialization than a random LoRA upper bound.
+
+Short QA-SFT adaptation:
+
+```bash
+python -m MemoryTest.training.run_shine_initialized_lora_sft \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --facts-path MemoryTest/json_data/semantic_facts.json \
+  --selection-mode head \
+  --training-objective qa_sft \
+  --num-facts-list 20 \
+  --num-trials 1 \
+  --epochs 3 \
+  --batch-size 2 \
+  --learning-rate 5e-4 \
+  --output MemoryTest/results/shine_initialized_lora_qa_sft.json
+```
+
+Short NTP adaptation:
+
+```bash
+python -m MemoryTest.training.run_shine_initialized_lora_sft \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --facts-path MemoryTest/json_data/semantic_facts.json \
+  --selection-mode head \
+  --training-objective ntp \
+  --ntp-record-mode both \
+  --ntp-context-format mixed \
+  --ntp-context-variants 3 \
+  --num-facts-list 20 \
+  --num-trials 1 \
+  --epochs 3 \
+  --batch-size 2 \
+  --learning-rate 5e-4 \
+  --output MemoryTest/results/shine_initialized_lora_ntp_sft.json
+```
+
+The output has both `shine_init_result` and `adapted_train_result`. `train_stats.best_epoch` tells which adaptation epoch was best.
+
+## 4. Evaluate Original SHINE
 
 ```bash
 python -m MemoryTest.evaluation.eval_shine_memory \
@@ -107,7 +151,7 @@ python -m MemoryTest.evaluation.eval_shine_memory \
   --output MemoryTest/results/shine_original_memory_eval.json
 ```
 
-## 4. Post-Train SHINE
+## 5. Post-Train SHINE
 
 ```bash
 python -m MemoryTest.training.posttrain_shine_memory \
@@ -190,7 +234,7 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --output-dir MemoryTest/checkpoints/shine_memory_posttrain
 ```
 
-## 5. Evaluate Post-Trained SHINE
+## 6. Evaluate Post-Trained SHINE
 
 ```bash
 python -m MemoryTest.evaluation.eval_shine_memory \
