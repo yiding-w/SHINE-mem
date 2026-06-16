@@ -11,6 +11,8 @@ MemoryTest/prepare_data/prepare_memory_data.py
 MemoryTest/prepare_data/generate_capacity_data.py
 MemoryTest/training/run_lora_upper_bound.py
 MemoryTest/training/run_shine_initialized_lora_sft.py
+MemoryTest/teacher_lora/build_teacher_lora_bank.py
+MemoryTest/training/posttrain_shine_teacher_lora.py
 MemoryTest/training/posttrain_shine_memory.py
 MemoryTest/evaluation/eval_shine_memory.py
 MemoryTest/comparisons/*.py
@@ -138,7 +140,83 @@ python -m MemoryTest.training.run_shine_initialized_lora_sft \
 
 The output has both `shine_init_result` and `adapted_train_result`. `train_stats.best_epoch` tells which adaptation epoch was best.
 
-## 4. Evaluate Original SHINE
+## 4. Teacher-LoRA Alignment Post-Train
+
+This is a separate experiment from plain answer-CE post-training. First build an offline teacher LoRA bank. Each entry samples a context, trains an ordinary QA-SFT LoRA teacher for that context, and saves the best LoRA.
+
+Small teacher bank smoke run:
+
+```bash
+python -m MemoryTest.teacher_lora.build_teacher_lora_bank \
+  --config MemoryTest/config/case_test.yaml \
+  --facts-path MemoryTest/json_data/splits/semantic_train_augmented.json \
+  --output-dir MemoryTest/teacher_loras/qa_sft_rank8_smoke \
+  --rank 8 \
+  --fact-counts 4 8 20 \
+  --contexts-per-count 2 \
+  --context-sampling random \
+  --training-objective qa_sft \
+  --variants-per-fact 5 \
+  --epochs 3 \
+  --batch-size 2 \
+  --learning-rate 5e-4
+```
+
+Larger first run:
+
+```bash
+python -m MemoryTest.teacher_lora.build_teacher_lora_bank \
+  --config MemoryTest/config/case_test.yaml \
+  --facts-path MemoryTest/json_data/splits/semantic_train_augmented.json \
+  --output-dir MemoryTest/teacher_loras/qa_sft_rank8 \
+  --rank 8 \
+  --fact-counts 4 8 20 \
+  --contexts-per-count 50 \
+  --context-sampling random \
+  --training-objective qa_sft \
+  --variants-per-fact 5 \
+  --epochs 3 \
+  --batch-size 2 \
+  --learning-rate 5e-4
+```
+
+Then train SHINE to generate LoRA close to those teacher LoRAs. SHINE/Qwen loading is the same as other post-training runs; Qwen stays frozen, while the trainable SHINE parts follow the same flags as `posttrain_shine_memory.py`.
+
+```bash
+python -m MemoryTest.training.posttrain_shine_teacher_lora \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --teacher-bank-dir MemoryTest/teacher_loras/qa_sft_rank8 \
+  --val-file MemoryTest/json_data/splits/semantic_val.json \
+  --output-dir MemoryTest/checkpoints/shine_teacher_lora_posttrain \
+  --fact-counts 4 8 20 \
+  --max-steps 2000 \
+  --learning-rate 1e-6 \
+  --teacher-align-weight 1.0 \
+  --answer-weight 0.1 \
+  --qa-per-context 4 \
+  --context-max-length 1024 \
+  --conversation-max-length 512 \
+  --answer-max-length 256 \
+  --torch-dtype bf16 \
+  --use-gradient-checkpoint
+```
+
+The alignment loss compares the actual low-rank update `Delta W = A @ B` module by module, not the raw `A/B` factors. It uses a low-rank Frobenius formula, so it does not materialize full FFN delta matrices. Set `--answer-weight 0` to train only with teacher parameter alignment.
+
+Outputs:
+
+```text
+MemoryTest/teacher_loras/qa_sft_rank8/index.json
+MemoryTest/teacher_loras/qa_sft_rank8/context_000001/meta.json
+MemoryTest/teacher_loras/qa_sft_rank8/context_000001/teacher_lora.pt
+MemoryTest/checkpoints/shine_teacher_lora_posttrain/latest/
+MemoryTest/checkpoints/shine_teacher_lora_posttrain/best/
+MemoryTest/checkpoints/shine_teacher_lora_posttrain/shine_teacher_lora_train_log.jsonl
+MemoryTest/checkpoints/shine_teacher_lora_posttrain/summary.json
+```
+
+## 5. Evaluate Original SHINE
 
 ```bash
 python -m MemoryTest.evaluation.eval_shine_memory \
@@ -151,7 +229,7 @@ python -m MemoryTest.evaluation.eval_shine_memory \
   --output MemoryTest/results/shine_original_memory_eval.json
 ```
 
-## 5. Post-Train SHINE
+## 6. Post-Train SHINE
 
 ```bash
 python -m MemoryTest.training.posttrain_shine_memory \
@@ -234,7 +312,7 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --output-dir MemoryTest/checkpoints/shine_memory_posttrain
 ```
 
-## 6. Evaluate Post-Trained SHINE
+## 7. Evaluate Post-Trained SHINE
 
 ```bash
 python -m MemoryTest.evaluation.eval_shine_memory \
