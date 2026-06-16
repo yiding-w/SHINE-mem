@@ -123,16 +123,16 @@ Short QA-SFT adaptation:
 ```bash
 python -m MemoryTest.training.run_shine_initialized_lora_sft \
   --config MemoryTest/config/case_test.yaml \
-  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --checkpoint-dir /home/wangyiding/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1 \
   --facts-path MemoryTest/json_data/semantic_facts.json \
   --selection-mode head \
   --training-objective qa_sft \
   --num-facts-list 20 \
   --num-trials 1 \
-  --epochs 3 \
+  --epochs 1 \
   --batch-size 2 \
   --learning-rate 5e-4 \
-  --output MemoryTest/results/shine_initialized_lora_qa_sft.json
+  --output MemoryTest/results/shine_initialized_lora_qa_sft_epoch1.json
 ```
 
 Short NTP adaptation:
@@ -140,7 +140,7 @@ Short NTP adaptation:
 ```bash
 python -m MemoryTest.training.run_shine_initialized_lora_sft \
   --config MemoryTest/config/case_test.yaml \
-  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --checkpoint-dir /home/wangyiding/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/train/checkpoint-epoch-1 \
   --facts-path MemoryTest/json_data/semantic_facts.json \
   --selection-mode head \
   --training-objective ntp \
@@ -149,10 +149,10 @@ python -m MemoryTest.training.run_shine_initialized_lora_sft \
   --ntp-context-variants 3 \
   --num-facts-list 20 \
   --num-trials 1 \
-  --epochs 3 \
+  --epochs 10 \
   --batch-size 2 \
   --learning-rate 5e-4 \
-  --output MemoryTest/results/shine_initialized_lora_ntp_sft.json
+  --output MemoryTest/results/shine_initialized_lora_ntp_sft_epoch10.json
 ```
 
 The output has both `shine_init_result` and `adapted_train_result`. `train_stats.best_epoch` tells which adaptation epoch was best.
