@@ -9,7 +9,7 @@
 #   bash run_delta_mem_hgx001.sh              # 默认：复现 frozen base 全套（exact 协议）
 #   bash run_delta_mem_hgx001.sh base         # 同上
 #   bash run_delta_mem_hgx001.sh shine-mab    # 仅 SHINE × 完整 MAB
-#   bash run_delta_mem_hgx001.sh compare-mab  # base + SHINE，仅完整 MAB，同一 JSON
+#   bash run_delta_mem_hgx001.sh base-mab     # 仅 frozen Qwen3-8B × 完整 MAB
 set -euo pipefail
 
 MODE="${1:-base}"
@@ -63,7 +63,8 @@ if [[ "${LOCAL_FILES_ONLY}" == "1" ]]; then
 fi
 
 mkdir -p "${OUTPUT_ROOT}" "${LOG_ROOT}"
-bash "${MAB_ROOT}/bash_files/sh/download_mab_recsys_entity2id.sh"
+# Non-fatal: hgx001 often cannot reach huggingface.co. Missing file only breaks recsys (~54%).
+bash "${MAB_ROOT}/bash_files/sh/download_mab_recsys_entity2id.sh" || true
 echo "PYTHON_BIN=${PYTHON_BIN}"
 if ! PYTHONPATH="${DELTA_MEM_ROOT}:${SHINE_ROOT}:${MAB_ROOT}" "${PYTHON_BIN}" -c "import torch, transformers; from deltamem.eval import benchmark_compare; print('preflight OK', torch.__version__, transformers.__version__)"; then
   echo "Fix env: RECREATE_VENV=1 TORCH_INDEX=cu121 bash ${MAB_ROOT}/bash_files/sh/setup_delta_mem_hgx001.sh" >&2
@@ -186,6 +187,10 @@ run_benchmark_task_base() {
     2>&1 | tee "${log}"
 }
 
+run_mab_base_only() {
+  run_benchmark_task_base memory_agent_bench 30174
+}
+
 run_mab_compare() {
   local out="${OUTPUT_ROOT}/compare_mab/base_and_shine.json"
   local log="${LOG_ROOT}/compare_mab.log"
@@ -234,6 +239,9 @@ case "${MODE}" in
   shine-mab|shine)
     run_mab_shine_only
     ;;
+  base-mab|mab-base)
+    run_mab_base_only
+    ;;
   compare-mab|compare)
     run_mab_compare
     ;;
@@ -242,8 +250,9 @@ case "${MODE}" in
     run_mab_shine_only
     ;;
   *)
-    echo "Usage: $0 [base|shine-mab|compare-mab|all]" >&2
+    echo "Usage: $0 [base|base-mab|shine-mab|compare-mab|all]" >&2
     echo "  base        δ-mem 官方全套 frozen Qwen3-8B（默认）" >&2
+    echo "  base-mab    仅 frozen Qwen3-8B × 完整 MAB（不跑 SHINE）" >&2
     echo "  shine-mab   完整 MAB + SHINE" >&2
     echo "  compare-mab 完整 MAB，base 与 SHINE 同一 JSON" >&2
     echo "  all         base 全套 + SHINE MAB" >&2

@@ -50,19 +50,30 @@ export PYTHON_BIN=$SHINE_ROOT/third_party/delta-Mem/.venv/bin/python
 | `torch has no attribute float8_e8m0fnu` | transformers 5.x 与 cu121 torch 不兼容 → `RECREATE_VENV=1` 重跑 setup |
 | 已有 conda `MABench` | `USE_EXISTING_PYTHON=1 PYTHON_BIN=$(which python) bash .../setup_delta_mem_hgx001.sh` |
 | `-m: command not found` | `git pull` 后重跑；并 `export PYTHON_BIN=.../.venv/bin/python` |
-| `entity2id.json` not found（recsys） | `bash bash_files/sh/download_mab_recsys_entity2id.sh`（setup/run 脚本已自动调用） |
+| `entity2id.json` not found（recsys） | hgx001 常连不上 huggingface.co → **scp 手动拷贝**（见下） |
+| `curl: Failed to connect to huggingface.co` | 同上；或 `export HF_ENDPOINT=https://hf-mirror.com` 后重试 download 脚本 |
 
 ### recsys 依赖（完整 MAB 必装）
 
 `memory_agent_bench` 含 `recsys_redial_full`，评分需要：
 
-`MemoryAgentBench/processed_data/Recsys_Redial/entity2id.json`
+`MemoryAgentBench/processed_data/Recsys_Redial/entity2id.json`（约 1.7MB）
 
-来源：[ai-hyz/MemoryAgentBench](https://huggingface.co/datasets/ai-hyz/MemoryAgentBench) 根目录 `entity2id.json`。一键下载：
+**hgx001 无法访问 HuggingFace 时**（最常见），在本机下载后 scp：
 
 ```bash
-bash $SHINE_ROOT/MemoryAgentBench/bash_files/sh/download_mab_recsys_entity2id.sh
+# 本机（有网）
+mkdir -p MemoryAgentBench/processed_data/Recsys_Redial
+curl -fsSL -o MemoryAgentBench/processed_data/Recsys_Redial/entity2id.json \
+  "https://hf-mirror.com/datasets/ai-hyz/MemoryAgentBench/resolve/main/entity2id.json"
+
+scp MemoryAgentBench/processed_data/Recsys_Redial/entity2id.json \
+  muhan01@hgx001:/ceph/home/muhan01/wyd/SHINE-mem/MemoryAgentBench/processed_data/Recsys_Redial/
 ```
+
+服务器上也可试镜像：`HF_ENDPOINT=https://hf-mirror.com bash bash_files/sh/download_mab_recsys_entity2id.sh`
+
+**说明**：旧版 run 脚本不会在开头下载此文件，评测能启动，到 recsys（约 54%）才崩溃；新版会先尝试下载，连不上 HF 时会 **WARN 并继续**（需 scp 才能在 54% 之后不崩）。
 
 ## 跑评测 — 与 δ-mem 官方 **完全一致** 的全套
 
