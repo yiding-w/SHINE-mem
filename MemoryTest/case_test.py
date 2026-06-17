@@ -39,6 +39,9 @@ MINIMAL_CHAT_TEMPLATE = """{%- for message in messages %}
 {%- endfor %}
 {%- if add_generation_prompt %}
 {{- '<|im_start|>assistant\n' }}
+{%- if enable_thinking is defined and not enable_thinking %}
+{{- '<think>\n\n</think>\n\n' }}
+{%- endif %}
 {%- endif %}
 """
 
@@ -131,7 +134,9 @@ def parse_args() -> argparse.Namespace:
     _add_configurable_argument(parser, defaults, "--metalora-r", type=int, config_key="metalora_r", help="Meta-LoRA rank used by the SHINE checkpoint.")
     _add_configurable_argument(parser, defaults, "--metanetwork-layers", type=int, config_key="metanetwork_layers", help="Number of metanetwork transformer layers.")
     parser.set_defaults(use_system_prompt=bool(defaults.get("use_system_prompt", False)))
+    parser.set_defaults(enable_thinking=bool(defaults.get("enable_thinking", False)))
     parser.add_argument("--use-system-prompt", action="store_true", help="Optionally prepend a short system prompt.")
+    parser.add_argument("--enable-thinking", action="store_true", help="Allow Qwen thinking output during answer generation.")
     return parser.parse_args()
 
 
@@ -261,6 +266,23 @@ def load_tokenizer(cfg):
     return tokenizer
 
 
+def resolve_torch_dtype(dtype_name: str | None):
+    if dtype_name is None:
+        return None
+    normalized = str(dtype_name).lower()
+    if normalized in {"", "none"}:
+        return None
+    if normalized == "auto":
+        return "auto"
+    if normalized in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if normalized in {"fp16", "float16", "half"}:
+        return torch.float16
+    if normalized in {"fp32", "float32", "full"}:
+        return torch.float32
+    raise ValueError(f"Unsupported torch dtype: {dtype_name}")
+
+
 def load_runtime(cfg, checkpoint_dir: str, device: torch.device):
     set_seed(int(cfg.run.seed))
     MetaModelCls = _import_class(cfg.model.metamodel_class_path)
@@ -288,8 +310,14 @@ def load_runtime(cfg, checkpoint_dir: str, device: torch.device):
 
     tokenizer = load_tokenizer(cfg)
 
-    LOGGER.info("Loading main model from %s", cfg.model.model_from)
-    metamodel = MetaModelCls.from_pretrained(cfg.model.model_from, config=config)
+    dtype = resolve_torch_dtype(getattr(cfg.model, "torch_dtype", None))
+    model_kwargs = {}
+    if dtype is not None:
+        model_kwargs["torch_dtype"] = dtype
+        LOGGER.info("Loading main model from %s with torch_dtype=%s", cfg.model.model_from, dtype)
+    else:
+        LOGGER.info("Loading main model from %s", cfg.model.model_from)
+    metamodel = MetaModelCls.from_pretrained(cfg.model.model_from, config=config, **model_kwargs)
     metamodel.reset_mem_tokens()
     metamodel.resize_token_embeddings(len(tokenizer))
 
@@ -368,6 +396,7 @@ def answer_question(
     max_new_tokens: int,
     max_conversation_length: int,
     use_system_prompt: bool,
+    enable_thinking: bool,
 ):
     messages = build_initial_messages(use_system_prompt)
     messages.append({"role": "user", "content": question})
@@ -380,7 +409,7 @@ def answer_question(
         truncation=True,
         return_dict=True,
         padding="max_length",
-        enable_thinking=False,
+        enable_thinking=enable_thinking,
     )
     input_ids = input_enc["input_ids"].to(device)
     attention_mask = input_enc["attention_mask"].to(device)
@@ -440,6 +469,7 @@ def main():
         max_new_tokens=args.max_new_tokens,
         max_conversation_length=args.conversation_max_length,
         use_system_prompt=args.use_system_prompt,
+        enable_thinking=args.enable_thinking,
     )
 
     print(f"Question: {result['question']}")

@@ -3,7 +3,10 @@ import argparse
 import json
 import logging
 
-import experiment_utils as exp
+try:
+    from . import experiment_utils as exp
+except ImportError:
+    import experiment_utils as exp
 
 
 LOGGER = logging.getLogger("compare_density_budget_effect")
@@ -16,15 +19,15 @@ def parse_args():
     parser.add_argument("--runtime-config", type=str, default=str(exp.DEFAULT_RUNTIME_CONFIG_PATH))
     parser.add_argument("--facts-path", type=str, default="MemoryTest/json_data/semantic_facts.json")
     parser.add_argument("--distractors-path", type=str, default="MemoryTest/json_data/distractors.json")
-    parser.add_argument("--output-path", type=str, default="MemoryTest/results/density_budget_2x10_vs_4x5plus5.json")
+    parser.add_argument("--output-path", type=str, default="MemoryTest/results/density_budget_2x4_vs_4x2plus.json")
     parser.add_argument("--clean-num-updates", type=int, default=2)
-    parser.add_argument("--clean-facts-per-update", type=int, default=10)
+    parser.add_argument("--clean-facts-per-update", type=int, default=2)
     parser.add_argument("--distractor-num-updates", type=int, default=4)
-    parser.add_argument("--distractor-facts-per-update", type=int, default=5)
-    parser.add_argument("--distractors-per-update", type=int, default=5)
+    parser.add_argument("--distractor-facts-per-update", type=int, default=1)
+    parser.add_argument("--distractors-per-update", type=int, default=1)
     parser.add_argument("--save-loras", action="store_true")
     parser.add_argument("--log-context", action="store_true")
-    parser.add_argument("--merge-method", choices=["average", "concat"], default="average")
+    parser.add_argument("--merge-method", choices=["average", "sum", "concat"], default="average")
     return parser.parse_args()
 
 

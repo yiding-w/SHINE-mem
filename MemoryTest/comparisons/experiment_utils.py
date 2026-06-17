@@ -1,15 +1,21 @@
 import gc
 import json
 import logging
+import sys
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
 
 LOGGER = logging.getLogger("experiment_utils")
-MEMORY_TEST_ROOT = Path(__file__).resolve().parent
+MEMORY_TEST_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = MEMORY_TEST_ROOT.parent
 DEFAULT_RUNTIME_CONFIG_PATH = MEMORY_TEST_ROOT / "config" / "case_test.yaml"
+
+if str(MEMORY_TEST_ROOT) not in sys.path:
+    sys.path.insert(0, str(MEMORY_TEST_ROOT))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 torch = None
 answer_question = None
@@ -54,6 +60,7 @@ def make_runtime_args(defaults: dict) -> Namespace:
         metalora_r=int(defaults.get("metalora_r", 128)),
         metanetwork_layers=int(defaults.get("metanetwork_layers", 4)),
         use_system_prompt=bool(defaults.get("use_system_prompt", False)),
+        enable_thinking=bool(defaults.get("enable_thinking", False)),
     )
 
 
@@ -126,6 +133,22 @@ def weighted_average_lora(old_lora: Any, new_lora: Any, new_count: int):
     raise TypeError(f"Unsupported LoRA value type for averaging: {type(old_lora)!r}")
 
 
+def sum_lora(old_lora: Any, new_lora: Any):
+    if old_lora is None or new_lora is None:
+        if old_lora is not None or new_lora is not None:
+            raise ValueError("LoRA structures do not match: one side is None and the other is not.")
+        return None
+    if torch.is_tensor(old_lora):
+        return old_lora + new_lora
+    if isinstance(old_lora, dict):
+        return {key: sum_lora(old_lora[key], new_lora[key]) for key in old_lora}
+    if isinstance(old_lora, list):
+        return [sum_lora(old_item, new_item) for old_item, new_item in zip(old_lora, new_lora)]
+    if isinstance(old_lora, tuple):
+        return tuple(sum_lora(old_item, new_item) for old_item, new_item in zip(old_lora, new_lora))
+    raise TypeError(f"Unsupported LoRA value type for summation: {type(old_lora)!r}")
+
+
 def concat_average_lora(old_lora: Any, new_lora: Any, new_count: int):
     if old_lora is None or new_lora is None:
         if old_lora is not None or new_lora is not None:
@@ -159,6 +182,8 @@ def concat_average_lora(old_lora: Any, new_lora: Any, new_count: int):
 def merge_lora(old_lora: Any, new_lora: Any, new_count: int, merge_method: str):
     if merge_method == "average":
         return weighted_average_lora(old_lora, new_lora, new_count)
+    if merge_method == "sum":
+        return sum_lora(old_lora, new_lora)
     if merge_method == "concat":
         return concat_average_lora(old_lora, new_lora, new_count)
     raise ValueError(f"Unknown merge method: {merge_method}")
@@ -168,11 +193,10 @@ def build_context(rows: list[dict]) -> str:
     return "\n".join(row["text"] for row in rows)
 
 
-def answer_matches(expected_answer: str, model_answer: str, raw_output: str) -> bool:
+def answer_matches(expected_answer: str, model_answer: str) -> bool:
     expected = str(expected_answer).casefold()
     answer = str(model_answer).casefold()
-    raw = str(raw_output).casefold()
-    return expected in answer or expected in raw
+    return expected in answer
 
 
 def generate_merged_lora(
@@ -233,8 +257,9 @@ def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args,
             max_new_tokens=runtime_args.max_new_tokens,
             max_conversation_length=runtime_args.conversation_max_length,
             use_system_prompt=runtime_args.use_system_prompt,
+            enable_thinking=runtime_args.enable_thinking,
         )
-        is_correct = answer_matches(fact["answer"], result["answer"], result["raw"])
+        is_correct = answer_matches(fact["answer"], result["answer"])
         correct += int(is_correct)
         rows.append(
             {
@@ -245,7 +270,7 @@ def evaluate_lora(label, facts, lora_dict, metanetwork, tokenizer, runtime_args,
                 "expected_answer": fact["answer"],
                 "model_answer": result["answer"],
                 "raw": result["raw"],
-                "match_mode": "case_insensitive_substring",
+                "match_mode": "case_insensitive_answer_substring",
                 "correct": is_correct,
             }
         )
@@ -266,6 +291,7 @@ def answer_question_with_context(
     device,
     max_new_tokens: int,
     max_conversation_length: int,
+    enable_thinking: bool,
 ):
     user_prompt = (
         "Context:\n"
@@ -283,7 +309,7 @@ def answer_question_with_context(
         truncation=True,
         return_dict=True,
         padding="max_length",
-        enable_thinking=False,
+        enable_thinking=enable_thinking,
     )
     input_ids = input_enc["input_ids"].to(device)
     attention_mask = input_enc["attention_mask"].to(device)
@@ -322,8 +348,9 @@ def evaluate_in_context_baseline(label, facts, context: str, metanetwork, tokeni
             device=device,
             max_new_tokens=runtime_args.max_new_tokens,
             max_conversation_length=runtime_args.conversation_max_length,
+            enable_thinking=runtime_args.enable_thinking,
         )
-        is_correct = answer_matches(fact["answer"], result["answer"], result["raw"])
+        is_correct = answer_matches(fact["answer"], result["answer"])
         correct += int(is_correct)
         rows.append(
             {
@@ -334,7 +361,7 @@ def evaluate_in_context_baseline(label, facts, context: str, metanetwork, tokeni
                 "expected_answer": fact["answer"],
                 "model_answer": result["answer"],
                 "raw": result["raw"],
-                "match_mode": "case_insensitive_substring",
+                "match_mode": "case_insensitive_answer_substring",
                 "correct": is_correct,
             }
         )
