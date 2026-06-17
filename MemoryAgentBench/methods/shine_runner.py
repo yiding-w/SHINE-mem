@@ -89,7 +89,12 @@ def _resolve_shine_lengths(
 
 
 class ShineMABRunner:
-    """Context -> LoRA once per context; queries use question-only chat (SHINE mode)."""
+    """Context -> LoRA once per context; query uses δ-mem-aligned prompt when configured.
+
+    With ``query_include_context: true`` (default in SHINE_agent_qwen3_8b_deltamem.yaml):
+      1. Memorize: context chunks -> ``generate_lora_dict`` (SHINE memory)
+      2. Query: same prompt as δ-mem base (context + question) + injected LoRA
+    """
 
     def __init__(self, agent_config: Dict[str, Any], dataset_config: Dict[str, Any]):
         from omegaconf import OmegaConf
@@ -248,7 +253,7 @@ class ShineMABRunner:
             max_length=self.conversation_max_length,
             truncation=True,
             return_dict=True,
-            padding="max_length",
+            padding=False,
             enable_thinking=False,
         )
         input_ids = input_enc["input_ids"].to(self.device)

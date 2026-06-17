@@ -18,3 +18,4 @@ cognee/.data_storage/
 *.db
 croissant_files
 .env
+bash_files/sh/server_env.sh

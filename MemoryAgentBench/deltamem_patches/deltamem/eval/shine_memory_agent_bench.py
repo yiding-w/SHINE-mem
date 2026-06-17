@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,8 +11,10 @@ import yaml
 
 from deltamem.eval.official_memory_agent_bench import (
     build_context_chunks as build_official_mab_context_chunks,
+    build_memorized_context as build_official_mab_memorized_context,
     build_query_answer_pairs as build_official_mab_query_answer_pairs,
     load_mab_eval_utils,
+    truncate_memory_context as truncate_official_mab_memory_context,
 )
 from deltamem.eval.official_memory_agent_bench_templates import get_template as get_official_mab_template
 
@@ -24,7 +25,8 @@ if TYPE_CHECKING:
     from deltamem.eval.common import DistributedContext
 
 
-def _shine_unified_query(question: str) -> str:
+def _shine_question_only_query(question: str) -> str:
+    """Legacy SHINE query (question only; context encoded only in LoRA)."""
     return (
         "Use only the memory context below to answer the question.\n"
         "Reply with a short entity, phrase, number, or sentence only.\n"
@@ -62,7 +64,92 @@ def _configure_agent_for_suite(agent_config: dict[str, Any], args: Namespace) ->
         configured["top_p"] = float(args.eval_top_p)
         configured["top_k"] = int(args.eval_top_k)
     configured["use_mab_generation_max_length"] = True
+    # Default: same prompt as δ-mem base (context + question) + LoRA from context.
+    configured.setdefault("query_include_context", True)
     return configured
+
+
+def _build_deltamem_unified_query_prompt(
+    *,
+    compare_mod,
+    tokenizer,
+    model_context_window: int,
+    raw_context: str,
+    question: str,
+    max_new_tokens: int,
+) -> tuple[str, str]:
+    question_text = str(question).strip()
+    template = compare_mod.MEMORY_CONTEXT_QA_PROMPT_TEMPLATE
+
+    def prompt_builder(candidate_context: str, question_text=question_text) -> str:
+        return template.format(context=candidate_context, question=question_text)
+
+    final_context = compare_mod.clip_context_text_to_model_limit(
+        raw_context,
+        tokenizer=tokenizer,
+        prompt_builder=prompt_builder,
+        use_chat_template=False,
+        model_context_window=model_context_window,
+        max_new_tokens=max_new_tokens,
+        max_context_chars=0,
+        keep="head_tail",
+    )
+    return prompt_builder(final_context), final_context
+
+
+def _build_deltamem_official_query_prompt(
+    *,
+    compare_mod,
+    tokenizer,
+    model_context_window: int,
+    raw_context: str,
+    source: str,
+    query: str,
+    eval_utils,
+    source_config: dict[str, Any],
+    max_new_tokens: int,
+    official_buffer_length: int = 4000,
+) -> tuple[str, str]:
+    chunk_size = int(source_config.get("chunk_size") or 4096)
+    context_max_length = int(source_config.get("context_max_length") or 0)
+    context_chunks = build_official_mab_context_chunks(
+        [{"context": raw_context}],
+        chunk_size=chunk_size,
+        eval_utils_module=eval_utils,
+    )
+    memorized_context = build_official_mab_memorized_context(source, context_chunks[0])
+    truncated_context = truncate_official_mab_memory_context(
+        memorized_context,
+        tokenizer=tokenizer,
+        context_max_length=context_max_length,
+        raw_input_length_limit=model_context_window,
+        buffer_length=official_buffer_length,
+        generation_max_length=max_new_tokens,
+    )
+    system_message = get_official_mab_template(source, "system", "Long_context_agent_deltamem")
+
+    def prompt_builder(candidate_context: str, query=query) -> str:
+        return compare_mod._render_message_prompt(
+            tokenizer,
+            [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": f"{candidate_context}\n{query}".strip()},
+            ],
+            use_chat_template=False,
+        )
+
+    final_context = compare_mod.clip_context_text_to_model_limit(
+        truncated_context,
+        tokenizer=tokenizer,
+        prompt_builder=prompt_builder,
+        use_chat_template=False,
+        model_context_window=model_context_window,
+        max_new_tokens=max_new_tokens,
+        max_context_chars=0,
+        keep="tail",
+    )
+    rendered_prompt = prompt_builder(final_context)
+    return rendered_prompt, final_context
 
 
 def _evaluate_row(
@@ -71,6 +158,7 @@ def _evaluate_row(
     runner,
     eval_utils,
     compare_mod,
+    agent_config: dict[str, Any],
     use_official_prompt: bool,
     max_context_chars: int,
 ) -> list[tuple[int, dict[str, object]]]:
@@ -80,6 +168,7 @@ def _evaluate_row(
     memory_qa_is_correct = compare_mod.memory_qa_is_correct
     qa_alias_max_f1 = compare_mod.qa_alias_max_f1
     extract_first_line = compare_mod.extract_first_line
+    query_include_context = bool(agent_config.get("query_include_context", True))
 
     raw_context = str(item.get("context", ""))
     if max_context_chars > 0 and len(raw_context) > max_context_chars:
@@ -88,7 +177,15 @@ def _evaluate_row(
     source = memory_agent_bench_source(item)
     source_config = dict(item.get("official_source_config") or {})
     chunk_size = int(source_config.get("chunk_size") or 4096)
+    row_max_new_tokens = int(source_config.get("generation_max_length") or 128)
     selected_questions = list(item.get("selected_questions") or [])
+
+    model_context_window = compare_mod.infer_model_context_window(
+        runner.metanetwork.metamodel,
+        runner.tokenizer,
+    )
+    if query_include_context:
+        runner.conversation_max_length = model_context_window
 
     runner.reset_context()
     if use_official_prompt:
@@ -125,7 +222,45 @@ def _evaluate_row(
 
     records: list[tuple[int, dict[str, object]]] = []
     for question_meta, query_text in zip(selected_questions, query_texts):
-        formatted_query = query_text if use_official_prompt else _shine_unified_query(str(question_meta["question"]))
+        prompt_context_chars = 0
+        if query_include_context:
+            if use_official_prompt:
+                formatted_query, prompt_context = _build_deltamem_official_query_prompt(
+                    compare_mod=compare_mod,
+                    tokenizer=runner.tokenizer,
+                    model_context_window=model_context_window,
+                    raw_context=raw_context,
+                    source=source,
+                    query=query_text,
+                    eval_utils=eval_utils,
+                    source_config=source_config,
+                    max_new_tokens=row_max_new_tokens,
+                )
+                prompt_context_chars = len(prompt_context)
+                prompt_style = "official_memorize_query_templates_shine_lora"
+            else:
+                formatted_query, prompt_context = _build_deltamem_unified_query_prompt(
+                    compare_mod=compare_mod,
+                    tokenizer=runner.tokenizer,
+                    model_context_window=model_context_window,
+                    raw_context=raw_context,
+                    question=str(question_meta["question"]),
+                    max_new_tokens=row_max_new_tokens,
+                )
+                prompt_context_chars = len(prompt_context)
+                prompt_style = "unified_memory_context_qa_shine_lora"
+        else:
+            formatted_query = (
+                query_text
+                if use_official_prompt
+                else _shine_question_only_query(str(question_meta["question"]))
+            )
+            prompt_style = (
+                "official_memorize_query_templates_shine"
+                if use_official_prompt
+                else "unified_memory_context_qa_shine_question_only"
+            )
+
         output = runner.query(formatted_query)
         prediction = str(output.get("output") or "")
         answer_aliases = list(question_meta.get("answer_aliases") or [])
@@ -151,13 +286,10 @@ def _evaluate_row(
                     "prediction": prediction,
                     "extracted_answer": extract_first_line(prediction),
                     "context_chars": len(raw_context),
-                    "prompt_context_chars": 0,
-                    "max_new_tokens": int(source_config.get("generation_max_length") or 128),
-                    "prompt_style": (
-                        "official_memorize_query_templates_shine"
-                        if use_official_prompt
-                        else "unified_memory_context_qa_shine"
-                    ),
+                    "prompt_context_chars": prompt_context_chars,
+                    "max_new_tokens": row_max_new_tokens,
+                    "prompt_style": prompt_style,
+                    "query_include_context": query_include_context,
                     "correct": correct,
                     "f1": round(f1, 4),
                     "primary_metric": primary_metric,
@@ -208,6 +340,7 @@ def evaluate_shine_memory_agent_bench(
             runner=runner,
             eval_utils=eval_utils,
             compare_mod=compare_mod,
+            agent_config=agent_config,
             use_official_prompt=use_official_prompt,
             max_context_chars=int(args.memory_agent_bench_max_context_chars),
         )

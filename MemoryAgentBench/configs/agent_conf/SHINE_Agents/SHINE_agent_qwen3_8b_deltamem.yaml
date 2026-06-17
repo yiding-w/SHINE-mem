@@ -17,4 +17,7 @@ use_mab_conversation_max_length: true
 shine_conversation_max_length: 4096
 use_mab_generation_max_length: true
 
+# Match δ-mem base prompt: context + question at query time, plus LoRA from context.
+query_include_context: true
+
 device: cuda
