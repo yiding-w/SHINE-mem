@@ -29,8 +29,8 @@ fi
 
 bash "${MAB_ROOT}/deltamem_patches/apply_to_delta_mem.sh" "${DELTA_MEM_ROOT}"
 
-# recsys_redial_full needs entity2id.json for Recall@k scoring
-bash "${MAB_ROOT}/bash_files/sh/download_mab_recsys_entity2id.sh"
+# recsys_redial_full needs entity2id.json for Recall@k scoring (best-effort download).
+bash "${MAB_ROOT}/bash_files/sh/download_mab_recsys_entity2id.sh" || true
 
 LM_EVAL_ROOT="${LM_EVAL_ROOT:-${SHINE_ROOT}/third_party/lm-evaluation-harness}"
 if [[ ! -d "${LM_EVAL_ROOT}/.git" ]]; then
