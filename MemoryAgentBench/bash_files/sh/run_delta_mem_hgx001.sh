@@ -237,6 +237,16 @@ case "${MODE}" in
     run_full_base_suite
     ;;
   shine-mab|shine)
+    # SHINE: batch=1 per query; each torchrun rank loads a full metanetwork. Default 1 GPU for memory headroom.
+    # LoRA evidence capped by shine_context_max_length (default 8196); query prompt still uses MAB_MAX_CONTEXT_CHARS.
+    if [[ -n "${SHINE_NUM_GPUS:-}" ]]; then
+      NUM_GPUS="${SHINE_NUM_GPUS}"
+      NPROC_PER_NODE="${SHINE_NUM_GPUS}"
+    elif [[ "${NUM_GPUS}" -gt 1 && -z "${SHINE_ALLOW_MULTI_GPU:-}" ]]; then
+      echo "NOTE: shine-mab using NUM_GPUS=1 (override: SHINE_NUM_GPUS=4 or SHINE_ALLOW_MULTI_GPU=1)" >&2
+      NUM_GPUS=1
+      NPROC_PER_NODE=1
+    fi
     run_mab_shine_only
     ;;
   base-mab|mab-base)

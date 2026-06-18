@@ -66,6 +66,9 @@ def _configure_agent_for_suite(agent_config: dict[str, Any], args: Namespace) ->
     configured["use_mab_generation_max_length"] = True
     # Default: same prompt as δ-mem base (context + question) + LoRA from context.
     configured.setdefault("query_include_context", True)
+    env_cap = os.environ.get("SHINE_CONTEXT_MAX_LENGTH", "").strip()
+    if env_cap.isdigit():
+        configured["shine_context_max_length"] = int(env_cap)
     return configured
 
 
@@ -184,8 +187,13 @@ def _evaluate_row(
         runner.metanetwork.metamodel,
         runner.tokenizer,
     )
+    runner.configure_for_row(
+        model_context_window=model_context_window,
+        max_new_tokens=row_max_new_tokens,
+        max_context_chars=max_context_chars if max_context_chars > 0 else 0,
+    )
     if query_include_context:
-        runner.conversation_max_length = model_context_window
+        runner.set_query_max_length(model_context_window)
 
     runner.reset_context()
     if use_official_prompt:

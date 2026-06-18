@@ -12,7 +12,10 @@ shine_cfg_path: configs/Qwen3-8B-MAB.yaml
 base_model_path: /ceph/home/muhan01/huggingfacemodels/Qwen3-8B
 shine_model_root: /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa
 
-use_mab_context_max_length: true
+use_mab_context_max_length: false
+# LoRA evidence tokens (generate_lora_dict forward). Must stay small — full MAB context is only in query prompt.
+# Matches SHINE training default (configs/Qwen3-8B-MAB.yaml / scripts/Qwen3-8B/test.sh).
+shine_context_max_length: 8196
 use_mab_conversation_max_length: true
 shine_conversation_max_length: 4096
 use_mab_generation_max_length: true
