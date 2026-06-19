@@ -3,13 +3,62 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 _D2L_ATTN_PATCH_APPLIED = False
 
 
+def flash_attn_available() -> bool:
+    try:
+        import flash_attn  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def resolve_d2l_attn(agent_config: dict[str, Any] | None = None) -> tuple[bool, str]:
+    """Return (use_flash_attn, attn_implementation) for doc-to-lora loading."""
+    agent_config = agent_config or {}
+
+    if os.environ.get("D2L_FORCE_SDPA", "").strip() in ("1", "true", "yes"):
+        return False, "sdpa"
+
+    use_flash = agent_config.get("use_flash_attn")
+    if use_flash is None:
+        env_flash = os.environ.get("D2L_USE_FLASH_ATTN", "").strip().lower()
+        if env_flash in ("0", "false", "no"):
+            use_flash = False
+        elif env_flash in ("1", "true", "yes"):
+            use_flash = True
+        else:
+            use_flash = flash_attn_available()
+
+    attn_impl = (
+        agent_config.get("attn_implementation")
+        or os.environ.get("D2L_ATTN_IMPLEMENTATION")
+        or os.environ.get("ATTN_IMPLEMENTATION")
+    )
+
+    if use_flash and flash_attn_available():
+        return True, "flash_attention_2"
+
+    if attn_impl in ("flash_attention_2", "flash_attn"):
+        if flash_attn_available():
+            return True, "flash_attention_2"
+        print("[d2l_attn] flash_attention_2 requested but flash_attn not importable; falling back to sdpa", flush=True)
+        return False, "sdpa"
+
+    return False, str(attn_impl or "sdpa")
+
+
 def apply_d2l_attn_patch(attn_impl: str = "sdpa") -> None:
-    """Force attn_impl for base model, ctx encoder, and HyperLoRA Idefics2Perceiver."""
+    """Force sdpa/eager when flash-attn is unavailable. No-op for flash_attention_2."""
     global _D2L_ATTN_PATCH_APPLIED
+    if attn_impl in ("flash_attention_2", "flash_attn"):
+        os.environ["TRANSFORMERS_ATTN_IMPLEMENTATION"] = "flash_attention_2"
+        os.environ["HF_ATTN_IMPLEMENTATION"] = "flash_attention_2"
+        return
     if _D2L_ATTN_PATCH_APPLIED:
         return
     _D2L_ATTN_PATCH_APPLIED = True
@@ -47,7 +96,6 @@ def apply_d2l_attn_patch(attn_impl: str = "sdpa") -> None:
     modeling_utils.PreTrainedModel._check_and_enable_flash_attn_2 = _check_and_enable_flash_attn_2
     modeling_utils.PreTrainedModel._autoset_attn_implementation = _autoset_attn_implementation
 
-    # doc-to-lora Perceiver hardcodes flash_attention_2 in Idefics2PerceiverConfig.
     try:
         from ctx_to_lora.modeling.idefics2 import Idefics2PerceiverConfig
 
@@ -66,6 +114,8 @@ def apply_d2l_attn_patch(attn_impl: str = "sdpa") -> None:
 
 
 def patch_d2l_state_dict_attn(state_dict: dict, attn_impl: str = "sdpa") -> None:
+    if attn_impl in ("flash_attention_2", "flash_attn"):
+        return
     hypernet_config = state_dict.get("hypernet_config")
     if hypernet_config is None:
         return

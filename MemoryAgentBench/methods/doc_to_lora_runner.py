@@ -16,7 +16,7 @@ from typing import Any, Dict, List
 
 import torch
 
-from methods.d2l_attn_patch import apply_d2l_attn_patch, patch_d2l_state_dict_attn
+from methods.d2l_attn_patch import apply_d2l_attn_patch, patch_d2l_state_dict_attn, resolve_d2l_attn
 
 DEFAULT_D2L_CHUNK_LEN = 8192
 
@@ -90,17 +90,11 @@ class DocToLoraRunner:
             from ctx_to_lora.model_loading import get_tokenizer
             from ctx_to_lora.modeling.hypernet import ModulatedPretrainedModel
 
-            attn_impl = (
-                agent_config.get("attn_implementation")
-                or os.environ.get("D2L_ATTN_IMPLEMENTATION")
-                or os.environ.get("ATTN_IMPLEMENTATION")
-                or "sdpa"
-            )
+            use_flash_attn, attn_impl = resolve_d2l_attn(agent_config)
             apply_d2l_attn_patch(attn_impl)
 
             state_dict = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
             patch_d2l_state_dict_attn(state_dict, attn_impl)
-            use_flash_attn = bool(agent_config.get("use_flash_attn", False))
             self.model = ModulatedPretrainedModel.from_state_dict(
                 state_dict,
                 train=False,
@@ -133,10 +127,11 @@ class DocToLoraRunner:
         self._max_context_chars = 0
         self._query_max_length = 0
 
+        _use_flash, _attn_impl = resolve_d2l_attn(agent_config)
         print(
             f"[DocToLoraRunner] sub_dataset={self.sub_dataset} "
             f"chunk_len={self.chunk_len} max_new_tokens={self.max_new_tokens} "
-            f"attn={agent_config.get('attn_implementation', os.environ.get('D2L_ATTN_IMPLEMENTATION', 'sdpa'))} "
+            f"attn={_attn_impl} flash={_use_flash} "
             f"checkpoint={os.path.basename(checkpoint_path)}",
             flush=True,
         )

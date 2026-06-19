@@ -83,8 +83,10 @@ def main() -> None:
     args = parse_args()
     attn_impl = os.environ.get("D2L_ATTN_IMPLEMENTATION") or os.environ.get("ATTN_IMPLEMENTATION") or "sdpa"
     try:
-        from methods.d2l_attn_patch import apply_d2l_attn_patch
+        from methods.d2l_attn_patch import apply_d2l_attn_patch, flash_attn_available, resolve_d2l_attn
 
+        if flash_attn_available() and os.environ.get("D2L_FORCE_SDPA", "").strip() not in ("1", "true", "yes"):
+            attn_impl = os.environ.get("D2L_ATTN_IMPLEMENTATION") or "flash_attention_2"
         apply_d2l_attn_patch(attn_impl)
     except ImportError:
         pass

@@ -272,8 +272,17 @@ run_mab_d2l_only() {
   local out="${OUTPUT_ROOT}/d2l_model/memory_agent_bench.json"
   local log="${LOG_ROOT}/d2l_mab.log"
   mkdir -p "$(dirname "${out}")"
-  export D2L_ATTN_IMPLEMENTATION="${D2L_ATTN_IMPLEMENTATION:-${ATTN_IMPLEMENTATION:-sdpa}}"
+  if [[ "${D2L_FORCE_SDPA:-0}" == "1" ]]; then
+    export D2L_ATTN_IMPLEMENTATION=sdpa
+  elif [[ -z "${D2L_ATTN_IMPLEMENTATION:-}" ]]; then
+    if "${PYTHON_BIN}" -c "import flash_attn" 2>/dev/null; then
+      export D2L_ATTN_IMPLEMENTATION=flash_attention_2
+    else
+      export D2L_ATTN_IMPLEMENTATION=sdpa
+    fi
+  fi
   export TRANSFORMERS_ATTN_IMPLEMENTATION="${D2L_ATTN_IMPLEMENTATION}"
+  echo "D2L attn: ${D2L_ATTN_IMPLEMENTATION} (D2L_FORCE_SDPA=${D2L_FORCE_SDPA:-0})"
   echo "=== memory_agent_bench (Doc-to-LoRA only, light runner) → ${out}"
   run_distributed 30182 \
     -m deltamem.eval.run_d2l_mab_main \

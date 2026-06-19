@@ -19,8 +19,9 @@ use_mab_generation_max_length: true
 # δ-mem unified prompt: full context + question at query (MAB_MAX_CONTEXT_CHARS clip).
 query_include_context: true
 
-# doc-to-lora defaults to flash_attention_2; cluster nodes without flash-attn use sdpa.
-attn_implementation: sdpa
-use_flash_attn: false
+# Default: flash_attention_2 when flash_attn is installed (doc-to-lora official path).
+# Fallback: export D2L_FORCE_SDPA=1 or set use_flash_attn: false + attn_implementation: sdpa
+attn_implementation: flash_attention_2
+use_flash_attn: true
 
 device: cuda
