@@ -16,6 +16,8 @@ from typing import Any, Dict, List
 
 import torch
 
+from methods.d2l_attn_patch import apply_d2l_attn_patch, patch_d2l_state_dict_attn
+
 DEFAULT_D2L_CHUNK_LEN = 8192
 
 _D2L_MODEL_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -88,13 +90,16 @@ class DocToLoraRunner:
             from ctx_to_lora.model_loading import get_tokenizer
             from ctx_to_lora.modeling.hypernet import ModulatedPretrainedModel
 
-            state_dict = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
             attn_impl = (
                 agent_config.get("attn_implementation")
                 or os.environ.get("D2L_ATTN_IMPLEMENTATION")
                 or os.environ.get("ATTN_IMPLEMENTATION")
                 or "sdpa"
             )
+            apply_d2l_attn_patch(attn_impl)
+
+            state_dict = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+            patch_d2l_state_dict_attn(state_dict, attn_impl)
             use_flash_attn = bool(agent_config.get("use_flash_attn", False))
             self.model = ModulatedPretrainedModel.from_state_dict(
                 state_dict,

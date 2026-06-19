@@ -272,6 +272,8 @@ run_mab_d2l_only() {
   local out="${OUTPUT_ROOT}/d2l_model/memory_agent_bench.json"
   local log="${LOG_ROOT}/d2l_mab.log"
   mkdir -p "$(dirname "${out}")"
+  export D2L_ATTN_IMPLEMENTATION="${D2L_ATTN_IMPLEMENTATION:-${ATTN_IMPLEMENTATION:-sdpa}}"
+  export TRANSFORMERS_ATTN_IMPLEMENTATION="${D2L_ATTN_IMPLEMENTATION}"
   echo "=== memory_agent_bench (Doc-to-LoRA only, light runner) → ${out}"
   run_distributed 30182 \
     -m deltamem.eval.run_d2l_mab_main \

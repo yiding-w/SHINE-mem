@@ -7,8 +7,6 @@ import json
 import os
 from pathlib import Path
 
-from tqdm.auto import tqdm
-
 from deltamem.eval.d2l_memory_agent_bench import evaluate_d2l_memory_agent_bench
 from deltamem.eval.memory_agent_bench_protocol_light import (
     finalize_distributed,
@@ -81,6 +79,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    attn_impl = os.environ.get("D2L_ATTN_IMPLEMENTATION") or os.environ.get("ATTN_IMPLEMENTATION") or "sdpa"
+    try:
+        from methods.d2l_attn_patch import apply_d2l_attn_patch
+
+        apply_d2l_attn_patch(attn_impl)
+    except ImportError:
+        pass
     context = init_distributed(args.device)
     try:
         set_all_seeds(args.seed)
