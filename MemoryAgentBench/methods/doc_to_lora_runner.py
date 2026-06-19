@@ -91,10 +91,16 @@ class DocToLoraRunner:
             from ctx_to_lora.modeling.hypernet import ModulatedPretrainedModel
 
             use_flash_attn, attn_impl = resolve_d2l_attn(agent_config)
-            apply_d2l_attn_patch(attn_impl)
+            if not use_flash_attn:
+                # Idefics2 hardcodes flash_attention_2; without flash_attn use eager (not sdpa).
+                fallback = "eager" if attn_impl == "sdpa" else attn_impl
+                apply_d2l_attn_patch(fallback)
+            else:
+                os.environ["TRANSFORMERS_ATTN_IMPLEMENTATION"] = "flash_attention_2"
 
             state_dict = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
-            patch_d2l_state_dict_attn(state_dict, attn_impl)
+            if not use_flash_attn:
+                patch_d2l_state_dict_attn(state_dict, "eager")
             self.model = ModulatedPretrainedModel.from_state_dict(
                 state_dict,
                 train=False,

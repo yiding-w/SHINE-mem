@@ -281,8 +281,8 @@ run_mab_d2l_only() {
       export D2L_ATTN_IMPLEMENTATION=sdpa
     fi
   fi
-  export TRANSFORMERS_ATTN_IMPLEMENTATION="${D2L_ATTN_IMPLEMENTATION}"
-  echo "D2L attn: ${D2L_ATTN_IMPLEMENTATION} (D2L_FORCE_SDPA=${D2L_FORCE_SDPA:-0})"
+  # Do not export TRANSFORMERS_ATTN_IMPLEMENTATION globally — DocToLoraRunner resolves per submodule.
+  echo "D2L attn target: ${D2L_ATTN_IMPLEMENTATION} (D2L_FORCE_SDPA=${D2L_FORCE_SDPA:-0})"
   echo "=== memory_agent_bench (Doc-to-LoRA only, light runner) → ${out}"
   run_distributed 30182 \
     -m deltamem.eval.run_d2l_mab_main \

@@ -1,4 +1,4 @@
-"""Patch doc-to-lora to use sdpa/eager when flash-attn is not installed."""
+"""Attention backend helpers for doc-to-lora MAB eval."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import os
 from typing import Any
 
 _D2L_ATTN_PATCH_APPLIED = False
+_ORIG_CHECK_FLASH = None
+_ORIG_AUTOSET = None
 
 
 def flash_attn_available() -> bool:
@@ -18,11 +20,18 @@ def flash_attn_available() -> bool:
 
 
 def resolve_d2l_attn(agent_config: dict[str, Any] | None = None) -> tuple[bool, str]:
-    """Return (use_flash_attn, attn_implementation) for doc-to-lora loading."""
+    """Return (use_flash_attn, base_attn_implementation).
+
+    doc-to-lora official path: flash_attention_2 when flash_attn is installed.
+    Without flash: Qwen base uses sdpa; Idefics2Perceiver stays eager (no sdpa support).
+    """
     agent_config = agent_config or {}
 
     if os.environ.get("D2L_FORCE_SDPA", "").strip() in ("1", "true", "yes"):
         return False, "sdpa"
+
+    if os.environ.get("D2L_FORCE_EAGER", "").strip() in ("1", "true", "yes"):
+        return False, "eager"
 
     use_flash = agent_config.get("use_flash_attn")
     if use_flash is None:
@@ -46,74 +55,63 @@ def resolve_d2l_attn(agent_config: dict[str, Any] | None = None) -> tuple[bool, 
     if attn_impl in ("flash_attention_2", "flash_attn"):
         if flash_attn_available():
             return True, "flash_attention_2"
-        print("[d2l_attn] flash_attention_2 requested but flash_attn not importable; falling back to sdpa", flush=True)
-        return False, "sdpa"
+        print("[d2l_attn] flash_attention_2 requested but flash_attn missing; fallback eager", flush=True)
+        return False, "eager"
 
-    return False, str(attn_impl or "sdpa")
+    if attn_impl in ("sdpa", "eager"):
+        return False, str(attn_impl)
+
+    # Default without flash: sdpa for Qwen base (Idefics2 flash requests handled by patch -> eager).
+    return False, "sdpa"
 
 
-def apply_d2l_attn_patch(attn_impl: str = "sdpa") -> None:
-    """Force sdpa/eager when flash-attn is unavailable. No-op for flash_attention_2."""
-    global _D2L_ATTN_PATCH_APPLIED
-    if attn_impl in ("flash_attention_2", "flash_attn"):
-        os.environ["TRANSFORMERS_ATTN_IMPLEMENTATION"] = "flash_attention_2"
-        os.environ["HF_ATTN_IMPLEMENTATION"] = "flash_attention_2"
+def apply_d2l_attn_patch(fallback_impl: str = "eager") -> None:
+    """When flash_attn is missing, replace flash_attention_2 with fallback (eager/sdpa).
+
+    No-op when using real flash_attention_2. Does NOT globally force sdpa on all submodules
+    (Idefics2Perceiver does not support sdpa).
+    """
+    global _D2L_ATTN_PATCH_APPLIED, _ORIG_CHECK_FLASH, _ORIG_AUTOSET
+    if fallback_impl in ("flash_attention_2", "flash_attn"):
         return
     if _D2L_ATTN_PATCH_APPLIED:
         return
     _D2L_ATTN_PATCH_APPLIED = True
 
-    os.environ["TRANSFORMERS_ATTN_IMPLEMENTATION"] = attn_impl
-    os.environ["HF_ATTN_IMPLEMENTATION"] = attn_impl
-
     import transformers.modeling_utils as modeling_utils
 
-    def _set_config_attn(config, impl: str) -> None:
+    _ORIG_CHECK_FLASH = modeling_utils.PreTrainedModel._check_and_enable_flash_attn_2
+    _ORIG_AUTOSET = modeling_utils.PreTrainedModel._autoset_attn_implementation
+
+    def _set_flash_to_fallback(config, impl: str) -> None:
         for attr in ("_attn_implementation", "attn_implementation"):
-            if hasattr(config, attr):
-                value = getattr(config, attr)
-                if value in (None, "flash_attention_2"):
-                    setattr(config, attr, impl)
+            if hasattr(config, attr) and getattr(config, attr) in (None, "flash_attention_2"):
+                setattr(config, attr, impl)
 
     @classmethod
     def _check_and_enable_flash_attn_2(cls, config, *args, **kwargs):
-        _set_config_attn(config, attn_impl)
-        return config
-
-    orig_autoset = modeling_utils.PreTrainedModel._autoset_attn_implementation
+        try:
+            return _ORIG_CHECK_FLASH(config, *args, **kwargs)
+        except ImportError:
+            _set_flash_to_fallback(config, fallback_impl)
+            return config
 
     @classmethod
     def _autoset_attn_implementation(cls, config, *args, **kwargs):
-        _set_config_attn(config, attn_impl)
         try:
-            result = orig_autoset(config, *args, **kwargs)
-            _set_config_attn(result if result is not None else config, attn_impl)
-            return result if result is not None else config
-        except ImportError:
-            _set_config_attn(config, attn_impl)
-            return config
+            return _ORIG_AUTOSET(config, *args, **kwargs)
+        except (ImportError, ValueError) as exc:
+            msg = str(exc).lower()
+            if "flash" in msg or "scaled_dot_product_attention" in msg or "sdpa" in msg:
+                _set_flash_to_fallback(config, fallback_impl)
+                return config
+            raise
 
     modeling_utils.PreTrainedModel._check_and_enable_flash_attn_2 = _check_and_enable_flash_attn_2
     modeling_utils.PreTrainedModel._autoset_attn_implementation = _autoset_attn_implementation
 
-    try:
-        from ctx_to_lora.modeling.idefics2 import Idefics2PerceiverConfig
 
-        if not getattr(Idefics2PerceiverConfig, "_d2l_attn_patched", False):
-            Idefics2PerceiverConfig._d2l_attn_patched = True
-            _orig_cfg_init = Idefics2PerceiverConfig.__init__
-
-            def _patched_cfg_init(self, *args, **kwargs):
-                kwargs["attn_implementation"] = attn_impl
-                _orig_cfg_init(self, *args, **kwargs)
-                _set_config_attn(self, attn_impl)
-
-            Idefics2PerceiverConfig.__init__ = _patched_cfg_init  # type: ignore[method-assign]
-    except ImportError:
-        pass
-
-
-def patch_d2l_state_dict_attn(state_dict: dict, attn_impl: str = "sdpa") -> None:
+def patch_d2l_state_dict_attn(state_dict: dict, attn_impl: str = "eager") -> None:
     if attn_impl in ("flash_attention_2", "flash_attn"):
         return
     hypernet_config = state_dict.get("hypernet_config")
