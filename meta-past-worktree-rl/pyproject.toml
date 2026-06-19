@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meta-past"
+version = "0.0.1"
+description = "RL/ES fine-tuning of a context-conditioned hypernetwork (PAST follow-up)"
+requires-python = ">=3.12"
+dependencies = [
+    # ES env (shine): torch 2.5.1+cu124 — see meta_past/es/.
+    # RL env (vllm_serve): torch 2.6.0+cu124 — vllm 0.8.5+ hard-pins torch 2.6
+    # and is the first version with native Qwen3 LoRA support. Either env
+    # satisfies these constraints; we don't pin torch here.
+    "transformers>=4.57",
+    "datasets>=4.0",
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+    "numpy",
+    "openai>=1.0",
+    "huggingface-hub>=0.20",
+]
+
+[project.optional-dependencies]
+# RL collocated path uses vLLM 0.8.5+ for native Qwen3 + in-memory LoRA push
+# (LoRAModel.from_lora_tensors + collective_rpc callable). Verl kernels are
+# vendored at meta_past/rl/_verl_kernels.py — no verl pip dep.
+rl = [
+    "vllm>=0.8.5",
+    "peft>=0.10",
+    "safetensors>=0.4",
+]
+dev = ["pytest>=8.0", "tensorboard", "wandb"]
+
+[tool.setuptools.packages.find]
+include = ["meta_past*"]
+exclude = ["third_party*", "tests*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -1,0 +1,75 @@
+hypernet:
+  ckpt_dir: ${oc.env:HOME}/huggingfacemodels/SHINE-ift_mqa_1qa
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+  device: cuda:0
+
+# Each tensor gets σ_k = σ · RMS(p_k). Without this, the 554 m2p+metalora
+# tensors (RMS ∈ [5e-3, 1.0]) receive wildly different relative perturbations
+# under uniform σ, and small-RMS tensors accumulate enough drift to kill
+# performance in ~5 steps (see run #3 heldout 0.66 → 0.25).
+perturb:
+  # σ_rel = 0.1: debug_rms_relative.py showed this is in the signal band
+  # (F1 ~0.67→0.70 on some seeds, no collapse). σ_rel up to 0.2 starts to
+  # drift down. Larger N is cheaper than pushing σ_rel past 0.1.
+  sigma: 0.1
+  sigma_mode: rms_relative
+  rms_floor: 1.0e-3
+  noise_dtype: float32
+  # Scope: only m2p weight matrices.
+  #  - include_metalora=false: 504 small-RMS leaves drift under ES (run #7).
+  #  - include_mem_tokens=false: SHINE-ift_mqa_1qa ships them all-zero (singular).
+  #  - exclude_bias=true: run #8's displacement check showed bias terms ate
+  #    25-62% of their RMS in updates without changing answers (bias on
+  #    activation magnitude ~1 is only ~1% perturbation). Free the budget
+  #    for the weight matrices that actually carry behaviour.
+  include_metalora: false
+  include_mem_tokens: false
+  exclude_bias: true
+  min_rms: 0.0
+
+es:
+  # Run #7 at α=0.01 caused 8pt drift in 10 steps under wide perturbation
+  # scope. Drop to m2p-only (see perturb.include_metalora: false) and use a
+  # moderate α=0.003 with a gentle anchor to keep the ES random walk under
+  # control. ES at Scale runs 1000 iters at α=0.0005 so eating 6x in α × 3x
+  # smaller scope puts effective step size in a comparable per-iter budget.
+  N: 30
+  lr: 0.003
+  reward_norm: zscore
+  mode: one_sided
+
+rollout:
+  context_max_length: 1024
+  question_max_length: 256
+  max_new_tokens: 64
+  questions_per_context: 2
+  batch_size: 4
+
+reward:
+  type: f1
+
+# Run #10: constant anchor. Run #9 showed heldout peak at step 10 while the
+# anchor coef was still ~0.22 (decay 0.3→0.05 over 30 steps), then drifted
+# down once the anchor dropped to 0.05 from step 30 onward. Hold coef
+# constant at 0.3 the whole time so the ES walk doesn't run away.
+anchor:
+  coef_start: 0.3
+  coef_end: 0.3
+  decay_steps: 100
+
+train:
+  # 30 steps was too short — ES at scale uses 1000 iterations; even just
+  # bumping to 100 gives the gradient direction time to accumulate above
+  # the per-step random-walk noise. eval_every=10 to keep heldout cost
+  # tractable; checkpoint-best is auto-saved on every heldout improvement.
+  total_steps: 100
+  eval_every: 10
+  heldout_contexts: 50
+  save_every: 25
+  seed: 42
+  out_dir: runs/smoke_run_02
+  train_contexts: 200
+  heldout_regression_threshold: 2.0
+  heldout_rollback_window: 3

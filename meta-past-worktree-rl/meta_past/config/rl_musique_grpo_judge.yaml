@@ -1,0 +1,90 @@
+hypernet:
+  ckpt_dir: ${oc.env:HOME}/huggingfacemodels/SHINE-ift_mqa_1qa
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+
+# MuSiQue (multi-hop QA) with LLM-as-judge reward.
+#
+# Bring up the judge server first, then launch training:
+#
+#   # judge server (one option: gpt-4o-mini, needs OPENAI_API_KEY)
+#   OPENAI_API_KEY=sk-... python scripts/judge_server.py --port 8124
+#
+#   # or a local Qwen3-32B served by vLLM at :8000
+#   python scripts/judge_server.py \
+#     --backend openai-compat --base-url http://127.0.0.1:8000/v1 \
+#     --model Qwen3-32B-Instruct --port 8124
+#
+#   # then training
+#   torchrun --nproc_per_node=8 --standalone scripts/phase1_rl_squad.py \
+#     --config meta_past/config/rl_musique_grpo_judge.yaml
+
+data:
+  name: musique
+
+vllm:
+  max_loras: 8
+  max_lora_rank: 8
+  max_model_len: 2048
+  dtype: bfloat16
+  # B_local=8 needs more training-side HBM than B_local=1 ever did.
+  # Drop the vLLM pool to 20% (16 GiB) so training has 64 GiB headroom for
+  # backbone (16) + Adam (10) + activations + rescore peak. vLLM weights
+  # are 16 GiB so the pool is right-sized; KV cache fits the rest.
+  gpu_memory_utilization: 0.30
+  enforce_eager: false
+
+rl:
+  adv_kind: grpo
+  norm_adv_by_std: true
+  loss_agg_mode: token-mean
+
+rollout:
+  context_max_length: 1024
+  question_max_length: 256
+  max_new_tokens: 64
+  temperature: 1.0
+  contexts_per_step: 64          # B; with world_size=8 → B_local=2 ctx/rank
+  questions_per_context: 1
+  rollouts_per_question: 16      # K → B*Q*K = 256 samples/step
+  hypernet_microbatch_contexts: 2
+  rescore_microbatch_contexts: 2
+  # Stock Qwen3 chat template; SHINE-pretrained model doesn't emit <think>.
+  enable_thinking: true
+  force_think: false
+
+optim:
+  lr: 1.0e-5
+  weight_decay: 0.0
+  grad_clip: 1.0
+  use_gradient_checkpointing: true
+
+# LLM-as-judge reward: POSTs (question, reference, pred) → True/False to
+# the judge server, returns 1.0 / 0.0. Concurrent calls fan out via a
+# thread pool; with 256 samples/step at 64-way concurrency the reward
+# phase is ~4 round-trips × per-call latency.
+reward:
+  type: judge
+  judge_url: http://127.0.0.1:8124
+  judge_concurrency: 64
+  judge_timeout_s: 30
+  judge_max_retries: 3
+
+train:
+  total_steps: 500
+  eval_every: 25
+  heldout_contexts: 256
+  save_every: 50
+  seed: 42
+  out_dir: runs/musique_grpo_judge
+  train_contexts: 0              # use entire MuSiQue train (~20k)
+
+wandb:
+  enabled: true
+  project: meta-past-rl
+  name: musique_grpo_judge
+  tags: ["grpo", "qwen3-8b", "ddp", "hybrid", "musique", "judge"]
+  notes: "MuSiQue multi-hop, LLM-as-judge binary reward"
+  mode: online
+  group: ""

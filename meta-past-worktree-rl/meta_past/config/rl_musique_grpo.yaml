@@ -1,0 +1,83 @@
+hypernet:
+  ckpt_dir: ${oc.env:HOME}/huggingfacemodels/SHINE-ift_mqa_1qa
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+
+# MuSiQue (multi-hop QA), supporting paragraphs only. Launch with:
+#   torchrun --nproc_per_node=8 --standalone scripts/phase1_rl_squad.py \
+#     --config meta_past/config/rl_musique_grpo.yaml
+
+data:
+  name: musique
+  # cache_dir: ""        # leave blank for HF default
+
+vllm:
+  max_loras: 8
+  max_lora_rank: 8
+  max_model_len: 2048
+  dtype: bfloat16
+  # B_local=8 needs more training-side HBM than B_local=1 ever did.
+  # Drop the vLLM pool to 20% (16 GiB) so training has 64 GiB headroom for
+  # backbone (16) + Adam (10) + activations + rescore peak. vLLM weights
+  # are 16 GiB so the pool is right-sized; KV cache fits the rest.
+  gpu_memory_utilization: 0.30
+  enforce_eager: false
+
+rl:
+  adv_kind: grpo
+  norm_adv_by_std: true
+  loss_agg_mode: token-mean
+
+rollout:
+  # Supporting paragraphs are 500-1500 chars (~300-600 tokens) so 1024
+  # works; keep some headroom.
+  context_max_length: 1024
+  question_max_length: 256
+  # Multi-hop answers are typically a single named entity / short span — same
+  # budget as SQuAD is fine.
+  max_new_tokens: 64
+  temperature: 1.0
+  contexts_per_step: 16          # B; with world_size=8 → B_local=8 ctx/rank
+  questions_per_context: 1       # MuSiQue gives one question per item
+  rollouts_per_question: 16      # K → B*Q*K = 1024 samples/step
+  # B_local=8 is too big for the M2P + rescore forwards in one shot.
+  # mb=1 means 8 chunks per rank — slow but each chunk's peak is
+  # bounded so wake_up has room. If memory profile shows headroom,
+  # bump to 2 (4 chunks).
+  hypernet_microbatch_contexts: 2
+  rescore_microbatch_contexts: 2
+  # Stock Qwen3 chat template; SHINE-pretrained model doesn't emit <think>.
+  enable_thinking: true
+  force_think: false
+
+optim:
+  lr: 1.0e-5
+  weight_decay: 0.0
+  grad_clip: 1.0
+  use_gradient_checkpointing: true
+
+reward:
+  type: f1
+
+train:
+  total_steps: 500
+  eval_every: 25
+  heldout_contexts: 256          # divisible by world_size=8 (32/rank)
+  save_every: 50
+  seed: 42
+  out_dir: runs/musique_grpo
+  # 0 = use the entire MuSiQue train split (~20k answerable items).
+  # The trainer's epoch-based sampler shuffles the pool once and draws
+  # sequentially, so within one pass every context appears at most once.
+  # B=64 × ~310 steps = ~20k draws ≈ one epoch.
+  train_contexts: 0
+
+wandb:
+  enabled: true
+  project: meta-past-rl
+  name: musique_grpo
+  tags: ["grpo", "qwen3-8b", "ddp", "hybrid", "musique"]
+  notes: "MuSiQue multi-hop, supporting paragraphs only"
+  mode: online
+  group: ""

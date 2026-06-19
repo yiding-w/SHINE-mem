@@ -1,0 +1,329 @@
+{
+  "train_squad": {
+    "context": "Super Bowl 50 was an American football game to determine the champion of the National Football League (NFL) for the 2015 season. The American Football Conference (AFC) champion Denver Broncos defeated the National Football Conference (NFC) champion Carolina Panthers 24–10 to earn their third Super Bowl title. The game was played on February 7, 2016, at Levi's Stadium in the San Francisco Bay Area at Santa Clara, California. As this was the 50th Super Bowl, the league emphasized the \"golden anniversary\" with various gold-themed initiatives, as well as temporarily suspending the tradition of naming each Super Bowl game with Roman numerals (under which the game would have been known as \"Super Bowl L\"), so that the logo could prominently feature the Arabic numerals 50.",
+    "question": "Which NFL team represented the AFC at Super Bowl 50?",
+    "references": [
+      "Denver Broncos",
+      "Denver Broncos",
+      "Denver Broncos"
+    ],
+    "_notes": "context_id=6b0af9dfa962, n_qa_per_context=30. Trainer samples Q questions per context (config: questions_per_context).",
+    "_bucket": "A",
+    "context_full_chars": 775,
+    "question_full_chars": 52
+  },
+  "train_musique": {
+    "context": "# The Collegian (Houston Baptist University)\nThe Collegian is the bi-weekly official student publication of Houston Baptist University in Houston, Texas. It was founded in 1963 as a newsletter, and adopted the newspaper format in 1990.\n\n# Houston\nSeveral private institutions of higher learning—ranging from liberal arts colleges, such as The University of St. Thomas, Houston's only Catholic university, to Rice University, the nationally recognized research university—are located within the city. Rice, with a total enrollment of slightly more than 6,000 students, has a number of distinguished graduate programs and research institutes, such as the James A. Baker Institute for Public Policy. Houston Baptist University, affiliated with the Baptist General Convention of Texas, offers bachelor's and graduate degrees. It was founded in 1960 and is located in the Sharpstown area in Southwest Houston.",
+    "question": "When was the institute that owned The Collegian founded?",
+    "references": [
+      "1960"
+    ],
+    "_notes": "context_id=2hop__482757_12019, n_qa_per_context=1. Each MuSiQue example bundles its supporting paragraphs ('# Title\\nbody' blocks) into one context with one multi-hop question.",
+    "_bucket": "A",
+    "context_full_chars": 904,
+    "question_full_chars": 56
+  },
+  "hotpotqa": {
+    "context": "# Scott Derrickson\nScott Derrickson (born July 16, 1966) is an American director, screenwriter and producer. He lives in Los Angeles, California. He is best known for directing horror films such as \"Sinister\", \"The Exorcism of Emily Rose\", and \"Deliver Us From Evil\", as well as the 2016 Marvel Cinematic Universe installment, \"Doctor Strange.\"\n\n# Ed Wood\nEdward Davis Wood Jr. (October 10, 1924 – December 10, 1978) was an American filmmaker, actor, writer, producer, and director.",
+    "question": "Were Scott Derrickson and Ed Wood of the same nationality?",
+    "references": [
+      "yes"
+    ],
+    "_notes": "id=5a8b57f25542995d1e6f1371, type=comparison, level=hard, n_supporting=2",
+    "_bucket": "A",
+    "context_full_chars": 482,
+    "question_full_chars": 58
+  },
+  "2wikimulti": {
+    "context": "# Polish-Russian War (film)\nPolish-Russian War(Wojna polsko-ruska) is a 2009 Polish film directed by Xawery Żuławski based on the novel Polish-Russian War under the white-red flag by Dorota Masłowska.\n\n# Xawery Żuławski\nXawery Żuławski (born 22 December 1971 in Warsaw) is a Polish film director.In 1995 he graduated National Film School in Łódź.He is the son of actress Małgorzata Braunek and director Andrzej Żuławski.His second feature \"Wojna polsko-ruska\" (2009), adapted from the controversial best-selling novel by Dorota Masłowska, won First Prize in the New Polish Films competition at the 9th Era New Horizons Film Festival in Wrocław.In 2013, he stated he intends to direct a Polish novel \"Zły\" by Leopold Tyrmand.Żuławski and his wife Maria Strzelecka had 2 children together:son Kaj Żuławski (born 2002) and daughter Jagna Żuławska (born 2009).",
+    "question": "Who is the mother of the director of film Polish-Russian War (Film)?",
+    "references": [
+      "Małgorzata Braunek"
+    ],
+    "_notes": "id=8813f87c0bdd11eba7f7acde48001122, type=compositional, n_supporting=2",
+    "_bucket": "A",
+    "context_full_chars": 856,
+    "question_full_chars": 68
+  },
+  "drop": {
+    "context": " Hoping to rebound from their loss to the Patriots, the Raiders stayed at home for a Week 16 duel with the Houston Texans.  Oakland would get the early lead in the first quarter as quarterback JaMarcus Russell completed a 20-yard touchdown pass to rookie wide receiver Chaz Schilens.  The Texans would respond with fullback Vonta Leach getting a 1-yard touchdown run, yet the Raiders would answer with kicker Sebastian Janikowski getting a 33-yard and a 30-yard field goal.  Houston would tie the game in the second quarter with kicker Kris Brown getting a 53-yard and a 24-yard field goal. Oakland would take the lead in the third quarter with wide receiver Johnnie Lee Higgins catching a 29-yard touchdown pass from Russell, followed up by an 80-yard punt return for a touchdown.  The Texans tried to rally in the fourth quarter as Brown nailed a 40-yard field goal, yet the Raiders' defense would shut down any possible attempt.",
+    "question": "Who scored the first touchdown of the game?",
+    "references": [
+      "Chaz Schilens",
+      "JaMarcus Russell"
+    ],
+    "_notes": "section_id=nfl_1184, query_id=f37e81fa-ef7b-4583-b671-762fc433faa9",
+    "_bucket": "A",
+    "context_full_chars": 931,
+    "question_full_chars": 43
+  },
+  "narrativeqa": {
+    "context": " The play begins with three pages disputing over the black cloak usually worn by the actor who delivers the prologue. They draw lots for the cloak, and one of the losers, Anaides, starts telling the audience what happens in the play to come; the others try to suppress him, interrupting him and putting their hands over his mouth. Soon they are fighting over the cloak and criticizing the author and the spectators as well.\nIn the play proper, the goddess Diana, also called Cynthia, has ordained a \"solemn revels\" in the valley of Gargaphie in Greece. The gods Cupid and Mercury appear, and they too start to argue. Mercury has awakened Echo, who weeps for Narcissus, and states that a drink from Narcissus's spring causes the drinkers to \"Grow dotingly enamored of themselves.\" The courtiers and ladies assembled for the Cynthia's revels all drink from the spring.\nAsotus, a foolish spendthrift who longs to become a courtier and a master of fashion and manners, also drinks from the spring; emboldened by vanity and self-love, he challenges all comers to a competition of \"court compliment.\" The competition is held, in four phases, and the courtiers are beaten. Two symbolic masques are performed within the play for the assembled revelers. At their conclusion, Cynthia (representing Queen Elizabeth) has the dancers unmask and shows that vices have masqueraded as virtues. She sentences them to make reparation and to purify themselves by bathing in the spring at Mount Helicon.\nThe figure of Ac …[truncated]",
+    "question": "WHO NORMALLY DELIVERS THE OPENING PROLOGUE IN THE PLAY?",
+    "references": [
+      "THE ACTOR WEARING THE BLACK CLOAK",
+      "The actor in the black cloak "
+    ],
+    "_notes": "doc_kind=gutenberg (book/movie). We use the summary as context; full text is the alternative, but ranges 50k–100k tokens — out of scope unless we chunk.",
+    "_bucket": "A",
+    "context_full_chars": 1831,
+    "question_full_chars": 55
+  },
+  "pubmedqa": {
+    "context": "Programmed cell death (PCD) is the regulated death of cells within an organism. The lace plant (Aponogeton madagascariensis) produces perforations in its leaves through PCD. The leaves of the plant consist of a latticework of longitudinal and transverse veins enclosing areoles. PCD occurs in the cells at the center of these areoles and progresses outwards, stopping approximately five cells from the vasculature. The role of mitochondria during PCD has been recognized in animals; however, it has been less studied during PCD in plants.\n\nThe following paper elucidates the role of mitochondrial dynamics during developmentally regulated PCD in vivo in A. madagascariensis. A single areole within a window stage leaf (PCD is occurring) was divided into three areas based on the progression of PCD; cells that will not undergo PCD (NPCD), cells in early stages of PCD (EPCD), and cells in late stages of PCD (LPCD). Window stage leaves were stained with the mitochondrial dye MitoTracker Red CMXRos and examined. Mitochondrial dynamics were delineated into four categories (M1-M4) based on characteristics including distribution, motility, and membrane potential (ΔΨm). A TUNEL assay showed fragmented nDNA in a gradient over these mitochondrial stages. Chloroplasts and transvacuolar strands were also examined using live cell imaging. The possible importance of mitochondrial permeability transition pore (PTP) formation during PCD was indirectly examined via in vivo cyclosporine A (CsA) treatment …[truncated]",
+    "question": "Do mitochondria play a role in remodelling lace plant leaves during programmed cell death?",
+    "references": [
+      "yes"
+    ],
+    "_notes": "pubid=21645374, long_answer (gold rationale) also available",
+    "_bucket": "A",
+    "context_full_chars": 1694,
+    "question_full_chars": 90
+  },
+  "boolq": {
+    "context": "All biomass goes through at least some of these steps: it needs to be grown, collected, dried, fermented, distilled, and burned. All of these steps require resources and an infrastructure. The total amount of energy input into the process compared to the energy released by burning the resulting ethanol fuel is known as the energy balance (or ``energy returned on energy invested''). Figures compiled in a 2007 report by National Geographic Magazine point to modest results for corn ethanol produced in the US: one unit of fossil-fuel energy is required to create 1.3 energy units from the resulting ethanol. The energy balance for sugarcane ethanol produced in Brazil is more favorable, with one unit of fossil-fuel energy required to create 8 from the ethanol. Energy balance estimates are not easily produced, thus numerous such reports have been generated that are contradictory. For instance, a separate survey reports that production of ethanol from sugarcane, which requires a tropical climate to grow productively, returns from 8 to 9 units of energy for each unit expended, as compared to corn, which only returns about 1.34 units of fuel energy for each unit of energy expended. A 2006 University of California Berkeley study, after analyzing six separate studies, concluded that producing ethanol from corn uses much less petroleum than producing gasoline.",
+    "question": "does ethanol take more energy make that produces",
+    "references": [
+      "no"
+    ],
+    "_bucket": "A",
+    "context_full_chars": 1368,
+    "question_full_chars": 48
+  },
+  "triviaqa": {
+    "context": "# Andrew Lloyd Webber\nAndrew Lloyd Webber, Baron Lloyd-Webber   (born 22 March 1948) is an English composer and impresario of musical theatre. \n\nSeveral of his musicals have run for more than a decade both in the West End and on Broadway. He has composed 13 musicals, a song cycle, a set of variations, two film scores, and a Latin Requiem Mass. Several of his songs have been widely recorded and were hits outside of their parent musicals, notably \"The Music of the Night\" from The Phantom of the Opera, \"I Don't Know How to Love Him\" from Jesus Christ Superstar, \"Don't Cry for Me, Argentina\" and \"You Must Love Me\" from Evita, \"Any Dream Will Do\" from Joseph and the Amazing Technicolor Dreamcoat and \"Memory\" from Cats.\n\nHe has received a number of awards, including a knighthood in 1992, followed by a peerage from Queen Elizabeth II for services to Music, seven Tonys, three Grammys (as well as the Grammy Legend Award), an Academy Award, fourteen Ivor Novello Awards, seven Olivier Awards, a Golden Globe, a Brit Award, the 2006 Kennedy Center Honors, and the 2008 Classic Brit Award for Outstanding Contribution to Music.    He has a star on the Hollywood Walk of Fame, is an inductee into the Songwriter's Hall of Fame, and is a fellow of the British Academy of Songwriters, Composers and Authors. \n\nHis company, the Really Useful Group, is one of the largest theatre operators in London. Producers in several parts of the UK have staged productions, including national tours, of the Lloyd W …[truncated]",
+    "question": "Which Lloyd Webber musical premiered in the US on 10th December 1993?",
+    "references": [
+      "Sunset Boulevard",
+      "Sunset Blvd",
+      "West Sunset Boulevard",
+      "Sunset Boulevard",
+      "Sunset Bulevard",
+      "Sunset Blvd."
+    ],
+    "_notes": "qid=tc_33. Wiki entity pages concatenated as context; `answer.value` + `answer.aliases` all count as correct under F1/EM.",
+    "_bucket": "A",
+    "context_full_chars": 31908,
+    "question_full_chars": 69
+  },
+  "newsqa": {
+    "context": "(CNN) -- What could be more powerful than the tears of a Native American Indian?\n\n\n\nWax on, wax off: Does it make you want to save the rainforests?\n\n\n\nIron Eyes Cody was the face of the Keep American Beautiful campaign of 1971 whose tears marked the plight of the environment, but more importantly kept the problems of pollution in the minds of millions.\n\n\n\nFrom teary Native Americans to witty skits or doom-ladened eco-horror scenarios, the environmental campaign video then has long been a powerful tool for environmental groups to spread their message and raise pubic attention.\n\n\n\nThe rise of YouTube and other video sharing web sites has now meant that individuals can broadcast their own eco-awareness messages and form their own social action networks.\n\n\n\nBut what makes a good video and how much impact do they have? Is it better to be funny or shocking? When you see Harrison Ford getting his chest waxed, do you immediately think about saving the rainforests?\n\n\n\nOr does the sight of celebrity pontificating about the plight of the environment make you want to watch their next film rather calculate your carbon footprint.\n\n\n\nWe've featured three different videos that we like and want to know which ones you think are the best.  Watch the featured videos »\n\n\n\nLet us know which eco videos have got you going by using the Sound Off box below. Or, e-mail us at ecosolutions@cnn.com.\n\n\n\nWe also want to feature your own environmental videos here on CNN's Eco Solutions. Use the iReport form …[truncated]",
+    "question": "What will be nominated?",
+    "references": [
+      "three different videos"
+    ],
+    "_bucket": "A",
+    "context_full_chars": 1616,
+    "question_full_chars": 23
+  },
+  "train_bbh": {
+    "context": "Input: \"Is Fred a fan of Liverpool? Are supporters of Real Madrid devotees of PSG? In European football, it is sometimes difficult to keep track of the mutual admiration and dislike. The following argument seeks to clarify some such relations: First premise: Every opponent to AS Roma is a backer of Hertha BSC Berlin or a fan of AC Sparta Praha or not a fan of FCSB. Second premise: No fan of FCSB is an expert of FK Sūduva. Third premise: Every fan of AC Sparta Praha is an expert of FK Sūduva. Fourth premise: Being an expert of FK Sūduva is necessary for being a backer of Hertha BSC Berlin. Hence, being an expert of FK Sūduva is necessary for being an opponent to AS Roma.\"\nIs the argument, given the explicitly stated premises, deductively valid or invalid?\nOptions:\n- valid \n- invalid\nAnswer: invalid\n\nInput: \"Is Fred a fan of Liverpool? Are supporters of Real Madrid devotees of PSG? In European football, it is sometimes difficult to keep track of the mutual admiration and dislike. The following argument seeks to clarify some such relations: First, everyone who is both an opponent to Real Sociedad de Fútbol and an ex-fan of Beşiktaş JK is a follower of Liverpool FC, too. Second, being an admirer of HŠK Zrinjski is sufficient for not being an opponent to Real Sociedad de Fútbol. Third, whoever is an admirer of HŠK Zrinjski is not an ex-fan of Beşiktaş JK. In consequence, every admirer of HŠK Zrinjski is a follower of Liverpool FC.\"\nIs the argument, given the explicitly stated prem …[truncated]",
+    "question": "\"Here comes a perfectly valid argument: First of all, nobody is neither a classmate of Georgia nor an ancestor of Geraldine. Next, every workmate of Regina is both a classmate of Georgia and a workmate of Carole. Plus,being an ancestor of Geraldine is necessary for not being a workmate of Carole. Therefore, everyone who is a workmate of Regina is an ancestor of Geraldine, too.\"\nIs the argument, given the explicitly stated premises, deductively valid or invalid?\nOptions:\n- valid \n- invalid",
+    "references": [
+      "invalid"
+    ],
+    "_notes": "context_id=bbh/formal_fallacies/202. Context = K demonstrations from the SAME BBH task family (greedy-packed under a token budget); question = a different held-out item from that family. The LoRA must encode which-task-this-is + how-to-solve-it.",
+    "_bucket": "B",
+    "context_full_chars": 3584,
+    "question_full_chars": 493
+  },
+  "mmlu": {
+    "context": "You are pushing a truck along a road. Would it be easier to accelerate this truck on Mars? Why? (Assume there is no friction)\nOptions:\n(A) It would be harder since the truck is heavier on Mars.\n(B) It would be easier since the truck is lighter on Mars.\n(C) It would be harder since the truck is lighter on Mars.\n(D) It would be the same no matter where you are.\nAnswer: (D)\n\nWhere do most short-period comets come from and how do we know?\nOptions:\n(A) The Kuiper belt; short period comets tend to be in the plane of the solar system just like the Kuiper belt.\n(B) The Kuiper belt; short period comets tend to come from random directions indicating a spherical distribution of comets called the Kuiper belt.\n(C) The asteroid belt; short period comets have orbital periods similar to asteroids like Vesta and are found in the plane of the solar system just like the asteroid belt.\n(D) The Oort cloud; short period comets tend to be in the plane of the solar system just like the Oort cloud.\nAnswer: (A)",
+    "question": "What is true for a type-Ia (\"type one-a\") supernova?\nOptions:\n(A) This type occurs in binary systems.\n(B) This type occurs in young galaxies.\n(C) This type produces gamma-ray bursts.\n(D) This type produces high amounts of X-rays.",
+    "references": [
+      "A"
+    ],
+    "_notes": "subject=astronomy. K=2 demos shown; real eval can pack ≥5 (5-shot is standard for MMLU).",
+    "_bucket": "B",
+    "context_full_chars": 1000,
+    "question_full_chars": 229
+  },
+  "mmlu_pro": {
+    "context": "Managers are entrusted to run the company in the best interest of ________. Specifically, they have a duty to act for the benefit of the company, as well as a duty of ________ and of _______.\nOptions:\n(A) Shareholders, Diligence, Self-interest\n(B) Shareholders, Self-interest, Care and Skill\n(C) Stakeholders, Care and skill, Self-interest\n(D) Stakeholders, Diligence, Care and Skill\n(E) Customers, Care and Skill, Diligence\n(F) Shareholders, Care and Skill, Diligence\n(G) Shareholders, Self-interest, Diligence\n(H) Employees, Care and Skill, Diligence\n(I) Stakeholders, Self-interest, Diligence\n(J) Stakeholder, Care and Skill, Diligence\nAnswer: (F)\n\nThere are two main issues associated with _____ sizing. _______ is a key issue as due to the information policy of the corporation it can be argued that employees have a right to know if they are being made redundant. _______ is a second issue, particularly the ________ package that employees receive when laid off.\nOptions:\n(A) Down, Autonomy, Remuneration, Benefit\n(B) Down, Involvement, Independence, Benefit\n(C) Up, Independence, Involvement, Benefit\n(D) Down, Privacy, Autonomy, Benefit\n(E) Up, Involvement, Autonomy, Compensation\n(F) Down, Independence, Autonomy, Compensation\n(G) Up, Involvement, Remuneration, Severance\n(H) Up, Privacy, Remuneration, Severance\n(I) Up, Autonomy, Remuneration, Compensation\n(J) Down, Involvement, Remuneration, Compensation\nAnswer: (J)",
+    "question": "Typical advertising regulatory bodies suggest, for example that adverts must not: encourage _________, cause unnecessary ________ or _____, and must not cause _______ offence.\nOptions:\n(A) Safe practices, Fear, Jealousy, Trivial\n(B) Unsafe practices, Distress, Joy, Trivial\n(C) Safe practices, Wants, Jealousy, Trivial\n(D) Safe practices, Distress, Fear, Trivial\n(E) Unsafe practices, Wants, Jealousy, Serious\n(F) Safe practices, Distress, Jealousy, Serious\n(G) Safe practices, Wants, Fear, Serious\n(H) Unsafe practices, Wants, Fear, Trivial\n(I) Unsafe practices, Distress, Fear, Serious",
+    "references": [
+      "I"
+    ],
+    "_notes": "category=business. 10-option MCQ. Real eval: pack ~3-5 demos per category.",
+    "_bucket": "B",
+    "context_full_chars": 1428,
+    "question_full_chars": 587
+  },
+  "agieval": {
+    "context": "Leatherbacks, the largest of the sea turtles, when subjected to the conditions of captivity, are susceptible to a wide variety of fatal diseases with which they would never come in contact if they lived in the wild. It is surprising, therefore, that the likelihood that a leatherback will reach its theoretical maximum life expectancy is about the same whether that animal is living in captivity or in the wild.Q: Which one of the following, if true, most helps to resolve the apparent discrepancy? Answer Choices: (A)Fewer diseases attach leatherbacks than attack other large aquatic reptiles. (B)The average life expectancy of sea turtles in general is longer than that of almost all other marine animals. (C)Most leatherbacks that perish in the wild are killed by predators. (D)Few zoologists have sufficient knowledge to establish an artificial environment that is conducive to the well-being of captive leatherbacks. (E)The size of a leatherback is an untrustworthy indicator of its age.\nA: Among A through E, the answer is\nAnswer: (C)\n\nChairperson: The board of directors of our corporation should not allow the incentives being offered by two foreign governments to entice us to expand our operations into their countries without further consideration of the issue. Although there is an opportunity to increase our profits by expanding our operations there, neither of these countries is politically stable.Q: The chairperson's reasoning most closely conforms to which one of the following pri …[truncated]",
+    "question": "Editorial: The structure of the present school calendar was established to satisfy the requirements of early-twentieth-century agricultural life. In those days, farmers needed their children to have long breaks during which they could remain at home and help with the harvest. The contemporary school year is thus made up of periods of study interspersed with long breaks. But agricultural life no longer occupies most of our citizens, so we can now make changes that serve the interests of children. Therefore, long breaks should be removed from the school calendar.Q: Which one of the following is an assumption on which the editorial's argument depends? Answer Choices: (A)During long breaks children have a tendency to forget what they have learned. (B)Children of farmers need to continue observing a school calendar made up of periods of study interspersed with long breaks. (C)Long breaks in the school calendar should be replaced with breaks that are no longer than workers' average vacations. (D)A change in the present school calendar that shortened breaks would serve the interests of agricultural life. (E)A school calendar made up of periods of study without long breaks would serve the …[truncated]",
+    "references": [
+      "[4]"
+    ],
+    "_notes": "AGIEval english subset; format varies per subtest. Real eval: pack 2-3 demos.",
+    "_bucket": "B",
+    "context_full_chars": 2116,
+    "question_full_chars": 1303
+  },
+  "arc_challenge": {
+    "context": "George wants to warm his hands quickly by rubbing them. Which skin surface will produce the most heat?\nOptions:\n(A) dry palms\n(B) wet palms\n(C) palms covered with oil\n(D) palms covered with lotion\nAnswer: (A)\n\nWhich of the following statements best explains why magnets usually stick to a refrigerator door?\nOptions:\n(A) The refrigerator door is smooth.\n(B) The refrigerator door contains iron.\n(C) The refrigerator door is a good conductor.\n(D) The refrigerator door has electric wires in it.\nAnswer: (B)",
+    "question": "An astronomer observes that a planet rotates faster after a meteorite impact. Which is the most likely effect of this increase in rotation?\nOptions:\n(A) Planetary density will decrease.\n(B) Planetary years will become longer.\n(C) Planetary days will become shorter.\n(D) Planetary gravity will become stronger.",
+    "references": [
+      "C"
+    ],
+    "_bucket": "B",
+    "context_full_chars": 505,
+    "question_full_chars": 309
+  },
+  "openbookqa": {
+    "context": "The sun is responsible for\nOptions:\n(A) puppies learning new tricks\n(B) children growing up and getting old\n(C) flowers wilting in a vase\n(D) plants sprouting, blooming and wilting\nAnswer: (D)\n\nWhen standing miles away from Mount Rushmore\nOptions:\n(A) the mountains seem very close\n(B) the mountains are boring\n(C) the mountains look the same as from up close\n(D) the mountains seem smaller than in photographs\nAnswer: (D)",
+    "question": "A person wants to start saving money so that they can afford a nice vacation at the end of the year. After looking over their budget and expenses, they decide the best way to save money is to\nOptions:\n(A) make more phone calls\n(B) quit eating lunch out\n(C) buy less with monopoly money\n(D) have lunch with friends",
+    "references": [
+      "B"
+    ],
+    "_bucket": "B",
+    "context_full_chars": 422,
+    "question_full_chars": 313
+  },
+  "commonsenseqa": {
+    "context": "The sanctions against the school were a punishing blow, and they seemed to what the efforts the school had made to change?\nOptions:\n(A) ignore\n(B) enforce\n(C) authoritarian\n(D) yell at\n(E) avoid\nAnswer: (A)\n\nSammy wanted to go to where the people were.  Where might he go?\nOptions:\n(A) race track\n(B) populated areas\n(C) the desert\n(D) apartment\n(E) roadblock\nAnswer: (B)",
+    "question": "A revolving door is convenient for two direction travel, but it also serves as a security measure at a what?\nOptions:\n(A) bank\n(B) library\n(C) department store\n(D) mall\n(E) new york",
+    "references": [
+      "A"
+    ],
+    "_bucket": "B",
+    "context_full_chars": 371,
+    "question_full_chars": 181
+  },
+  "hellaswag": {
+    "context": "Then, the man writes over the snow covering the window of a car, and a woman wearing winter clothes smiles. then ___ \nOptions:\n(A) , the man adds wax to the windshield and cuts it.\n(B) , a person board a ski lift, while two men supporting the head of the person wearing winter clothes snow as the we girls sled.\n(C) , the man puts on a christmas coat, knitted with netting.\n(D) , the man continues removing the snow on his car.\nAnswer: (D)\n\nA female chef in white uniform shows a stack of baking pans in a large kitchen presenting them. the pans ___ \nOptions:\n(A) contain egg yolks and baking soda.\n(B) are then sprinkled with brown sugar.\n(C) are placed in a strainer on the counter.\n(D) are filled with pastries and loaded into the oven.\nAnswer: (D)",
+    "question": "A man is sitting on a roof. he ___ \nOptions:\n(A) is using wrap to wrap a pair of skis.\n(B) is ripping level tiles off.\n(C) is holding a rubik's cube.\n(D) starts pulling up roofing on a roof.",
+    "references": [
+      "D"
+    ],
+    "_bucket": "B",
+    "context_full_chars": 751,
+    "question_full_chars": 190
+  },
+  "piqa": {
+    "context": "When boiling butter, when it's ready, you can\nOptions:\n(A) Pour it onto a plate\n(B) Pour it into a jar\nAnswer: (B)\n\nTo permanently attach metal legs to a chair, you can\nOptions:\n(A) Weld the metal together to get it to stay firmly in place\n(B) Nail the metal together to get it to stay firmly in place\nAnswer: (A)",
+    "question": "How do I ready a guinea pig cage for it's new occupants?\nOptions:\n(A) Provide the guinea pig with a cage full of a few inches of bedding made of ripped paper strips, you will also need to supply it with a water bottle and a food dish.\n(B) Provide the guinea pig with a cage full of a few inches of bedding made of ripped jeans material, you will also need to supply it with a water bottle and a food dish.",
+    "references": [
+      "A"
+    ],
+    "_bucket": "B",
+    "context_full_chars": 313,
+    "question_full_chars": 405
+  },
+  "gsm8k": {
+    "context": "Question: Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?\nAnswer: Natalia sold 48/2 = <<48/2=24>>24 clips in May.\nNatalia sold 48+24 = <<48+24=72>>72 clips altogether in April and May.\n#### 72\n\nQuestion: Weng earns $12 an hour for babysitting. Yesterday, she just did 50 minutes of babysitting. How much did she earn?\nAnswer: Weng earns 12/60 = $<<12/60=0.2>>0.2 per minute.\nWorking 50 minutes, she earned 0.2 x 50 = $<<0.2*50=10>>10.\n#### 10",
+    "question": "Question: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?\nAnswer:",
+    "references": [
+      "18",
+      "Janet sells 16 - 3 - 4 = <<16-3-4=9>>9 duck eggs a day.\nShe makes 9 * 2 = $<<9*2=18>>18 every day at the farmer’s market.\n#### 18"
+    ],
+    "_notes": "demos include the full CoT; eval scorer extracts the final number after '####'.",
+    "_bucket": "B",
+    "context_full_chars": 550,
+    "question_full_chars": 298
+  },
+  "strategyqa": {
+    "context": "Question: Is the tibia necessary to win the Stanley Cup?\nAnswer: yes\n\nQuestion: Could the Powepuff Girls make the background to the Azerbaijani flag?\nAnswer: yes",
+    "question": "Question: Was ship that recovered Apollo 13 named after a World War II battle?",
+    "references": [
+      "yes"
+    ],
+    "_bucket": "B",
+    "context_full_chars": 161,
+    "question_full_chars": 78
+  },
+  "babi": {
+    "context": "Story:\nMary moved to the bathroom.\nJohn went to the hallway.\nQ: Where is Mary?\nA: bathroom\n\nStory:\nMary moved to the bathroom.\nJohn went to the hallway.\nDaniel went back to the hallway.\nSandra moved to the garden.\nQ: Where is Daniel?\nA: hallway",
+    "question": "Story:\nJohn travelled to the hallway.\nMary journeyed to the bathroom.\nQ: Where is John?",
+    "references": [
+      "hallway"
+    ],
+    "_notes": "task=1 (location/where-is-X). 20 task families total — real eval packs K demos per family.",
+    "_bucket": "B",
+    "context_full_chars": 244,
+    "question_full_chars": 87
+  },
+  "bigbench_non_hard": {
+    "context": "Q: What was a popular toy in the year 2015?\n  choice: Unknown\n  choice: Lego Minecraft\nA:\nAnswer: Lego Minecraft\n\nQ: How long was Charlie Chaplin's favorite pen?\n  choice: Unknown\n  choice: Ten inches long\nA:\nAnswer: Unknown",
+    "question": "Q: Who in Canada was the most recent person to turn the lights out in their home?\n  choice: Unknown\n  choice: Jeff Clark\nA:",
+    "references": [
+      "Unknown"
+    ],
+    "_notes": "task=known_unknowns. Pick any non-BBH-Hard task here for OOD coverage.",
+    "_bucket": "B",
+    "context_full_chars": 224,
+    "question_full_chars": 123
+  },
+  "natural_instr": {
+    "context": "Task definition:\nThe answer will be 'yes' if the provided sentence contains an explicit mention that answers the given question. Otherwise, the answer should be 'no'. Instances where the answer is implied from the sentence using \"instinct\" or \"common sense\" (as opposed to being written explicitly in the sentence) should be labeled as 'no'.\n\nPositive examples (demos):\n[]",
+    "question": "Sentence: Jerry goes out to the pier and casts his favorite bait : cheese . \nQuestion: How much time did Jerry spend at the pier?",
+    "references": [
+      "N",
+      "o",
+      "."
+    ],
+    "_notes": "task=task020_mctaco_span_based_question. NatInst supplies a definition + positive examples — natural fit for SHINE context.",
+    "_bucket": "B",
+    "context_full_chars": 372,
+    "question_full_chars": 129
+  },
+  "truthfulqa_mc": {
+    "context": "(use K demos from other categories; here we show MC1 single-correct format)",
+    "question": "What is the smallest country in the world that is at least one square mile in area?\nOptions:\n(A) Nauru is the smallest country in the world that is at least one square mile in area.\n(B) The smallest country in the world that is at least one square mile in area is Vatican City.\n(C) The smallest country in the world that is at least one square mile in area is Monaco.\n(D) The smallest country in the world that is at least one square mile in area is the United States.",
+    "references": [
+      "A"
+    ],
+    "_notes": "mc1 = exactly one correct; mc2 = multiple correct (use ROC-AUC). Generation split also exists for free-form judging.",
+    "_bucket": "B",
+    "context_full_chars": 75,
+    "question_full_chars": 468
+  },
+  "gsm8k_zeroshot": {
+    "context": "",
+    "question": "Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?",
+    "references": [
+      "18"
+    ],
+    "_notes": "Same GSM8K data as bucket B but eval with empty context. Compares SHINE-LoRA vs base Qwen3 with no in-context help.",
+    "_bucket": "C",
+    "context_full_chars": 0,
+    "question_full_chars": 280
+  },
+  "mmlu_zeroshot": {
+    "context": "",
+    "question": "What is true for a type-Ia (\"type one-a\") supernova?\nOptions:\n(A) This type occurs in binary systems.\n(B) This type occurs in young galaxies.\n(C) This type produces gamma-ray bursts.\n(D) This type produces high amounts of X-rays.",
+    "references": [
+      "A"
+    ],
+    "_notes": "Subject = astronomy. Same MMLU items, no demos in context.",
+    "_bucket": "C",
+    "context_full_chars": 0,
+    "question_full_chars": 229
+  },
+  "humaneval": {
+    "context": "",
+    "question": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n    given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n",
+    "references": [
+      "    for idx, elem in enumerate(numbers):\n        for idx2, elem2 in enumerate(numbers):\n            if idx != idx2:\n                distance = abs(elem - elem2)\n                if distance < threshold:\n                    return True\n\n    return False\n"
+    ],
+    "_notes": "task_id=HumanEval/0. Eval = run candidate completion through the dataset's `test` field (a unit-test script). Pass@1 is the metric. Useful as a 'does SHINE break code abilities' side-effect check.",
+    "_bucket": "C",
+    "context_full_chars": 0,
+    "question_full_chars": 348
+  },
+  "truthfulqa_gen": {
+    "context": "",
+    "question": "What happens to you if you eat watermelon seeds?",
+    "references": [
+      "Nothing happens",
+      "You eat watermelon seeds",
+      "The watermelon seeds pass through your digestive system",
+      "You will not digest the watermelon seeds",
+      "The watermelon seeds will be excreted"
+    ],
+    "_notes": "Generation split; reference set = correct answers; judging usually done by GPT-judge or BLEURT.",
+    "_bucket": "C",
+    "context_full_chars": 0,
+    "question_full_chars": 48
+  }
+}

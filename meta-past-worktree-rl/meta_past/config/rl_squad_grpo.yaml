@@ -1,0 +1,83 @@
+hypernet:
+  ckpt_dir: ${oc.env:HOME}/huggingfacemodels/SHINE-ift_mqa_1qa
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+
+# SQuAD v1 — single-passage extractive QA with the F1 reward.
+#
+# SHINE was pretrained on SQuAD-train, so this config is primarily a
+# **smoke / baseline** run: heldout F1 should already start high and
+# RL gains will be small. Useful for catching regressions in the
+# training stack and for comparing against MuSiQue / BBH on the same
+# infrastructure.
+#
+# All contexts come from the SQuAD validation split (~2k passages):
+# the loader slices off the first ``train_contexts`` as the training
+# pool and the next ``heldout_contexts`` as the fixed eval slice.
+
+data:
+  name: squad
+
+vllm:
+  max_loras: 8
+  max_lora_rank: 8
+  max_model_len: 2048
+  dtype: bfloat16
+  gpu_memory_utilization: 0.30
+  enforce_eager: false
+
+rl:
+  adv_kind: grpo
+  norm_adv_by_std: true
+  loss_agg_mode: token-mean
+
+rollout:
+  context_max_length: 1024
+  question_max_length: 256
+  max_new_tokens: 64
+  temperature: 1.0
+  # SQuAD passages naturally have multiple questions, so unlike
+  # MuSiQue/BBH (Q=1) we use Q=4 to amortize each hypernet forward
+  # across more rollouts. Total samples/step = B*Q*K = 16*4*16 = 1024,
+  # same per-rank load as the MuSiQue config.
+  contexts_per_step: 16          # B; with world_size=8 → B_local=2 ctx/rank
+  questions_per_context: 4       # Q
+  rollouts_per_question: 16      # K
+  hypernet_microbatch_contexts: 2
+  rescore_microbatch_contexts: 1
+  # Stock Qwen3 template: true = no stub. SHINE-pretrained Qwen3 was SFT'd on
+  # non-thinking data so it emits the short SQuAD span directly within
+  # max_new_tokens=64; the stub is not needed to police the budget.
+  enable_thinking: true
+  force_think: false
+
+optim:
+  lr: 1.0e-5
+  weight_decay: 0.0
+  grad_clip: 1.0
+  use_gradient_checkpointing: true
+
+reward:
+  type: f1
+
+train:
+  total_steps: 500
+  eval_every: 25
+  heldout_contexts: 256
+  save_every: 50
+  seed: 42
+  out_dir: runs/squad_grpo
+  # SQuAD val has ~2k contexts; reserve 256 for heldout, use the rest
+  # (~1800) as the training pool. Tuned down to 1024 for cleaner epoch
+  # boundaries (1024 / B=16 = 64 steps per epoch).
+  train_contexts: 1024
+
+wandb:
+  enabled: true
+  project: meta-past-rl
+  name: squad_grpo
+  tags: ["grpo", "qwen3-8b", "ddp", "hybrid", "squad", "baseline"]
+  notes: "SQuAD F1 baseline — SHINE pretraining target; expect small RL delta"
+  mode: online
+  group: ""

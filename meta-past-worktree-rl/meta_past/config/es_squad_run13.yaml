@@ -1,0 +1,53 @@
+# Run #13: rank normalization (vs zscore). With our spiky F1 reward (many
+# perturbations give identical reward, a few give outliers), zscore amplifies
+# the outliers' contribution to ĝ. Centered-rank transform (OpenAI ES style)
+# weights perturbations by rank instead of magnitude, so a single lucky
+# outlier doesn't dominate the gradient.
+hypernet:
+  ckpt_dir: ${oc.env:HOME}/huggingfacemodels/SHINE-ift_mqa_1qa
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+  device: cuda:0   # via CUDA_VISIBLE_DEVICES=1 at launch
+
+perturb:
+  sigma: 0.1
+  sigma_mode: rms_relative
+  rms_floor: 1.0e-3
+  noise_dtype: float32
+  include_metalora: false
+  include_mem_tokens: false
+  exclude_bias: true
+  min_rms: 0.0
+
+es:
+  N: 30
+  lr: 0.003
+  reward_norm: rank      # ← only difference from run #10
+  mode: one_sided
+
+rollout:
+  context_max_length: 1024
+  question_max_length: 256
+  max_new_tokens: 64
+  questions_per_context: 2
+  batch_size: 4
+
+reward:
+  type: f1
+
+anchor:
+  coef_start: 0.3
+  coef_end: 0.3
+  decay_steps: 100
+
+train:
+  total_steps: 100
+  eval_every: 10
+  heldout_contexts: 50
+  save_every: 25
+  seed: 42
+  out_dir: runs/smoke_run_05
+  train_contexts: 200
+  heldout_regression_threshold: 2.0
+  heldout_rollback_window: 3

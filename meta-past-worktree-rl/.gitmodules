@@ -1,0 +1,6 @@
+[submodule "third_party/SHINE"]
+	path = third_party/SHINE
+	url = https://github.com/Yewei-Liu/SHINE
+[submodule "third_party/es-fine-tuning-paper"]
+	path = third_party/es-fine-tuning-paper
+	url = https://github.com/VsonicV/es-fine-tuning-paper

@@ -1,0 +1,78 @@
+hypernet:
+  ckpt_dir: ${oc.env:HOME}/huggingfacemodels/SHINE-ift_mqa_1qa
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+
+# SQuAD v1 — single-passage extractive QA with the F1 reward.
+#
+# **Thinking variant** of rl_squad_grpo.yaml: rollout prompts are
+# prefilled with "<think>\n" via force_think, so completions begin
+# inside a think block and must close </think> before the SQuAD span.
+# max_new_tokens raised 64 → 512 to fit reasoning + answer.
+#
+# Caveat: the SHINE-orig ckpt was SFT'd on non-thinking data, so on
+# day 1 most rollouts will likely just EOS or produce noisy garbage
+# inside the think block. Train signal will be slow until the model
+# learns to close </think> before the answer. See probe_force_think
+# script for the empirical behavior.
+
+data:
+  name: squad
+
+vllm:
+  max_loras: 8
+  max_lora_rank: 8
+  max_model_len: 2048
+  dtype: bfloat16
+  gpu_memory_utilization: 0.30
+  enforce_eager: false
+
+rl:
+  adv_kind: grpo
+  norm_adv_by_std: true
+  loss_agg_mode: token-mean
+
+rollout:
+  context_max_length: 1024
+  question_max_length: 256
+  # 512 = ~400 tokens thinking + ~50 token closing tags + ~60 token
+  # SQuAD span. Step time scales ~linearly with this so expect ~8x
+  # slowdown vs. the non-thinking baseline.
+  max_new_tokens: 512
+  temperature: 1.0
+  contexts_per_step: 16          # B; with world_size=8 → B_local=2 ctx/rank
+  questions_per_context: 4       # Q
+  rollouts_per_question: 16      # K → B*Q*K = 1024 samples/step
+  hypernet_microbatch_contexts: 2
+  rescore_microbatch_contexts: 1
+  enable_thinking: true
+  # Prefill "<think>\n" so the model is forced into the thinking branch.
+  force_think: true
+
+optim:
+  lr: 1.0e-5
+  weight_decay: 0.0
+  grad_clip: 1.0
+  use_gradient_checkpointing: true
+
+reward:
+  type: f1
+
+train:
+  total_steps: 500
+  eval_every: 25
+  heldout_contexts: 256
+  save_every: 50
+  seed: 42
+  out_dir: runs/squad_grpo_think
+  train_contexts: 1024
+
+wandb:
+  enabled: true
+  project: meta-past-rl
+  name: squad_grpo_think
+  tags: ["grpo", "qwen3-8b", "ddp", "hybrid", "squad", "thinking"]
+  notes: "SQuAD F1 with force_think — train chain-of-thought before answer"
+  mode: online
+  group: ""

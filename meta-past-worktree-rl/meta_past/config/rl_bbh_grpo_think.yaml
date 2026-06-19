@@ -1,0 +1,80 @@
+hypernet:
+  ckpt_dir: ${oc.env:HOME}/huggingfacemodels/SHINE-ift_mqa_1qa
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+
+# BIG-Bench Hard — in-parameter few-shot, **thinking variant**.
+#
+# Counterpart to rl_bbh_grpo.yaml with force_think=true: rollout prompts
+# are prefilled with "<think>\n" so the model must produce reasoning
+# then close </think> before the BBH target. max_new_tokens raised
+# 128 → 1024 since BBH tasks span a wide range of reasoning depths
+# (word_sorting needs ~200 tokens, logical_deduction can go further).
+#
+# This is plausibly the highest-upside force_think config — many BBH
+# tasks (logical deduction, navigate, tracking shuffled objects, ...)
+# explicitly reward step-by-step reasoning. Cold-start from SHINE-orig
+# will still be slow (no thinking SFT), so expect a long warmup.
+
+data:
+  name: bbh
+
+vllm:
+  max_loras: 8
+  max_lora_rank: 8
+  max_model_len: 2048
+  dtype: bfloat16
+  gpu_memory_utilization: 0.30
+  enforce_eager: false
+
+rl:
+  adv_kind: grpo
+  norm_adv_by_std: true
+  loss_agg_mode: token-mean
+
+rollout:
+  context_max_length: 1024
+  question_max_length: 512
+  # 1024 = ~900 tokens reasoning + closing tag + ~60 token answer (worst
+  # case word_sorting list of 20 sorted words). Step time scales ~linearly
+  # so expect ~8x slowdown vs. the non-thinking baseline. With
+  # question_max_length=512 the worst-case prompt+completion is 512+1024
+  # = 1536, well under max_model_len=2048.
+  max_new_tokens: 1024
+  temperature: 1.0
+  contexts_per_step: 64          # B; with world_size=8 → B_local=8 ctx/rank
+  questions_per_context: 1       # bbh has one query per built context
+  rollouts_per_question: 16      # K → B*Q*K = 1024 samples/step
+  hypernet_microbatch_contexts: 2
+  rescore_microbatch_contexts: 1
+  enable_thinking: true
+  # Prefill "<think>\n" so the model is forced into the thinking branch.
+  force_think: true
+
+optim:
+  lr: 1.0e-5
+  weight_decay: 0.0
+  grad_clip: 1.0
+  use_gradient_checkpointing: true
+
+reward:
+  type: f1
+
+train:
+  total_steps: 500
+  eval_every: 25
+  heldout_contexts: 256
+  save_every: 50
+  seed: 42
+  out_dir: runs/bbh_grpo_think
+  train_contexts: 0
+
+wandb:
+  enabled: true
+  project: meta-past-rl
+  name: bbh_grpo_think
+  tags: ["grpo", "qwen3-8b", "ddp", "hybrid", "bbh", "few-shot", "thinking"]
+  notes: "BBH in-parameter few-shot with force_think — reasoning before answer"
+  mode: online
+  group: ""

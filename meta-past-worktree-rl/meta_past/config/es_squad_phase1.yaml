@@ -1,0 +1,49 @@
+hypernet:
+  ckpt_dir: ${oc.env:HOME}/huggingfacemodels/SHINE-ift_mqa_1qa
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+  device: cuda:0
+
+perturb:
+  # σ_k = σ · RMS(p_k). Under absolute σ, the 554 m2p+metalora tensors
+  # (RMS ∈ [5e-3, 1.0]) get wildly uneven perturbations and small-RMS
+  # tensors accumulate drift.
+  sigma: 0.05
+  sigma_mode: rms_relative
+  rms_floor: 1.0e-3
+  noise_dtype: float32
+
+es:
+  N: 30
+  lr: 0.005
+  reward_norm: zscore     # zscore | rank | none
+
+rollout:
+  context_max_length: 1024
+  question_max_length: 256
+  max_new_tokens: 64
+  questions_per_context: 4
+  batch_size: 16          # contexts per step
+
+reward:
+  type: f1                # f1 | judge | learned_rm
+  # Used only when type=judge
+  judge_model: gpt-4.1
+  batch_api: true
+
+anchor:
+  coef_start: 1.0
+  coef_end: 0.1
+  decay_steps: 300
+
+train:
+  total_steps: 500
+  eval_every: 25
+  heldout_contexts: 50
+  save_every: 50
+  seed: 42
+  out_dir: runs/phase1_es_squad
+  train_contexts: 200
+  heldout_regression_threshold: 2.0
+  heldout_rollback_window: 3

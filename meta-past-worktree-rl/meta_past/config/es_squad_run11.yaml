@@ -1,0 +1,53 @@
+# Run #11: double the population (N=60), half the steps (50) — same compute
+# budget as run #10, but each ES gradient estimate uses 2x more samples so
+# per-step variance drops by √2. Tests "is the problem gradient noise vs
+# gradient direction?" — if N=60 shows a smoother trajectory than N=30,
+# variance was the culprit; if flat/worse, gradient direction itself is off.
+hypernet:
+  ckpt_dir: ${oc.env:HOME}/huggingfacemodels/SHINE-ift_mqa_1qa
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+  device: cuda:0   # via CUDA_VISIBLE_DEVICES=1 at launch time
+
+perturb:
+  sigma: 0.1
+  sigma_mode: rms_relative
+  rms_floor: 1.0e-3
+  noise_dtype: float32
+  include_metalora: false
+  include_mem_tokens: false
+  exclude_bias: true
+  min_rms: 0.0
+
+es:
+  N: 60
+  lr: 0.003
+  reward_norm: zscore
+  mode: one_sided
+
+rollout:
+  context_max_length: 1024
+  question_max_length: 256
+  max_new_tokens: 64
+  questions_per_context: 2
+  batch_size: 4
+
+reward:
+  type: f1
+
+anchor:
+  coef_start: 0.3
+  coef_end: 0.3
+  decay_steps: 50
+
+train:
+  total_steps: 50
+  eval_every: 10
+  heldout_contexts: 50
+  save_every: 25
+  seed: 42
+  out_dir: runs/smoke_run_03
+  train_contexts: 200
+  heldout_regression_threshold: 2.0
+  heldout_rollback_window: 3

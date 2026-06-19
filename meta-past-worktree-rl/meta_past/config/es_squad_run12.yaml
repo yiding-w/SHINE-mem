@@ -1,0 +1,53 @@
+# Run #12: warm-start from run #9's best checkpoint (step 10, heldout 0.6614,
+# +0.003 above SHINE-ift_mqa_1qa baseline). Hypothesis: that +0.003 was real
+# but immediately washed out by ES random walk; if we restart from there with
+# a stronger constant anchor (coef=0.5 vs run #10's 0.3), we can hold the
+# good state and let ES try to compound.
+hypernet:
+  ckpt_dir: runs/smoke_run_01/checkpoint-best     # run #9's step-10 peak
+  backbone: ${oc.env:HOME}/huggingfacemodels/Qwen3-8B
+  lora_r: 8
+  metalora_r: 128
+  device: cuda:0
+
+perturb:
+  sigma: 0.1
+  sigma_mode: rms_relative
+  rms_floor: 1.0e-3
+  noise_dtype: float32
+  include_metalora: false
+  include_mem_tokens: false
+  exclude_bias: true
+  min_rms: 0.0
+
+es:
+  N: 30
+  lr: 0.003
+  reward_norm: zscore
+  mode: one_sided
+
+rollout:
+  context_max_length: 1024
+  question_max_length: 256
+  max_new_tokens: 64
+  questions_per_context: 2
+  batch_size: 4
+
+reward:
+  type: f1
+
+anchor:
+  coef_start: 0.5
+  coef_end: 0.5
+  decay_steps: 50
+
+train:
+  total_steps: 50
+  eval_every: 5      # tighter eval to catch any compounding signal
+  heldout_contexts: 50
+  save_every: 25
+  seed: 43           # different seed from run #9-#11 (used 42)
+  out_dir: runs/smoke_run_04
+  train_contexts: 200
+  heldout_regression_threshold: 2.0
+  heldout_rollback_window: 3
