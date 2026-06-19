@@ -89,8 +89,19 @@ class DocToLoraRunner:
             from ctx_to_lora.modeling.hypernet import ModulatedPretrainedModel
 
             state_dict = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+            attn_impl = (
+                agent_config.get("attn_implementation")
+                or os.environ.get("D2L_ATTN_IMPLEMENTATION")
+                or os.environ.get("ATTN_IMPLEMENTATION")
+                or "sdpa"
+            )
+            use_flash_attn = bool(agent_config.get("use_flash_attn", False))
             self.model = ModulatedPretrainedModel.from_state_dict(
-                state_dict, train=False, use_sequence_packing=False
+                state_dict,
+                train=False,
+                use_sequence_packing=False,
+                use_flash_attn=use_flash_attn,
+                base_model_kwargs={"attn_implementation": attn_impl},
             )
             try:
                 self.model.to(self.device)
@@ -120,6 +131,7 @@ class DocToLoraRunner:
         print(
             f"[DocToLoraRunner] sub_dataset={self.sub_dataset} "
             f"chunk_len={self.chunk_len} max_new_tokens={self.max_new_tokens} "
+            f"attn={agent_config.get('attn_implementation', os.environ.get('D2L_ATTN_IMPLEMENTATION', 'sdpa'))} "
             f"checkpoint={os.path.basename(checkpoint_path)}",
             flush=True,
         )

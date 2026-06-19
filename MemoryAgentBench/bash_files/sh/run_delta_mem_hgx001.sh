@@ -35,8 +35,9 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   fi
   exit 1
 fi
-# 避免 conda 的 python 混入 .venv 的 site-packages（会出 torch/transformers 版本错乱）
-if [[ -n "${CONDA_PREFIX:-}" ]] && [[ "${PYTHON_BIN}" != "${VENV_PYTHON}" ]]; then
+# 避免 conda 的 python 混入 .venv 的 site-packages（d2l-mab 除外，必须用 doc-to-lora conda）
+if [[ "${MODE}" != d2l-mab && "${MODE}" != d2l && "${MODE}" != compare-mab-d2l ]] \
+  && [[ -n "${CONDA_PREFIX:-}" ]] && [[ "${PYTHON_BIN}" != "${VENV_PYTHON}" ]]; then
   echo "WARNING: conda active (${CONDA_PREFIX}) but PYTHON_BIN=${PYTHON_BIN}" >&2
   echo "         Recommend: export PYTHON_BIN=${VENV_PYTHON}" >&2
 fi
