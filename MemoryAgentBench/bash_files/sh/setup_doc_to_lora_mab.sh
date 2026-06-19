@@ -135,7 +135,7 @@ export PYTHONPATH="${DELTA_MEM_ROOT}:${SHINE_ROOT}:${MAB_ROOT}:${D2L_ROOT}"
 "${PYTHON_BIN}" -c "
 import torch, transformers
 from ctx_to_lora.modeling.hypernet import ModulatedPretrainedModel
-from deltamem.eval import benchmark_compare
+from deltamem.eval.run_d2l_mab_main import main as _d2l_main
 from methods.doc_to_lora_runner import DocToLoraRunner
 print('preflight OK', torch.__version__, transformers.__version__)
 "

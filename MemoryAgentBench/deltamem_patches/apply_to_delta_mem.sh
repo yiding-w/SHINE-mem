@@ -22,6 +22,10 @@ cp "${PATCH_ROOT}/deltamem/eval/shine_memory_agent_bench.py" \
   "${DELTA_MEM_ROOT}/deltamem/eval/shine_memory_agent_bench.py"
 cp "${PATCH_ROOT}/deltamem/eval/d2l_memory_agent_bench.py" \
   "${DELTA_MEM_ROOT}/deltamem/eval/d2l_memory_agent_bench.py"
+cp "${PATCH_ROOT}/deltamem/eval/memory_agent_bench_protocol_light.py" \
+  "${DELTA_MEM_ROOT}/deltamem/eval/memory_agent_bench_protocol_light.py"
+cp "${PATCH_ROOT}/deltamem/eval/run_d2l_mab_main.py" \
+  "${DELTA_MEM_ROOT}/deltamem/eval/run_d2l_mab_main.py"
 
 cd "${DELTA_MEM_ROOT}"
 if [[ -f "${PATCH_ROOT}/benchmark_compare_shine.patch" ]]; then

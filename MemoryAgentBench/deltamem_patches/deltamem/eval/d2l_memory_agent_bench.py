@@ -9,22 +9,13 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from deltamem.eval.official_memory_agent_bench import (
-    build_context_chunks as build_official_mab_context_chunks,
-    build_query_answer_pairs as build_official_mab_query_answer_pairs,
-    load_mab_eval_utils,
-)
+from deltamem.eval import memory_agent_bench_protocol_light as protocol
 from deltamem.eval.official_memory_agent_bench_templates import get_template as get_official_mab_template
-from deltamem.eval.shine_memory_agent_bench import (
-    _build_deltamem_official_query_prompt,
-    _build_deltamem_unified_query_prompt,
-)
 
 if TYPE_CHECKING:
     from argparse import Namespace
 
-    from deltamem.eval.benchmark_compare import MemoryAgentBenchRowTask
-    from deltamem.eval.common import DistributedContext
+    from deltamem.eval.memory_agent_bench_protocol_light import DistributedContext, MemoryAgentBenchRowTask
 
 
 def _ensure_paths(*, d2l_root: Path, mab_root: Path) -> None:
@@ -72,40 +63,30 @@ def _evaluate_row(
     item: dict[str, Any],
     runner,
     eval_utils,
-    compare_mod,
     agent_config: dict[str, Any],
     use_official_prompt: bool,
     max_context_chars: int,
 ) -> list[tuple[int, dict[str, object]]]:
-    clip_context_text = compare_mod.clip_context_text
-    memory_agent_bench_source = compare_mod.memory_agent_bench_source
-    memory_agent_bench_primary_metric_name = compare_mod.memory_agent_bench_primary_metric_name
-    memory_qa_is_correct = compare_mod.memory_qa_is_correct
-    qa_alias_max_f1 = compare_mod.qa_alias_max_f1
-    extract_first_line = compare_mod.extract_first_line
     query_include_context = bool(agent_config.get("query_include_context", True))
 
     raw_context = str(item.get("context", ""))
     if max_context_chars > 0 and len(raw_context) > max_context_chars:
-        raw_context = clip_context_text(raw_context, max_context_chars)
+        raw_context = protocol.clip_context_text(raw_context, max_context_chars)
 
-    source = memory_agent_bench_source(item)
+    source = protocol.memory_agent_bench_source(item)
     source_config = dict(item.get("official_source_config") or {})
     chunk_size = int(source_config.get("chunk_size") or 4096)
     row_max_new_tokens = int(source_config.get("generation_max_length") or 128)
     selected_questions = list(item.get("selected_questions") or [])
 
-    model_context_window = compare_mod.infer_model_context_window(
-        runner.model.base_model,
-        runner.tokenizer,
-    )
+    model_context_window = protocol.infer_model_context_window(runner.model.base_model, runner.tokenizer)
     runner.configure_for_row(max_context_chars=max_context_chars if max_context_chars > 0 else 0)
     if query_include_context:
         runner.set_query_max_length(model_context_window)
 
     runner.reset_context()
     if use_official_prompt:
-        context_chunks = build_official_mab_context_chunks(
+        context_chunks = protocol.build_context_chunks(
             [{"context": raw_context}],
             chunk_size=chunk_size,
             eval_utils_module=eval_utils,
@@ -113,7 +94,7 @@ def _evaluate_row(
         memorize_template = get_official_mab_template(source, "memorize", "Long_context_agent_deltamem")
         for chunk in context_chunks[0]:
             runner.memorize_chunk(chunk, memorize_template)
-        query_pairs = build_official_mab_query_answer_pairs(
+        query_pairs = protocol.build_query_answer_pairs(
             {
                 "questions": [q["question"] for q in selected_questions],
                 "answers": [q.get("answer_raw", []) for q in selected_questions],
@@ -141,8 +122,7 @@ def _evaluate_row(
         prompt_context_chars = 0
         if query_include_context:
             if use_official_prompt:
-                formatted_query, prompt_context = _build_deltamem_official_query_prompt(
-                    compare_mod=compare_mod,
+                formatted_query, prompt_context = protocol.build_deltamem_official_query_prompt(
                     tokenizer=runner.tokenizer,
                     model_context_window=model_context_window,
                     raw_context=raw_context,
@@ -155,8 +135,7 @@ def _evaluate_row(
                 prompt_context_chars = len(prompt_context)
                 prompt_style = "official_memorize_query_templates_d2l_lora"
             else:
-                formatted_query, prompt_context = _build_deltamem_unified_query_prompt(
-                    compare_mod=compare_mod,
+                formatted_query, prompt_context = protocol.build_deltamem_unified_query_prompt(
                     tokenizer=runner.tokenizer,
                     model_context_window=model_context_window,
                     raw_context=raw_context,
@@ -172,9 +151,9 @@ def _evaluate_row(
         output = runner.query(formatted_query)
         prediction = str(output.get("output") or "")
         answer_aliases = list(question_meta.get("answer_aliases") or [])
-        correct = memory_qa_is_correct(prediction, answer_aliases)
-        f1 = qa_alias_max_f1(prediction, answer_aliases)
-        primary_metric = memory_agent_bench_primary_metric_name(source)
+        correct = protocol.memory_qa_is_correct(prediction, answer_aliases)
+        f1 = protocol.qa_alias_max_f1(prediction, answer_aliases)
+        primary_metric = protocol.memory_agent_bench_primary_metric_name(source)
         primary_score = round(f1, 4) if primary_metric == "f1" else float(correct)
         eval_index = int(question_meta["eval_index"])
         records.append(
@@ -192,7 +171,7 @@ def _evaluate_row(
                     "query": query_text if use_official_prompt else str(question_meta["question"]),
                     "answer_aliases": answer_aliases,
                     "prediction": prediction,
-                    "extracted_answer": extract_first_line(prediction),
+                    "extracted_answer": protocol.extract_first_line(prediction),
                     "context_chars": len(raw_context),
                     "prompt_context_chars": prompt_context_chars,
                     "max_new_tokens": row_max_new_tokens,
@@ -219,9 +198,7 @@ def evaluate_d2l_memory_agent_bench(
     args: Namespace,
     context: DistributedContext,
     progress_bar=None,
-) -> list[tuple[int, dict[str, object]]]:
-    from deltamem.eval import benchmark_compare as compare_mod
-    from deltamem.eval.common import gather_indexed_records
+) -> list[dict[str, object]] | None:
     from methods.doc_to_lora_runner import DocToLoraRunner
 
     agent_config_path = Path(args.d2l_agent_config).resolve()
@@ -230,13 +207,13 @@ def evaluate_d2l_memory_agent_bench(
     mab_root = Path(args.external_memory_agent_bench_root).resolve()
     _ensure_paths(d2l_root=d2l_root, mab_root=mab_root)
 
-    eval_utils = load_mab_eval_utils(mab_root)
+    eval_utils = protocol.load_mab_eval_utils(mab_root)
     use_official_prompt = bool(args.memory_agent_bench_use_official_prompt)
     local_records: list[tuple[int, dict[str, object]]] = []
 
     for row_task in row_tasks:
         item = row_task.item
-        source = compare_mod.memory_agent_bench_source(item)
+        source = protocol.memory_agent_bench_source(item)
         source_config = dict(item.get("official_source_config") or {})
         dataset_config = {
             "sub_dataset": source,
@@ -248,7 +225,6 @@ def evaluate_d2l_memory_agent_bench(
             item=item,
             runner=runner,
             eval_utils=eval_utils,
-            compare_mod=compare_mod,
             agent_config=agent_config,
             use_official_prompt=use_official_prompt,
             max_context_chars=int(args.memory_agent_bench_max_context_chars),
@@ -258,4 +234,4 @@ def evaluate_d2l_memory_agent_bench(
             progress_bar.update(row_task.question_count)
         del runner
 
-    return gather_indexed_records(local_records, context)
+    return protocol.gather_indexed_records(local_records, context)

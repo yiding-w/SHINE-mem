@@ -4,8 +4,8 @@
 
 transformers==4.51.3
 accelerate==1.6.0
+datasets==3.6.0
 peft
-datasets
 einops
 opt-einsum
 jaxtyping

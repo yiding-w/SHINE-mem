@@ -83,7 +83,7 @@ mkdir -p "${OUTPUT_ROOT}" "${LOG_ROOT}"
 bash "${MAB_ROOT}/bash_files/sh/download_mab_recsys_entity2id.sh" || true
 echo "PYTHON_BIN=${PYTHON_BIN}"
 if [[ "${MODE}" == d2l-mab || "${MODE}" == d2l || "${MODE}" == compare-mab-d2l ]]; then
-  if ! PYTHONPATH="${PYTHONPATH}" "${PYTHON_BIN}" -c "import torch, transformers; from ctx_to_lora.modeling.hypernet import ModulatedPretrainedModel; from deltamem.eval import benchmark_compare; from methods.doc_to_lora_runner import DocToLoraRunner; print('D2L preflight OK', torch.__version__, transformers.__version__)"; then
+  if ! PYTHONPATH="${PYTHONPATH}" "${PYTHON_BIN}" -c "import torch, transformers; from ctx_to_lora.modeling.hypernet import ModulatedPretrainedModel; from deltamem.eval.run_d2l_mab_main import main as _d2l_main; from methods.doc_to_lora_runner import DocToLoraRunner; print('D2L preflight OK', torch.__version__, transformers.__version__)"; then
     echo "Fix D2L env: conda activate doc-to-lora && bash ${MAB_ROOT}/bash_files/sh/setup_doc_to_lora_mab.sh" >&2
     exit 1
   fi
@@ -147,6 +147,26 @@ COMMON_BENCHMARK_FLAGS=(
   --eval-top-k 10
   --skip-delta
   --skip-lora
+  "${OFFLINE_FLAG[@]}"
+)
+
+# Doc-to-LoRA MAB (light entry — no benchmark_compare / transformers 4.57)
+D2L_MAB_FLAGS=(
+  --device cuda:0
+  --seed "${SEED}"
+  --datasets-cache-dir "${HF_DATASETS_CACHE}"
+  --hub-cache-dir "${HF_HUB_CACHE}"
+  --external-memory-agent-bench-root "${MAB_ROOT}"
+  --memory-agent-bench-max-new-tokens 4096
+  --memory-agent-bench-max-context-chars "${MAB_MAX_CONTEXT_CHARS}"
+  --memory-agent-bench-splits "${MAB_SPLITS[@]}"
+  --no-memory-agent-bench-use-official-prompt
+  --eval-do-sample
+  --eval-temperature 0.4
+  --eval-top-p 0.9
+  --eval-top-k 10
+  --d2l-root "${D2L_ROOT}"
+  --d2l-agent-config "${D2L_AGENT_CONFIG}"
   "${OFFLINE_FLAG[@]}"
 )
 
@@ -251,21 +271,17 @@ run_mab_d2l_only() {
   local out="${OUTPUT_ROOT}/d2l_model/memory_agent_bench.json"
   local log="${LOG_ROOT}/d2l_mab.log"
   mkdir -p "$(dirname "${out}")"
-  echo "=== memory_agent_bench (Doc-to-LoRA only) → ${out}"
+  echo "=== memory_agent_bench (Doc-to-LoRA only, light runner) → ${out}"
   run_distributed 30182 \
-    -m deltamem.eval.benchmark_compare \
-    "${COMMON_BENCHMARK_FLAGS[@]}" \
-    --tasks memory_agent_bench \
-    --d2l-root "${D2L_ROOT}" \
-    --d2l-agent-config "${D2L_AGENT_CONFIG}" \
-    --skip-base \
-    --skip-shine \
-    --no-skip-d2l \
+    -m deltamem.eval.run_d2l_mab_main \
+    "${D2L_MAB_FLAGS[@]}" \
     --output-json "${out}" \
     2>&1 | tee "${log}"
 }
 
 run_mab_compare_d2l() {
+  echo "compare-mab-d2l requires δ-mem .venv (transformers 4.57) for base + D2L in one process." >&2
+  echo "Recommended: run base-mab in delta .venv and d2l-mab in doc-to-lora env separately." >&2
   local out="${OUTPUT_ROOT}/compare_mab/base_and_d2l.json"
   local log="${LOG_ROOT}/compare_mab_d2l.log"
   mkdir -p "$(dirname "${out}")"
