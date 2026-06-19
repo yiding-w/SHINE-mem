@@ -8,6 +8,7 @@ checkpoints
 !MemoryAgentBench/requirements-shine-mab.txt
 !MemoryAgentBench/requirements-delta-eval.txt
 !MemoryAgentBench/requirements-d2l-mab.txt
+!MemoryAgentBench/requirements-d2l-runtime.txt
 tmp.py
 outputs
 data
