@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 
+from tqdm.auto import tqdm
+
 from deltamem.eval.d2l_memory_agent_bench import evaluate_d2l_memory_agent_bench
 from deltamem.eval.memory_agent_bench_protocol_light import (
     finalize_distributed,
