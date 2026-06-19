@@ -55,7 +55,7 @@ class AgentWrapper:
         self.temperature = agent_config.get('temperature', 0.0)
         
         # Initialize tokenizer (tiktoken for API models; HF agents set their own)
-        if self._is_shine_agent() or self._is_hf_local_agent():
+        if self._is_shine_agent() or self._is_hf_local_agent() or self._is_doc_to_lora_agent():
             self.tokenizer = None
         else:
             model_for_tokenizer = self.model if "gpt-4o" in self.model else "gpt-4o-mini"
@@ -79,6 +79,8 @@ class AgentWrapper:
             self._initialize_zep_agent(agent_config)
         elif self._is_agent_type("rag"):
             self._initialize_rag_agent(agent_config, dataset_config)
+        elif self._is_doc_to_lora_agent():
+            self._initialize_doc_to_lora_agent(agent_config, dataset_config)
         elif self._is_shine_agent():
             self._initialize_shine_agent(agent_config, dataset_config)
         elif self._is_hf_local_agent():
@@ -92,6 +94,9 @@ class AgentWrapper:
 
     def _is_shine_agent(self):
         return "shine" in self.agent_name.lower()
+
+    def _is_doc_to_lora_agent(self):
+        return "doc_to_lora" in self.agent_name.lower()
 
     def _is_hf_local_agent(self):
         return "hf_local" in self.agent_name.lower()
@@ -284,6 +289,8 @@ class AgentWrapper:
         # Route to appropriate agent handler based on agent type
         if 'Long_context_agent' in self.agent_name:
             return self._handle_long_context_agent(message, memorizing)
+        elif self._is_doc_to_lora_agent():
+            return self._handle_doc_to_lora_agent(message, memorizing)
         elif self._is_shine_agent():
             return self._handle_shine_agent(message, memorizing)
         elif self._is_hf_local_agent():
@@ -353,6 +360,26 @@ class AgentWrapper:
             
         else:
             raise NotImplementedError(f"Model not supported: {self.model}")
+
+    def _initialize_doc_to_lora_agent(self, agent_config, dataset_config):
+        from methods.doc_to_lora_runner import DocToLoraRunner
+
+        self.context = ''
+        self.doc_to_lora_runner = DocToLoraRunner(agent_config, dataset_config)
+        self.doc_to_lora_runner.reset_context()
+
+    def _handle_doc_to_lora_agent(self, message, memorizing):
+        if memorizing:
+            memorize_template = get_template(self.sub_dataset, 'memorize', self.agent_name)
+            self.doc_to_lora_runner.memorize_chunk(message, memorize_template)
+            self.context = "\n".join(self.doc_to_lora_runner._chunks).strip()
+            return "Memorized"
+        query_template = get_template(self.sub_dataset, 'query', self.agent_name)
+        formatted_query = query_template.format(
+            question=message,
+            **({"label": ""} if "{label}" in query_template else {}),
+        )
+        return self.doc_to_lora_runner.query(formatted_query)
 
     def _initialize_shine_agent(self, agent_config, dataset_config):
         from methods.shine_runner import ShineMABRunner
@@ -1132,6 +1159,12 @@ class AgentWrapper:
         
     def save_agent(self):
         """Save agent state to disk for persistence."""
+        if self._is_doc_to_lora_agent():
+            os.makedirs(self.agent_save_to_folder, exist_ok=True)
+            with open(os.path.join(self.agent_save_to_folder, "doc_to_lora_chunks.txt"), "w", encoding="utf-8") as f:
+                f.write("\n\n===CHUNK===\n\n".join(self.doc_to_lora_runner._chunks))
+            print("\n\n doc-to-lora agent context saved...\n\n")
+            return
         if self._is_shine_agent():
             os.makedirs(self.agent_save_to_folder, exist_ok=True)
             with open(os.path.join(self.agent_save_to_folder, "shine_chunks.txt"), "w", encoding="utf-8") as f:
@@ -1176,6 +1209,17 @@ class AgentWrapper:
         """Load agent state from disk."""
         agent_save_folder = self.agent_save_to_folder
         assert os.path.exists(agent_save_folder), f"Folder {agent_save_folder} does not exist."
+
+        if self._is_doc_to_lora_agent():
+            chunk_path = os.path.join(agent_save_folder, "doc_to_lora_chunks.txt")
+            if os.path.isfile(chunk_path):
+                with open(chunk_path, "r", encoding="utf-8") as f:
+                    text = f.read()
+                self.doc_to_lora_runner._chunks = [c for c in text.split("\n\n===CHUNK===\n\n") if c.strip()]
+                self.doc_to_lora_runner._internalized = False
+                self.context = "\n".join(self.doc_to_lora_runner._chunks).strip()
+            print("\n\n doc-to-lora agent context loaded...\n\n")
+            return None
 
         if self._is_shine_agent():
             chunk_path = os.path.join(agent_save_folder, "shine_chunks.txt")

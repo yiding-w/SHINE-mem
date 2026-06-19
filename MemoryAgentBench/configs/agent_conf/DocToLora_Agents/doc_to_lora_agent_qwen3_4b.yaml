@@ -1,0 +1,24 @@
+# doc-to-lora (SakanaAI D2L) agent for MemoryAgentBench — Qwen3-4B hypernetwork.
+# Whole context is fed (no truncation): split into d2l_chunk_len-token chunks and
+# merged into ONE LoRA via D2L's combine_lora.
+#
+# Runs in the DEDICATED D2L env (see bash_files/sh/run_doc2lora_mab.sh), NOT MABench.
+agent_name: doc_to_lora_agent_qwen3_4b
+model: d2l-qwen3-4b
+temperature: 0.4
+top_p: 0.9
+top_k: 10
+output_dir: ./outputs/d2l-qwen3-4b
+
+# doc-to-lora repo root (its src/ is added to sys.path). Paths are relative to the
+# MAB root (main.py cwd). Edit to your clone, or leave d2l_root unset to use env D2L_ROOT.
+d2l_root: ../../doc-to-lora
+d2l_checkpoint_path: ../../doc-to-lora/trained_d2l/qwen_4b_d2l/checkpoint-20000/pytorch_model.bin
+
+# Tokens PER context chunk (NOT a global cap). User-chosen 8192/chunk.
+d2l_chunk_len: 8192
+
+# Match MAB's per-dataset generation length.
+use_mab_generation_max_length: true
+
+device: cuda

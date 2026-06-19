@@ -1,0 +1,113 @@
+diff --git a/deltamem/eval/benchmark_compare.py b/deltamem/eval/benchmark_compare.py
+--- a/deltamem/eval/benchmark_compare.py
++++ b/deltamem/eval/benchmark_compare.py
+@@ -366,6 +366,24 @@ def parse_args() -> argparse.Namespace:
+         default=None,
+         help="YAML agent config, e.g. MemoryAgentBench/configs/agent_conf/SHINE_Agents/SHINE_agent_qwen3_8b.yaml",
+     )
++    parser.add_argument("--skip-d2l", action=argparse.BooleanOptionalAction, default=True)
++    parser.add_argument(
++        "--d2l-root",
++        type=Path,
++        default=None,
++        help="doc-to-lora repo root. Defaults to D2L_ROOT env.",
++    )
++    parser.add_argument(
++        "--d2l-agent-config",
++        type=Path,
++        default=None,
++        help="YAML agent config, e.g. MemoryAgentBench/configs/agent_conf/DocToLora_Agents/doc_to_lora_agent_qwen3_4b_deltamem.yaml",
++    )
+     parser.add_argument(
+         "--output-json",
+         type=Path,
+@@ -373,7 +391,7 @@ def parse_args() -> argparse.Namespace:
+     )
+     args = parser.parse_args()
+-    if args.skip_base and args.skip_delta and args.skip_lora and args.skip_shine:
+-        parser.error("at least one of base, delta, lora, or shine evaluation must be enabled")
++    if args.skip_base and args.skip_delta and args.skip_lora and args.skip_shine and args.skip_d2l:
++        parser.error("at least one of base, delta, lora, shine, or d2l evaluation must be enabled")
+     if not args.skip_delta and args.delta_adapter_dir is None:
+         parser.error("--delta-adapter-dir is required unless --skip-delta is set")
+     if not args.skip_lora and args.lora_adapter_dir is None:
+@@ -388,6 +406,16 @@ def parse_args() -> argparse.Namespace:
+                 args.shine_root = Path(env_shine_root)
+             elif args.external_memory_agent_bench_root is not None:
+                 args.shine_root = args.external_memory_agent_bench_root.parent
++    if not args.skip_d2l:
++        if args.d2l_agent_config is None:
++            parser.error("--d2l-agent-config is required unless --skip-d2l is set")
++        if args.d2l_root is None:
++            env_d2l_root = os.environ.get("D2L_ROOT")
++            if env_d2l_root:
++                args.d2l_root = Path(env_d2l_root)
++            elif args.external_memory_agent_bench_root is not None:
++                parent = args.external_memory_agent_bench_root.parent
++                args.d2l_root = parent / "doc-to-lora"
+     return args
+ 
+ 
+@@ -2875,6 +2903,8 @@ def main() -> None:
+             "lora_adapter_dir": None if args.lora_adapter_dir is None else str(args.lora_adapter_dir),
+             "shine_root": None if args.shine_root is None else str(args.shine_root),
+             "shine_agent_config": None if args.shine_agent_config is None else str(args.shine_agent_config),
++            "d2l_root": None if args.d2l_root is None else str(args.d2l_root),
++            "d2l_agent_config": None if args.d2l_agent_config is None else str(args.d2l_agent_config),
+             "seed": args.seed,
+             "tasks": args.tasks,
+             "datasets_cache_dir": str(args.datasets_cache_dir),
+@@ -3105,6 +3135,52 @@ def main() -> None:
+                         task_name=task_name,
+                     )
+ 
++        if not args.skip_d2l:
++            from deltamem.eval.d2l_memory_agent_bench import evaluate_d2l_memory_agent_bench
++
++            if context.rank == 0:
++                payload["d2l"] = {
++                    "d2l_root": str(args.d2l_root),
++                    "d2l_agent_config": str(args.d2l_agent_config),
++                }
++            for task_name in args.tasks:
++                if task_name != "memory_agent_bench":
++                    continue
++                items = items_by_task[task_name]
++                memory_agent_bench_row_tasks = local_memory_agent_bench_row_tasks(
++                    items,
++                    context,
++                    default_max_new_tokens=args.memory_agent_bench_max_new_tokens,
++                    use_official_generation_lengths=args.memory_agent_bench_use_official_generation_lengths,
++                    max_questions_per_row_task=args.memory_agent_bench_max_questions_per_row_task,
++                )
++                progress_total = sum(row_task.question_count for row_task in memory_agent_bench_row_tasks)
++                progress_bar = None
++                if context.rank == 0:
++                    progress_bar = tqdm(
++                        total=progress_total,
++                        desc="d2l_memory_agent_bench",
++                        dynamic_ncols=True,
++                    )
++                records = evaluate_d2l_memory_agent_bench(
++                    row_tasks=memory_agent_bench_row_tasks,
++                    args=args,
++                    context=context,
++                    progress_bar=progress_bar,
++                )
++                if progress_bar is not None:
++                    progress_bar.close()
++                if context.rank == 0:
++                    payload["d2l"][task_name] = {
++                        "records": records,
++                        "summary": summarize_task(task_name, records, args=args),
++                    }
++                    persist_benchmark_payload(
++                        output_json=args.output_json,
++                        payload=payload,
++                        section="d2l",
++                        task_name=task_name,
++                    )
++
+         if context.rank == 0:
+             persist_benchmark_payload(output_json=args.output_json, payload=payload)
+             print(json.dumps(payload, indent=2))
