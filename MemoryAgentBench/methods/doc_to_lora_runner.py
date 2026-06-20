@@ -23,12 +23,65 @@ DEFAULT_D2L_CHUNK_LEN = 8192
 _D2L_MODEL_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
+def _clip_context_chars(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    marker = "\n\n[... context truncated ...]\n\n"
+    if max_chars <= len(marker) + 32:
+        return text[-max_chars:]
+    head_chars = max(1, (max_chars - len(marker)) // 3)
+    tail_chars = max(1, max_chars - len(marker) - head_chars)
+    return text[:head_chars].rstrip() + marker + text[-tail_chars:].lstrip()
+
+
 def _ensure_d2l_on_path(d2l_root: str) -> str:
     d2l_root = os.path.abspath(d2l_root)
     for p in (d2l_root, os.path.join(d2l_root, "src")):
         if os.path.isdir(p) and p not in sys.path:
             sys.path.insert(0, p)
     return d2l_root
+
+
+def _resolve_runner_device(device_name: str) -> torch.device:
+    explicit = os.environ.get("D2L_DEVICE", "").strip()
+    if explicit:
+        return torch.device(explicit)
+    if isinstance(device_name, str) and device_name.startswith("cuda:"):
+        return torch.device(device_name)
+    if device_name == "cuda" and torch.cuda.is_available():
+        return torch.device(f"cuda:{torch.cuda.current_device()}")
+    return torch.device(device_name)
+
+
+def _resolve_ctx_encoder_device(
+    base_device: torch.device, agent_config: Dict[str, Any]
+) -> torch.device | None:
+    raw = agent_config.get("ctx_encoder_device") or os.environ.get("D2L_CTX_ENCODER_DEVICE", "")
+    raw = str(raw).strip()
+    if not raw:
+        return None
+    ctx_device = torch.device(raw)
+    if ctx_device == base_device:
+        return None
+    return ctx_device
+
+
+def _apply_device_layout(model, base_device: torch.device, ctx_device: torch.device | None):
+    base_device = torch.device(base_device)
+    if ctx_device is None:
+        model.to(base_device)
+        model.device = base_device
+        return base_device, base_device
+    ctx_device = torch.device(ctx_device)
+    model.base_model.to(base_device)
+    model.ctx_encoder.to(ctx_device)
+    model.hypernet.to(ctx_device)
+    model.device = base_device
+    return base_device, ctx_device
+
+
+def _model_cache_key(checkpoint_path: str, base_device: torch.device, ctx_device: torch.device) -> str:
+    return f"{checkpoint_path}|base={base_device}|ctx={ctx_device}"
 
 
 def _resolve_d2l_lengths(
@@ -74,18 +127,16 @@ class DocToLoraRunner:
         if not os.path.isfile(checkpoint_path):
             raise FileNotFoundError(f"D2L checkpoint not found: {checkpoint_path}")
 
-        device_name = agent_config.get("device", "cuda")
-        self.device = torch.device(
-            f"cuda:{torch.cuda.current_device()}"
-            if device_name == "cuda" and torch.cuda.is_available()
-            else device_name
-        )
+        self.device = _resolve_runner_device(agent_config.get("device", "cuda"))
+        ctx_encoder_device = _resolve_ctx_encoder_device(self.device, agent_config)
+        cache_key = _model_cache_key(checkpoint_path, self.device, ctx_encoder_device or self.device)
 
-        if checkpoint_path in _D2L_MODEL_CACHE:
-            cached = _D2L_MODEL_CACHE[checkpoint_path]
+        if cache_key in _D2L_MODEL_CACHE:
+            cached = _D2L_MODEL_CACHE[cache_key]
             self.model = cached["model"]
             self.tokenizer = cached["tokenizer"]
             self.ctx_tokenizer = cached["ctx_tokenizer"]
+            self.ctx_device = cached["ctx_device"]
         else:
             from ctx_to_lora.model_loading import get_tokenizer
             from ctx_to_lora.modeling.hypernet import ModulatedPretrainedModel
@@ -108,23 +159,24 @@ class DocToLoraRunner:
                 use_flash_attn=use_flash_attn,
                 base_model_kwargs={"attn_implementation": attn_impl},
             )
-            try:
-                self.model.to(self.device)
-            except Exception:
-                pass
+            self.device, self.ctx_device = _apply_device_layout(
+                self.model, self.device, ctx_encoder_device
+            )
             self.model.reset()
             self.model.enable_iterative_mode(True)
 
             self.tokenizer = get_tokenizer(self.model.base_model.name_or_path)
             self.ctx_tokenizer = get_tokenizer(self.model.ctx_encoder.base_model.name_or_path)
 
-            _D2L_MODEL_CACHE[checkpoint_path] = {
+            _D2L_MODEL_CACHE[cache_key] = {
                 "model": self.model,
                 "tokenizer": self.tokenizer,
                 "ctx_tokenizer": self.ctx_tokenizer,
+                "ctx_device": self.ctx_device,
             }
 
         self.device = getattr(self.model, "device", self.device)
+        self.ctx_device = getattr(self, "ctx_device", self.device)
         self.chunk_len, self.max_new_tokens = _resolve_d2l_lengths(agent_config, dataset_config)
         self.sub_dataset = dataset_config.get("sub_dataset", "")
         self.agent_config = agent_config
@@ -134,10 +186,11 @@ class DocToLoraRunner:
         self._query_max_length = 0
 
         _use_flash, _attn_impl = resolve_d2l_attn(agent_config)
+        device_msg = f"base={self.device} ctx={self.ctx_device}"
         print(
             f"[DocToLoraRunner] sub_dataset={self.sub_dataset} "
             f"chunk_len={self.chunk_len} max_new_tokens={self.max_new_tokens} "
-            f"attn={_attn_impl} flash={_use_flash} "
+            f"attn={_attn_impl} flash={_use_flash} {device_msg} "
             f"checkpoint={os.path.basename(checkpoint_path)}",
             flush=True,
         )
@@ -166,13 +219,57 @@ class DocToLoraRunner:
         self._chunks.append(formatted.strip())
         self._internalized = False
 
+    def _internalize_ctx_chunks(self, ctx_tensors: List[torch.Tensor]) -> torch.Tensor:
+        """Generate one LoRA per 8192-token chunk and STACK them (lower peak VRAM).
+
+        IMPORTANT: store the RAW per-chunk LoRAs (leading dim = n_chunks) and let
+        ``model.generate()`` run ``combine_lora`` exactly once via ``n_ctx_chunks``.
+        Do NOT pre-combine here — ``generate()`` always combines, so pre-combining
+        double-combines (rank explosion / split mismatch for multi-chunk contexts).
+        This matches D2L's canonical ``_internalize_from_ids`` -> ``generate`` path.
+        """
+        ctx_device = getattr(self, "ctx_device", self.device)
+        chunk_loras: List[Dict[str, Any]] = []
+
+        with torch.no_grad():
+            self.model.reset()
+            self.model.patch_lora_forward()
+            for chunk in ctx_tensors:
+                chunk_ids = chunk.unsqueeze(0).to(ctx_device)
+                chunk_mask = torch.ones_like(chunk_ids)
+                loras, _ = self.model.generate_weights(chunk_ids, chunk_mask)
+                chunk_loras.append(loras)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            if len(chunk_loras) == 1:
+                merged = chunk_loras[0]
+            else:
+                merged = {}
+                for module in chunk_loras[0]:
+                    merged[module] = {
+                        "A": torch.cat([entry[module]["A"] for entry in chunk_loras], dim=0),
+                        "B": torch.cat([entry[module]["B"] for entry in chunk_loras], dim=0),
+                    }
+
+            # Move to the base-model device so generate()'s combine_lora + apply land there.
+            if ctx_device != self.device:
+                merged = {
+                    module: {k: v.to(self.device) for k, v in mats.items()}
+                    for module, mats in merged.items()
+                }
+
+            self.model.generated_loras = merged  # uncombined; generate() combines once
+
+        return torch.tensor([len(ctx_tensors)], dtype=torch.int32, device=self.device)
+
     def _build_lora(self):
         from ctx_to_lora.data.processing import split_too_long_ctx, tokenize_ctx_text
 
         t0 = time.time()
         evidence = "\n".join(self._chunks).strip()
         if self._max_context_chars > 0 and len(evidence) > self._max_context_chars:
-            evidence = evidence[-self._max_context_chars :]
+            evidence = _clip_context_chars(evidence, self._max_context_chars)
 
         tokenized = tokenize_ctx_text({"context": [evidence]}, self.ctx_tokenizer)
         ctx_ids_flat = tokenized["ctx_ids"]
@@ -191,18 +288,7 @@ class DocToLoraRunner:
         )
         ctx_ids_list = split_result["ctx_ids"]
         ctx_tensors = [torch.tensor(x, dtype=torch.long) for x in ctx_ids_list]
-        ctx_ids = torch.nn.utils.rnn.pad_sequence(
-            ctx_tensors, batch_first=True, padding_value=self.ctx_tokenizer.pad_token_id or 0
-        ).to(self.device)
-        ctx_attn_mask = torch.nn.utils.rnn.pad_sequence(
-            [torch.ones_like(x) for x in ctx_tensors], batch_first=True, padding_value=0
-        ).to(self.device)
-
-        with torch.no_grad():
-            self.model.reset()
-            self.model._internalize_from_ids(ctx_ids, ctx_attn_mask)
-
-        self._n_ctx_chunks = torch.tensor([len(ctx_tensors)], dtype=torch.int32, device=self.device)
+        self._n_ctx_chunks = self._internalize_ctx_chunks(ctx_tensors)
         self._internalized = True
         self.memory_time += time.time() - t0
         print(
@@ -216,22 +302,31 @@ class DocToLoraRunner:
             self._build_lora()
 
         messages = [{"role": "user", "content": formatted_query}]
-        chat_ids = self.tokenizer.apply_chat_template(
-            messages,
-            add_special_tokens=False,
-            add_generation_prompt=True,
-            return_attention_mask=False,
-            return_tensors="pt",
-            enable_thinking=False,
-        ).to(self.device)
-        if self._query_max_length > 0 and chat_ids.shape[1] > self._query_max_length:
-            chat_ids = chat_ids[:, -self._query_max_length :]
+        encode_kwargs: Dict[str, Any] = {
+            "add_generation_prompt": True,
+            "tokenize": True,
+            "return_tensors": "pt",
+            "return_dict": True,
+            "padding": False,
+            "enable_thinking": False,
+        }
+        if self._query_max_length > 0:
+            encode_kwargs["max_length"] = self._query_max_length
+            encode_kwargs["truncation"] = True
+        input_enc = self.tokenizer.apply_chat_template(messages, **encode_kwargs)
+        chat_ids = input_enc["input_ids"].to(self.device)
+        attention_mask = input_enc.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.device)
+        else:
+            attention_mask = torch.ones_like(chat_ids)
 
         gen_kwargs: Dict[str, Any] = {
             "max_new_tokens": self.max_new_tokens,
             "do_sample": self.temperature > 0,
             "pad_token_id": self.tokenizer.pad_token_id,
             "eos_token_id": self.tokenizer.eos_token_id,
+            "attention_mask": attention_mask,
         }
         if self.temperature > 0:
             gen_kwargs["temperature"] = self.temperature
@@ -251,7 +346,7 @@ class DocToLoraRunner:
             )
         query_time = time.time() - t0
 
-        input_len = int(chat_ids.shape[1])
+        input_len = int(attention_mask.sum().item())
         new_tokens = outputs[0, input_len:]
         text = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 

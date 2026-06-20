@@ -16,7 +16,7 @@ d2l_chunk_len: 8192
 
 use_mab_generation_max_length: true
 
-# δ-mem unified prompt: full context + question at query (MAB_MAX_CONTEXT_CHARS clip).
+# Match δ-mem base / SHINE: unified context + question at query, plus LoRA from memorized context.
 query_include_context: true
 
 # Default: flash_attention_2 when flash_attn is installed (doc-to-lora official path).

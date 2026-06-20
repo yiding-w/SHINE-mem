@@ -51,6 +51,7 @@ def _configure_agent_for_suite(agent_config: dict[str, Any], args: Namespace) ->
         configured["top_p"] = float(args.eval_top_p)
         configured["top_k"] = int(args.eval_top_k)
     configured["use_mab_generation_max_length"] = True
+    # Same as SHINE/base: unified context + question at query, plus LoRA from memorized context.
     configured.setdefault("query_include_context", True)
     env_chunk = os.environ.get("D2L_CHUNK_LEN", "").strip()
     if env_chunk.isdigit():
@@ -203,6 +204,8 @@ def evaluate_d2l_memory_agent_bench(
 
     agent_config_path = Path(args.d2l_agent_config).resolve()
     agent_config = _configure_agent_for_suite(_load_agent_config(agent_config_path), args)
+    if context.device:
+        agent_config["device"] = context.device
     d2l_root = _resolve_d2l_root(agent_config, agent_config_path)
     mab_root = Path(args.external_memory_agent_bench_root).resolve()
     _ensure_paths(d2l_root=d2l_root, mab_root=mab_root)

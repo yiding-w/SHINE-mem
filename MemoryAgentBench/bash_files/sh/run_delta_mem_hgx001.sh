@@ -95,7 +95,10 @@ else
   fi
 fi
 
-# 默认 4 卡（0–3）。申请 4-GPU 作业后调度器通常会设 CUDA_VISIBLE_DEVICES=0,1,2,3
+# 默认 4 卡（0–3）。双卡节点可 export NUM_GPUS=2 CUDA_GPU_IDS=0,1
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" && -n "${CUDA_GPU_IDS:-}" ]]; then
+  export CUDA_VISIBLE_DEVICES="${CUDA_GPU_IDS}"
+fi
 if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   if [[ "${NUM_GPUS}" -ge 8 ]]; then
     export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -342,14 +345,30 @@ case "${MODE}" in
     ;;
   d2l-mab|d2l)
     # D2L: one full model per rank; default 1 GPU. Context chunked at 8192 tok via split_too_long_ctx.
+    export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
     if [[ -n "${D2L_NUM_GPUS:-}" ]]; then
       NUM_GPUS="${D2L_NUM_GPUS}"
       NPROC_PER_NODE="${D2L_NUM_GPUS}"
     elif [[ "${NUM_GPUS}" -gt 1 && -z "${D2L_ALLOW_MULTI_GPU:-}" ]]; then
-      echo "NOTE: d2l-mab using NUM_GPUS=1 (override: D2L_NUM_GPUS=4 or D2L_ALLOW_MULTI_GPU=1)" >&2
+      echo "NOTE: d2l-mab using NUM_GPUS=1 (override: D2L_NUM_GPUS=2 for 2-way shard)" >&2
       NUM_GPUS=1
       NPROC_PER_NODE=1
     fi
+    if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+      if [[ "${NUM_GPUS}" -ge 2 ]]; then
+        export CUDA_VISIBLE_DEVICES=0,1
+      else
+        export CUDA_VISIBLE_DEVICES=0
+      fi
+    fi
+    _ngpu=$(echo "${CUDA_VISIBLE_DEVICES}" | awk -F, '{print NF}')
+    if [[ "${_ngpu}" -lt "${NPROC_PER_NODE}" ]]; then
+      NPROC_PER_NODE="${_ngpu}"
+    fi
+    echo "D2L GPUs: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} nproc=${NPROC_PER_NODE}" >&2
+    echo "  GPU0 busy? try: CUDA_VISIBLE_DEVICES=1 bash $0 d2l-mab" >&2
+    echo "  2-GPU shard: CUDA_VISIBLE_DEVICES=0,1 D2L_NUM_GPUS=2 bash $0 d2l-mab" >&2
+    echo "  2-GPU VRAM split: D2L_CTX_ENCODER_DEVICE=cuda:1 bash $0 d2l-mab" >&2
     run_mab_d2l_only
     ;;
   compare-mab-d2l)
