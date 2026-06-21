@@ -13,7 +13,7 @@ output_dir: ./outputs/d2l-qwen3-4b
 # doc-to-lora repo root (its src/ is added to sys.path). Paths are relative to the
 # MAB root (main.py cwd). Edit to your clone, or leave d2l_root unset to use env D2L_ROOT.
 d2l_root: ../../doc-to-lora
-d2l_checkpoint_path: ../../doc-to-lora/trained_d2l/qwen_4b_d2l/checkpoint-20000/pytorch_model.bin
+d2l_checkpoint_path: /ceph/home/muhan01/huggingfacemodels/doc-to-lora/qwen_4b_d2l/checkpoint-20000/pytorch_model.bin
 
 # Tokens PER context chunk (NOT a global cap). User-chosen 8192/chunk.
 d2l_chunk_len: 8192

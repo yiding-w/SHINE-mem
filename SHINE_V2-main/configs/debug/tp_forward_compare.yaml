@@ -1,0 +1,36 @@
+# Debug configuration — TP Forward Comparison Mode
+# When tp_forward_compare.mode is set, training enters a special debug path:
+#   mode=pp_save: Run PP forward once, save all parameters + intermediate values, then exit.
+#   mode=tp_load: Load PP's saved parameters (strict, no self-init), run TP forward once,
+#                 save all intermediate values, then exit.
+#
+# Usage via launch_cluster.sh:
+#   Step 1 (PP): ./scripts/launch_cluster.sh start --nodes 2-3 --mode pretrain --name debug_pp \
+#                --debug tp_forward_compare_pp --data pretrain/same ...
+#   Step 2 (TP): ./scripts/launch_cluster.sh start --nodes 0-1 --mode pretrain --parallel tp --tp_size 4 \
+#                --name debug_tp --debug tp_forward_compare_tp --data pretrain/same ...
+#   Step 3: python scripts/compare_tp_forward.py
+#
+# Or use the unified script: ./scripts/run_tp_forward_compare.sh
+
+# Inherit all base debug settings
+anchor_debug: false
+no_flash: false
+log_peak_memory_steps: -1
+log_train_detail_steps: -1
+log_train_detail_ppl_threshold: -1
+check_consistency_across_nodes: -1
+check_nograd_loradict: -1
+
+monitor:
+  grad_norm_steps: -1
+  param_norm_steps: -1
+  gen_lora_norm_steps: -1
+  loss_spike: false
+  nan_inf_detect: false
+  nan_inf_stop_steps: -1
+
+# TP Forward Comparison settings
+tp_forward_compare:
+  mode: null          # null=disabled, "pp_save", "tp_load"
+  save_dir: debug_tp_forward_compare   # Directory to save/load intermediate values (relative to work dir)

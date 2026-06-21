@@ -1,0 +1,59 @@
+# Model loading configuration
+name: Qwen3_6-35B-A3B
+path: "./models/Qwen3_6-35B-A3B"
+base_class: src_transformers.LoraQwen3_5Moe.Qwen3_5MoeForCausalLM
+lora_class: src_transformers_lora.LoraQwen3_5Moe.LoraQwen3_5MoeForCausalLM
+
+# Per-component LoRA ranks.
+# Each key maps to a specific linear projection in the model.
+# Qwen3_5Moe attention projections:
+#   q_query, q_gate  — independent LoRA on the query/gate halves of q_proj
+#   k_proj, v_proj, o_proj — standard attention projections
+# Expert projections (applied to every expert):
+#   expert_gate, expert_up, expert_down
+lora_ranks:
+  q_query: 32
+  q_gate: 32
+  k_proj: 32
+  v_proj: 32
+  o_proj: 32
+  expert_gate: 0
+  expert_up: 0
+  expert_down: 2
+
+metalora_ranks:
+  q_query: 32
+  q_gate: 32
+  k_proj: 32
+  v_proj: 32
+  o_proj: 32
+  expert_gate: 0
+  expert_up: 0
+  expert_down: 2
+
+# device_map:
+#   layer_prefix: "model.layers"
+#   gpu_map:
+#     - [0, 0, 4]
+#     - [1, 5, 10]
+#     - [2, 11, 16]
+#     - [3, 17, 22]
+#     - [4, 23, 28]
+#     - [5, 29, 34]
+#     - [6, 35, 39]
+#   extra:
+#     model.embed_tokens: 0
+#     model.norm: 6
+#     lm_head: 6
+  
+device_map:
+  layer_prefix: "model.layers"
+  gpu_map:
+    - [0, 0, 9]
+    - [1, 10, 19]
+    - [2, 20, 29]
+    - [3, 30, 39]
+  extra:
+    model.embed_tokens: 0
+    model.norm: 3
+    lm_head: 3

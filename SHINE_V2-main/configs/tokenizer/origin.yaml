@@ -1,0 +1,22 @@
+# Tokenizer configuration
+# All tokenizer instances share these settings.
+
+# Extra special tokens to add (in order).
+# These tokens will be assigned IDs sequentially starting from the first
+# reserved slot in the model's embedding matrix.
+extra_special_tokens:
+  - "<RECON>"
+  - "<COMP>"
+  - "<NOTHING>"
+  - "<MASK>"
+  - "<CTX>"
+
+# Model embedding reserved slot info.
+# The model's vocab_size (248320) is larger than the tokenizer's actual size
+# (248077), leaving 243 reserved slots (IDs 248077~248319).
+# New tokens are assigned to these reserved slots in order.
+reserved_slots:
+  tokenizer_original_size: 248077   # len(tokenizer) before adding extra tokens
+  model_vocab_size: 248320          # config.vocab_size in model config
+  first_reserved_id: 248077         # first available reserved slot ID
+  total_reserved: 243               # total number of reserved slots

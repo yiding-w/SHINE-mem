@@ -1,0 +1,3 @@
+# ./scripts/launch_cluster.sh start --nodes all --mode pretrain --parallel tp --tp_size 4 --name trajectory_all_transfer_16k_tp --data pretrain/trajectory_all_transfer --detach_state full --training pretrain/savevram   --optimizer pretrain/lr3e-4 --m2p_transformer full_prenorm_gatedlastnorm_4layer --model Qwen3_6-27B_10lora
+
+./scripts/launch_cluster.sh start --nodes all --mode pretrain --parallel tp --tp_size 4 --name trajectory_all_transfer_16k_tp --data pretrain/trajectory_all_transfer --detach_state full --training pretrain/savevram   --optimizer pretrain/lr3e-4 --m2p_transformer full_prenorm_gatedlastnorm --model Qwen3_6-27B

@@ -1,0 +1,38 @@
+# DetachState configuration — Full mode
+# Maintains a wdict (W = accumulated A@B) as persistent state.
+# Only supported in PP mode.
+#
+# The wdict batch dimension equals local_batch_size. Each PP stage stores
+# only the wdict for its own layers. Write uses baddbmm to fuse the
+# A@B computation and accumulation into a single operation.
+#
+# NOTE: local_batch_size, micro_batch_size, and parallelism topology are
+# NOT configured here. They are automatically read from the training config
+# and pipeline topology at initialization time, and stored internally for
+# checkpoint validation.
+
+type: full
+
+# Weight regularization coefficient.
+# Loss term: regu_c * || W_old + A@B ||_F^2
+# Set to 0.0 to disable. Recommended range: 1e-5 ~ 1e-3.
+regu_c: 0.0001
+
+# Per-batch-position reset threshold.
+# Before each read, if the squared Frobenius norm ||W[batch_slice]||² of a
+# batch position exceeds this threshold, that slice is reset to zero.
+# The norm is computed as the SUM across all pipeline stages (all layers)
+# for that batch position.
+# Set to null to disable threshold-based reset (never reset).
+# Set to <= 0 to reset every step unconditionally.
+reset_threshold: 10.0
+
+# W-transform for Phase A (context forward with detach_state wdict).
+# method: "identity" | "zero" (disable wdict injection) | "compressed_mlp"
+w_transform_context:
+  method: identity
+
+# W-transform for Phase C (conversation forward with detach_state wdict).
+# method: "identity" (default) | "zero" | "compressed_mlp"
+w_transform_conversation:
+  method: identity

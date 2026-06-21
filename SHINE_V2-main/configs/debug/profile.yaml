@@ -1,0 +1,45 @@
+# Debug configuration (profile mode)
+# Inherits all origin.yaml settings + adds PyTorch Profiler support.
+anchor_debug: false
+no_flash: false
+
+# Disable most debug schedules during profiling to reduce noise
+log_peak_memory_steps: [0, 1]
+log_train_detail_steps: -1
+log_train_detail_ppl_threshold: -1
+check_consistency_across_nodes: -1
+check_nograd_loradict: -1
+
+# Disable monitors during profiling to get clean traces
+monitor:
+  grad_norm_steps: -1
+  param_norm_steps: -1
+  gen_lora_norm_steps: -1
+  loss_spike: false
+  nan_inf_detect: false
+  nan_inf_stop_steps: -1          # disabled during profiling
+
+# ======================== PyTorch Profiler ========================
+# Fast profiling mode:
+#   - Only profiles rank 0 (other ranks are no-ops)
+#   - Outputs a lightweight summary table (~10KB text) instead of multi-GB trace
+#   - No stack traces (the #1 cause of huge files)
+#   - No record_shapes (reduces data volume)
+#   - Total steps: wait(2) + warmup(2) + active(3) = 7 steps then auto-exit
+#
+# Output: profiling_logs/rank_0_summary.txt (human-readable table)
+# Contains: CUDA time breakdown, NVTX ranges, memory stats
+#
+# To also get a full Chrome trace (for TensorBoard), set write_full_trace: true
+# The trace will be written to /tmp/shine_profiler_traces/ (local disk, fast)
+profiler:
+  enabled: true
+  wait: 2              # Skip first N steps (warmup/compilation)
+  warmup: 2            # Warmup N steps (profiler active but not recording)
+  active: 3            # Record N steps (actual trace data)
+  repeat: 1            # Number of wait+warmup+active cycles
+  record_shapes: false # Disabled: reduces trace size significantly
+  profile_memory: true # Track CUDA memory allocations (lightweight)
+  with_flops: true     # Estimate FLOPs per operator
+  write_full_trace: false  # Set true to write gzipped trace to /tmp (for TensorBoard)
+  output_dir: ./profiling_logs  # Summary output directory

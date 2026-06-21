@@ -1,0 +1,21 @@
+# Debug: TP Forward Comparison — PP Save mode
+# Runs PP forward once, saves all parameters + intermediate values, then exits.
+anchor_debug: false
+no_flash: false
+log_peak_memory_steps: -1
+log_train_detail_steps: -1
+log_train_detail_ppl_threshold: -1
+check_consistency_across_nodes: -1
+check_nograd_loradict: -1
+
+monitor:
+  grad_norm_steps: -1
+  param_norm_steps: -1
+  gen_lora_norm_steps: -1
+  loss_spike: false
+  nan_inf_detect: false
+  nan_inf_stop_steps: -1
+
+tp_forward_compare:
+  mode: pp_save
+  save_dir: debug_tp_forward_compare
