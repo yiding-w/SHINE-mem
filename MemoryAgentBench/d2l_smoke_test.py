@@ -11,6 +11,8 @@ at increasing context lengths and prints the model output each time.
 
 from __future__ import annotations
 
+import os
+
 import yaml
 
 from methods.doc_to_lora_runner import DocToLoraRunner
@@ -50,6 +52,14 @@ def main() -> None:
         agent_config = yaml.safe_load(f)
     # Deterministic for the test.
     agent_config["temperature"] = 0.0
+    # Allow pointing at the real repo/checkpoint without editing the YAML:
+    #   export D2L_ROOT=/ceph/home/muhan01/doc-to-lora
+    #   export D2L_CHECKPOINT_PATH=/ceph/home/muhan01/doc-to-lora/trained_d2l/qwen_4b_d2l/checkpoint-20000/pytorch_model.bin
+    if os.environ.get("D2L_ROOT"):
+        agent_config["d2l_root"] = os.environ["D2L_ROOT"]
+    if os.environ.get("D2L_CHECKPOINT_PATH"):
+        agent_config["d2l_checkpoint_path"] = os.environ["D2L_CHECKPOINT_PATH"]
+    print("Using checkpoint:", agent_config["d2l_checkpoint_path"], flush=True)
 
     filler_sentence = "The sky was clear and the market was busy that morning. "
 
