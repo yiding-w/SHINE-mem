@@ -29,13 +29,22 @@ converter maps this to SFT JSONL or the streaming chunked dataset):
     "teacher_prompt_template": "...{history}...{question}..."   # for distillation
   }
 
-Filler source (real data): --filler-dir with .txt files (recommended), else a
-small built-in fallback so the script runs for smoke tests.
+Filler source (real data, for background/distractor):
+  - --filler-hf : stream real text from HF datasets (no full download). Presets:
+        wiki   = wikimedia/wikipedia (20231101.en)
+        arxiv  = ccdv/arxiv-summarization (article)
+        dialog = daily_dialog (conversational)
+        soda   = allenai/soda (conversational)
+    or a custom 'repo:config:split:field[:list]' spec. Comma-separate to mix.
+  - --filler-dir : a local dir of .txt files.
+  - if neither is given, a small built-in placeholder filler is used (smoke only).
+  NOTE: only the *background* is real; the queryable facts/QA are synthetic
+  (so gold stays 100% reliable). Synthetic entity names won't collide with real text.
 
 Example:
   python datagen/generate_memory_data.py \
       --out data/mem_synth/train.jsonl --num 2000 \
-      --filler-dir /path/to/real_text_txts \
+      --filler-hf arxiv,wiki,dialog --filler-hf-num 30000 \
       --tokenizer ./models/Qwen3.5-4B \
       --lengths 8000,16000,32000,64000,128000
 """
@@ -46,6 +55,7 @@ import argparse
 import json
 import os
 import random
+import re
 import string
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -268,20 +278,94 @@ def make_qa(world: World, depths: Dict[str, float], rng: random.Random) -> List[
 # Driver
 # ---------------------------------------------------------------------------
 
+# HuggingFace filler presets: name -> (repo, config, split, field, is_list_of_str)
+HF_FILLER_PRESETS: Dict[str, Tuple[str, Optional[str], str, str, bool]] = {
+    "wiki":   ("wikimedia/wikipedia", "20231101.en", "train", "text", False),
+    "arxiv":  ("ccdv/arxiv-summarization", None, "train", "article", False),
+    "dialog": ("daily_dialog", None, "train", "dialog", True),     # conversational
+    "soda":   ("allenai/soda", None, "train", "dialogue", True),   # conversational
+}
+
+
+def _to_snippets(text: str) -> List[str]:
+    """Split text into 20–400 char conversational snippets (paragraph then sentence)."""
+    out: List[str] = []
+    for para in text.replace("\r", " ").split("\n"):
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) <= 400:
+            if len(para) >= 20:
+                out.append(para)
+            continue
+        buf = ""
+        for sent in re.split(r"(?<=[.!?])\s+", para):
+            if len(buf) + len(sent) + 1 <= 400:
+                buf = (buf + " " + sent).strip()
+            else:
+                if len(buf) >= 20:
+                    out.append(buf)
+                buf = sent
+        if len(buf) >= 20:
+            out.append(buf)
+    return out
+
+
+def _resolve_hf_spec(name: str) -> Tuple[str, Optional[str], str, str, bool]:
+    """Accept a preset name or a custom 'repo:config:split:field[:list]' spec."""
+    if name in HF_FILLER_PRESETS:
+        return HF_FILLER_PRESETS[name]
+    parts = name.split(":")
+    repo = parts[0]
+    config = parts[1] if len(parts) > 1 and parts[1] else None
+    split = parts[2] if len(parts) > 2 and parts[2] else "train"
+    field_name = parts[3] if len(parts) > 3 and parts[3] else "text"
+    is_list = len(parts) > 4 and parts[4].lower() in ("1", "list", "true")
+    return repo, config, split, field_name, is_list
+
+
+def build_hf_filler(specs: List[str], total: int, seed: int) -> List[str]:
+    """Stream real text from HF datasets (no full download) into a snippet pool."""
+    try:
+        from datasets import load_dataset
+    except Exception as e:
+        print(f"[warn] `datasets` not available ({e}); skipping --filler-hf.")
+        return []
+    pool: List[str] = []
+    per_source = max(1, total // max(1, len(specs)))
+    for name in specs:
+        repo, config, split, field_name, is_list = _resolve_hf_spec(name)
+        got = 0
+        try:
+            ds = load_dataset(repo, config, split=split, streaming=True)
+        except Exception as e:
+            print(f"[warn] failed to load HF dataset '{name}' ({repo},{config},{split}): {e}")
+            continue
+        for ex in ds:
+            val = ex.get(field_name)
+            if val is None:
+                continue
+            text = " \n".join(map(str, val)) if is_list else str(val)
+            for snip in _to_snippets(text):
+                pool.append(snip)
+                got += 1
+                if got >= per_source:
+                    break
+            if got >= per_source:
+                break
+        print(f"[filler-hf] {name}: collected {got} snippets")
+    return pool
+
+
 def load_filler(filler_dir: Optional[str]) -> List[str]:
     if not filler_dir or not os.path.isdir(filler_dir):
-        return list(FILLER_FALLBACK)
+        return []
     pool: List[str] = []
     for fn in os.listdir(filler_dir):
         if fn.endswith(".txt"):
             with open(os.path.join(filler_dir, fn), "r", encoding="utf-8", errors="ignore") as f:
-                # split into sentence-ish chunks to use as conversational snippets
-                text = f.read()
-                for para in text.split("\n"):
-                    para = para.strip()
-                    if 20 <= len(para) <= 400:
-                        pool.append(para)
-    return pool or list(FILLER_FALLBACK)
+                pool.extend(_to_snippets(f.read()))
+    return pool
 
 
 def maybe_tokenizer(path: Optional[str]):
@@ -307,6 +391,11 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--num", type=int, default=1000)
     ap.add_argument("--filler-dir", default=None, help="dir of real .txt for background/distractor")
+    ap.add_argument("--filler-hf", default=None,
+                    help="comma-separated HF filler sources: presets {wiki,arxiv,dialog,soda} "
+                         "or custom 'repo:config:split:field[:list]'. Streamed, no full download.")
+    ap.add_argument("--filler-hf-num", type=int, default=20000,
+                    help="total real snippets to pull from --filler-hf sources")
     ap.add_argument("--tokenizer", default=None, help="HF tokenizer path for accurate length")
     ap.add_argument("--lengths", default="8000,16000,32000,64000,128000")
     ap.add_argument("--seed", type=int, default=42)
@@ -314,6 +403,13 @@ def main() -> None:
 
     rng = random.Random(args.seed)
     filler_pool = load_filler(args.filler_dir)
+    if args.filler_hf:
+        specs = [s.strip() for s in args.filler_hf.split(",") if s.strip()]
+        filler_pool += build_hf_filler(specs, args.filler_hf_num, args.seed)
+    if not filler_pool:
+        print("[warn] no real filler (--filler-dir/--filler-hf); using built-in placeholder filler.")
+        filler_pool = list(FILLER_FALLBACK)
+    print(f"[filler] pool size = {len(filler_pool)} snippets")
     tok = maybe_tokenizer(args.tokenizer)
     length_buckets = [int(x) for x in args.lengths.split(",")]
 
