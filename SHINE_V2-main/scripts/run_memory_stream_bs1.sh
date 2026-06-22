@@ -1,0 +1,67 @@
+#!/bin/bash
+# Phase 2: streaming long-history memory training on Qwen3.5-4B, 2 GPUs.
+# CORRECT streaming requires local_batch_size=1 (one history's segments accumulate
+# into the same detach_state W position across consecutive steps; repo change resets).
+# PP=2 splits the 4B across the 2 GPUs; DP=1 (no data sharding -> a history never
+# straddles ranks). batch=1 => pipeline bubble (slow) but CORRECT — validate first,
+# then we can do column-major interleaving for batch>1 speed.
+#
+# Usage:
+#   # 1) synth data first (segmented format):
+#   python datagen/generate_memory_seg.py --out data/mem_synth/train.jsonl --num 3000 \
+#       --filler-hf arxiv,wiki,dialog --filler-hf-num 40000 \
+#       --segments 8,16,32,64 --segment-tokens 1800 --tokenizer ./models/Qwen3.5-4B
+#   python datagen/generate_memory_seg.py --out data/mem_synth/val.jsonl --num 200 \
+#       --segments 8,16 --segment-tokens 1800 --seed 7 --tokenizer ./models/Qwen3.5-4B
+#   # 2) (recommended) verify the data contract:
+#   python datagen/check_stream.py --jsonl data/mem_synth/train.jsonl --model ./models/Qwen3.5-4B
+#   # 3) train:
+#   bash scripts/run_memory_stream_bs1.sh
+set -euo pipefail
+
+cd "$(dirname "$0")/.."   # SHINE_V2-main root
+
+# Optional env activation (set CONDA_ENV to your SHINE_V2 training env).
+source ~/.bashrc 2>/dev/null || true
+[ -n "${CONDA_ENV:-}" ] && conda activate "$CONDA_ENV" 2>/dev/null || true
+
+export PYTHONUNBUFFERED=1
+export HYDRA_FULL_ERROR=1
+
+# --- data config (configs/data/ is gitignored in V2; create it if missing) ---
+DCFG=configs/data/pretrain_annealing/memory_stream.yaml
+if [ ! -f "$DCFG" ]; then
+  mkdir -p "$(dirname "$DCFG")"
+  cat > "$DCFG" <<'YAML'
+name: memory_stream
+dataset_module: mydatasets.pretrain_annealing.memory_stream
+context_seq_length: 2048      # per-segment memory window (the streaming chunk)
+conv_seq_length: 1024         # per-segment QA (+ final QA on last segment)
+data_path: "data/mem_synth"
+train_file: "train.jsonl"
+val_file: "val.jsonl"
+shuffle: false                # CRITICAL: streaming needs in-order, repo-contiguous
+validation_split_num: 256
+YAML
+  echo "[run] wrote $DCFG"
+fi
+
+MODEL=${MODEL:-Qwen3_5-4B}
+NPROC=${NPROC:-2}
+MASTER_PORT=${MASTER_PORT:-29531}
+
+echo "[run] model=$MODEL nproc=$NPROC  (PP=$NPROC, DP=1, local_batch_size=1)"
+
+exec torchrun --nproc_per_node="$NPROC" --master_port="$MASTER_PORT" \
+  meta_train.py --config-name=main_pretrain_annealing \
+    model="$MODEL" \
+    m2p_transformer=full_prenorm_gatedlastnorm_4b \
+    data=pretrain_annealing/memory_stream \
+    detach_state=full \
+    parallel.mode=pp \
+    parallel.pipeline_parallel_size="$NPROC" \
+    parallel.total_gpus="$NPROC" \
+    training.pp_batchsize.local_batch_size=1 \
+    training.pp_batchsize.local_micro_batch_size=1 \
+    training.resume_from=null \
+    "$@"
