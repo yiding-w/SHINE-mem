@@ -1,10 +1,12 @@
 #!/bin/bash
 # Phase 2: streaming long-history memory training on Qwen3.5-4B, 2 GPUs.
-# CORRECT streaming requires local_batch_size=1 (one history's segments accumulate
-# into the same detach_state W position across consecutive steps; repo change resets).
-# PP=2 splits the 4B across the 2 GPUs; DP=1 (no data sharding -> a history never
-# straddles ranks). batch=1 => pipeline bubble (slow) but CORRECT — validate first,
-# then we can do column-major interleaving for batch>1 speed.
+# TP mode with tensor_parallel_size=1 == pure data-parallel (a full 4B replica per
+# GPU; the 4B is too small for PP and its device_map is single-GPU). detach_state=full
+# -> FullTPDetachState. CORRECT streaming needs batch_size=1 so one history's segments
+# accumulate into the same W position across consecutive steps (reset on repo change).
+# With DP=NPROC the data is split into NPROC contiguous halves -> at most ~1 history
+# straddles a rank boundary per epoch (negligible). Set NPROC=1 for a fully-clean
+# single-stream validation run.
 #
 # Usage:
 #   # 1) synth data first (segmented format):
@@ -50,7 +52,7 @@ MODEL=${MODEL:-Qwen3_5-4B}
 NPROC=${NPROC:-2}
 MASTER_PORT=${MASTER_PORT:-29531}
 
-echo "[run] model=$MODEL nproc=$NPROC  (PP=$NPROC, DP=1, local_batch_size=1)"
+echo "[run] model=$MODEL nproc=$NPROC  (TP mode, tp_size=1 -> DP=$NPROC, batch_size=1)"
 
 exec torchrun --nproc_per_node="$NPROC" --master_port="$MASTER_PORT" \
   meta_train.py --config-name=main_pretrain_annealing \
@@ -58,10 +60,9 @@ exec torchrun --nproc_per_node="$NPROC" --master_port="$MASTER_PORT" \
     m2p_transformer=full_prenorm_gatedlastnorm_4b \
     data=pretrain_annealing/memory_stream \
     detach_state=full \
-    parallel.mode=pp \
-    parallel.pipeline_parallel_size="$NPROC" \
+    parallel.mode=tp \
+    parallel.tensor_parallel_size=1 \
     parallel.total_gpus="$NPROC" \
-    training.pp_batchsize.local_batch_size=1 \
-    training.pp_batchsize.local_micro_batch_size=1 \
+    training.tp_batchsize.batch_size=1 \
     training.resume_from=null \
     "$@"

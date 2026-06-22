@@ -17,6 +17,7 @@ from typing import Dict
 SUPPORTED_MODELS: Dict[str, str] = {
     "Qwen3_6-35B-A3B": "qwen3_5moe",
     "Qwen3_6-27B": "qwen3_5",
+    "Qwen3_5-4B": "qwen3_5",          # same gated-deltanet hybrid family as 27B (dense, 4B)
     "Qwen3-30B-A3B-Instruct-2507": "qwen3moe",
 }
 
