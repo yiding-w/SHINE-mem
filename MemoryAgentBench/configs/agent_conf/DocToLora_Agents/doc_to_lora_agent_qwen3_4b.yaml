@@ -17,6 +17,7 @@ d2l_checkpoint_path: /ceph/home/muhan01/huggingfacemodels/doc-to-lora/qwen_4b_d2
 
 # Tokens PER context chunk (NOT a global cap). User-chosen 8192/chunk.
 d2l_chunk_len: 8192
+d2l_context_max_length: 8196
 
 # Match MAB's per-dataset generation length.
 use_mab_generation_max_length: true

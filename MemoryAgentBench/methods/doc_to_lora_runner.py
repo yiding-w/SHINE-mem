@@ -19,6 +19,8 @@ import torch
 from methods.d2l_attn_patch import apply_d2l_attn_patch, patch_d2l_state_dict_attn, resolve_d2l_attn
 
 DEFAULT_D2L_CHUNK_LEN = 8192
+# LoRA internalize budget — match SHINE shine_context_max_length (8196).
+DEFAULT_D2L_EVIDENCE_MAX_TOKENS = 8196
 
 _D2L_MODEL_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -183,6 +185,7 @@ class DocToLoraRunner:
         self.temperature = float(agent_config.get("temperature", 0.0))
         self.memory_time = 0.0
         self._max_context_chars = 0
+        self._evidence_max_tokens = DEFAULT_D2L_EVIDENCE_MAX_TOKENS
         self._query_max_length = 0
 
         _use_flash, _attn_impl = resolve_d2l_attn(agent_config)
@@ -190,6 +193,7 @@ class DocToLoraRunner:
         print(
             f"[DocToLoraRunner] sub_dataset={self.sub_dataset} "
             f"chunk_len={self.chunk_len} max_new_tokens={self.max_new_tokens} "
+            f"evidence_max_tokens={self._evidence_max_tokens} "
             f"attn={_attn_impl} flash={_use_flash} {device_msg} "
             f"checkpoint={os.path.basename(checkpoint_path)}",
             flush=True,
@@ -199,8 +203,28 @@ class DocToLoraRunner:
         self._internalized = False
         self._n_ctx_chunks = None
 
-    def configure_for_row(self, *, max_context_chars: int = 0) -> None:
+    def configure_for_row(
+        self,
+        *,
+        model_context_window: int = 0,
+        max_new_tokens: int = 0,
+        max_context_chars: int = 0,
+    ) -> None:
+        """Cap internalize evidence tokens (like SHINE generate_lora_dict), not query prompt."""
         self._max_context_chars = int(max_context_chars) if max_context_chars > 0 else 0
+        buffer = 512
+        auto_cap = max(512, int(model_context_window or 32768) - int(max_new_tokens or 128) - buffer)
+        if self._max_context_chars > 0:
+            auto_cap = min(auto_cap, max(512, self._max_context_chars // 3))
+        explicit = int(self.agent_config.get("d2l_context_max_length") or 0)
+        budget = explicit if explicit > 0 else DEFAULT_D2L_EVIDENCE_MAX_TOKENS
+        self._evidence_max_tokens = min(budget, auto_cap)
+        print(
+            f"[DocToLoraRunner] sub_dataset={self.sub_dataset} "
+            f"evidence_max_tokens={self._evidence_max_tokens} "
+            f"(budget={budget}, auto_cap={auto_cap})",
+            flush=True,
+        )
 
     def set_query_max_length(self, max_length: int) -> None:
         self._query_max_length = max(512, int(max_length))
@@ -276,6 +300,9 @@ class DocToLoraRunner:
         if ctx_ids_flat and isinstance(ctx_ids_flat[0], list):
             ctx_ids_flat = ctx_ids_flat[0]
 
+        if self._evidence_max_tokens > 0 and len(ctx_ids_flat) > self._evidence_max_tokens:
+            ctx_ids_flat = ctx_ids_flat[-self._evidence_max_tokens :]
+
         model_name = self.model.base_model.name_or_path
         split_result = split_too_long_ctx(
             {"ctx_ids": ctx_ids_flat},
@@ -293,7 +320,8 @@ class DocToLoraRunner:
         self.memory_time += time.time() - t0
         print(
             f"[DocToLoraRunner] internalized {len(ctx_tensors)} chunk(s) "
-            f"from {len(ctx_ids_flat)} context tokens (chunk_len={self.chunk_len})",
+            f"from {len(ctx_ids_flat)} context tokens "
+            f"(evidence_cap={self._evidence_max_tokens}, chunk_len={self.chunk_len})",
             flush=True,
         )
 

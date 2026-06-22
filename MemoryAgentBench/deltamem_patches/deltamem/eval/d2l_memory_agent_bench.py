@@ -56,6 +56,9 @@ def _configure_agent_for_suite(agent_config: dict[str, Any], args: Namespace) ->
     env_chunk = os.environ.get("D2L_CHUNK_LEN", "").strip()
     if env_chunk.isdigit():
         configured["d2l_chunk_len"] = int(env_chunk)
+    env_evidence = os.environ.get("D2L_CONTEXT_MAX_LENGTH", "").strip()
+    if env_evidence.isdigit():
+        configured["d2l_context_max_length"] = int(env_evidence)
     return configured
 
 
@@ -81,7 +84,11 @@ def _evaluate_row(
     selected_questions = list(item.get("selected_questions") or [])
 
     model_context_window = protocol.infer_model_context_window(runner.model.base_model, runner.tokenizer)
-    runner.configure_for_row(max_context_chars=max_context_chars if max_context_chars > 0 else 0)
+    runner.configure_for_row(
+        model_context_window=model_context_window,
+        max_new_tokens=row_max_new_tokens,
+        max_context_chars=max_context_chars if max_context_chars > 0 else 0,
+    )
     if query_include_context:
         runner.set_query_max_length(model_context_window)
 
@@ -179,6 +186,7 @@ def _evaluate_row(
                     "prompt_style": prompt_style,
                     "query_include_context": query_include_context,
                     "d2l_chunk_len": int(agent_config.get("d2l_chunk_len") or 8192),
+                    "d2l_context_max_length": int(agent_config.get("d2l_context_max_length") or 8196),
                     "correct": correct,
                     "f1": round(f1, 4),
                     "primary_metric": primary_metric,
