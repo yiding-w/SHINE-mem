@@ -30,11 +30,17 @@ def main() -> None:
     ap.add_argument("--model", required=True)
     ap.add_argument("--ctx", type=int, default=2048)
     ap.add_argument("--conv", type=int, default=1024)
+    ap.add_argument("--tokenizer-cfg", default="configs/tokenizer/origin.yaml",
+                    help="V2 tokenizer config (adds extra/reserved tokens); required by BaseDataset")
     ap.add_argument("--show", type=int, default=2, help="how many stream samples to dump")
     args = ap.parse_args()
 
     data_dir = os.path.dirname(os.path.abspath(args.jsonl))
     fname = os.path.basename(args.jsonl)
+    tok_cfg_path = args.tokenizer_cfg
+    if not os.path.isabs(tok_cfg_path):
+        tok_cfg_path = os.path.join(_ROOT, tok_cfg_path)
+    tokenizer_cfg = OmegaConf.load(tok_cfg_path)
     cfg = OmegaConf.create({
         "data": {
             "data_path": data_dir,
@@ -42,7 +48,7 @@ def main() -> None:
             "context_seq_length": args.ctx,
             "conv_seq_length": args.conv,
         },
-        "tokenizer": None,
+        "tokenizer": tokenizer_cfg,
     })
 
     ds, col = M.create_dataset_and_collator(cfg, args.model, pad_token_id=0, num_mem_token=0)
