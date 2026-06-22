@@ -21,9 +21,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."   # SHINE_V2-main root
 
-# Optional env activation (set CONDA_ENV to your SHINE_V2 training env).
-source ~/.bashrc 2>/dev/null || true
-[ -n "${CONDA_ENV:-}" ] && conda activate "$CONDA_ENV" 2>/dev/null || true
+# NOTE: run this with your training conda env ALREADY active (e.g. `conda activate MABench`).
+# We intentionally do NOT `source ~/.bashrc` here — some .bashrc files auto-attach
+# screen/tmux or re-exec, which silently hangs/kills the script under `set -e`.
 
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
