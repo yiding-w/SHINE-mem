@@ -8,13 +8,20 @@ that share one ``repo`` id and are fed in order (shuffle MUST be false). The
 detach_state machinery accumulates the history into W across these samples and
 resets when ``repo`` changes.
 
-Per history h with turn-groups g_1..g_K (each <= context_seq_length tokens):
-    step i=1..K-1 : context_ids = g_i,  conversation_ids = g_{i+1}   (write W + next-segment recon loss)
-    step K (QA)   : context_ids = g_K,  conversation_ids = <multi-QA chat>  (answer-only loss;
-                    W already holds g_1..g_{K-1}, g_K is the fresh LoRA -> full history in memory)
+Per history (segments s_1..s_K, one stream step each, all sharing repo=id):
+    step i : context_ids = s_i.history  (writes s_i into W),
+             conversation_ids = s_i per-segment QA  (answer-only loss)
+    last step additionally appends final_qa (cross-segment: conflict/multi-hop/
+             temporal/TTL) -> exercises reading the accumulated W.
 
-Input JSONL = the intermediate format from datagen/generate_memory_data.py:
-    {"id", "history_turns":[{"role","content"}], "qa":[{"question","answer",...}], ...}
+WHY per-segment QA (not next-segment reconstruction): detach_state stores W with
+requires_grad=False, so the final QA loss cannot backprop into earlier steps. Each
+step needs its OWN loss requiring THAT segment's facts, so the hypernetwork actually
+learns to WRITE each segment into W.
+
+Input JSONL = the SEGMENTED format from datagen/generate_memory_seg.py:
+    {"id", "segments":[{"date","history_turns":[{role,content}],"qa":[{question,answer,...}]}],
+     "final_qa":[{question,answer,...}], ...}
 
 Label masking keeps ONLY assistant-content tokens (+ trailing <|im_end|>); everything
 else is -100. History (context_ids) is never a loss target — it only writes memory.
@@ -67,27 +74,29 @@ def _build_label_mask_chat(tokenizer, conv_ids: List[int]) -> List[int]:
     imstart_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
     imend_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
     assistant_id = tokenizer.convert_tokens_to_ids("assistant")
-    nl_id = tokenizer.convert_tokens_to_ids("\n")
+    # "\n" is NOT a standalone vocab token in Qwen — use encode(...)[0], and degrade
+    # gracefully if absent (matches mydatasets/sft/msmarco_mqa.py). Using
+    # convert_tokens_to_ids("\n") here returns the wrong id -> all labels become -100.
+    _nl = tokenizer.encode("\n", add_special_tokens=False)
+    nl_id = _nl[0] if _nl else None
 
-    ids = conv_ids
+    ids = list(conv_ids)
     n = len(ids)
     labels = [-100] * n
     i = 0
     while i < n:
-        if (ids[i] == imstart_id and i + 1 < n and ids[i + 1] == assistant_id):
-            # find newline after 'assistant'
-            j = i + 2
-            while j < n and ids[j] != nl_id:
-                j += 1
-            content_start = j + 1  # token after the newline
-            k = content_start
-            while k < n and ids[k] != imend_id:
-                k += 1
-            content_end = k  # index of <|im_end|>
+        if ids[i] == imstart_id and i + 1 < n and ids[i + 1] == assistant_id:
+            header_end = i + 2
+            if nl_id is not None and header_end < n and ids[header_end] == nl_id:
+                header_end += 1  # skip the newline after 'assistant' if present
+            content_start = header_end
+            content_end = content_start
+            while content_end < n and ids[content_end] != imend_id:
+                content_end += 1
             unmask_end = content_end + 1 if content_end < n else content_end
             for t in range(content_start, unmask_end):
                 labels[t] = ids[t]
-            i = unmask_end
+            i = content_end + 1
         else:
             i += 1
     return labels
@@ -99,24 +108,6 @@ def _encode_turns(tokenizer, turns: List[Dict[str, str]]) -> List[int]:
         turns, tokenize=True, add_generation_prompt=False,
         return_tensors=None, add_special_tokens=False,
     )
-
-
-def _group_turns_by_token_budget(tokenizer, turns: List[Dict[str, str]], budget: int
-                                 ) -> List[List[Dict[str, str]]]:
-    """Greedily pack consecutive turns into groups each <= budget tokens (chat-templated)."""
-    groups: List[List[Dict[str, str]]] = []
-    cur: List[Dict[str, str]] = []
-    cur_len = 0
-    for t in turns:
-        tlen = len(tokenizer.encode(t["content"], add_special_tokens=False)) + 8  # +template overhead
-        if cur and cur_len + tlen > budget:
-            groups.append(cur)
-            cur, cur_len = [], 0
-        cur.append(t)
-        cur_len += tlen
-    if cur:
-        groups.append(cur)
-    return groups
 
 
 def _qa_to_messages(qa: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -142,29 +133,25 @@ class MemoryStreamDataset(BaseDataset):
         self._build(records)
 
     def _build(self, records: List[Dict]) -> None:
+        """One stream sample per segment: context=segment history (writes W),
+        conversation=per-segment QA (answer-only loss). The LAST segment also
+        carries the cross-segment final_qa (W then holds all prior segments)."""
         for rec in records:
             repo = str(rec.get("id"))
-            turns = rec["history_turns"]
-            groups = _group_turns_by_token_budget(self.tokenizer, turns, self.budget)
-            if not groups:
-                continue
-            group_ids = [_encode_turns(self.tokenizer, g) for g in groups]
-            qa_ids = _encode_turns(self.tokenizer, _qa_to_messages(rec["qa"]))
-
-            K = len(group_ids)
-            # reconstruction steps (write W + predict next segment)
-            for i in range(K - 1):
+            segments = rec["segments"]
+            final_qa = rec.get("final_qa", [])
+            K = len(segments)
+            for si, seg in enumerate(segments):
+                ctx_ids = _encode_turns(self.tokenizer, seg["history_turns"])
+                qa = list(seg.get("qa", []))
+                if si == K - 1 and final_qa:
+                    qa = qa + final_qa  # cross-segment QA exercises reading accumulated W
+                conv_ids = _encode_turns(self.tokenizer, _qa_to_messages(qa))
                 self.samples.append({
-                    "context_token_ids": group_ids[i],
-                    "conversation_token_ids": group_ids[i + 1],
+                    "context_token_ids": ctx_ids,
+                    "conversation_token_ids": conv_ids,
                     "repo": repo,
                 })
-            # final QA step: context = last group, conversation = all QA
-            self.samples.append({
-                "context_token_ids": group_ids[K - 1],
-                "conversation_token_ids": qa_ids,
-                "repo": repo,
-            })
 
     def __len__(self) -> int:
         return len(self.samples)
