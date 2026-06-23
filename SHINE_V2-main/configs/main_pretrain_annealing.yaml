@@ -1,0 +1,14 @@
+defaults:
+  - base                    # Base config (includes hydra, parallel, wandb, seed)
+  - model: Qwen3_6-27B            # Model config
+  - m2p_transformer: full_prenorm_gatedlastnorm
+  - training: pretrain_annealing/origin       # Training config
+  - optimizer: pretrain_annealing/origin
+  - data: pretrain_annealing/msmarco_mqa_conv_preserve_thinking  # Data config (same as pretrain)
+  - debug: origin           # Debug config
+  - tokenizer: origin       # Tokenizer config (extra tokens, reserved slots)
+  - detach_state: origin # DetachState config
+  - _self_                  # Current file overrides last
+
+# Training mode
+mode: pretrain_annealing

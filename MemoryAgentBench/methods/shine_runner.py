@@ -61,6 +61,9 @@ def load_shine_agent_config(path: str) -> Dict[str, Any]:
 _SHINE_MODEL_CACHE: Dict[str, Dict[str, Any]] = {}
 _HF_MODEL_CACHE: Dict[str, Dict[str, Any]] = {}
 
+# LoRA hypernet forward is O(seq) memory-heavy; never use MAB official context_max_length (up to ~1.4M).
+DEFAULT_SHINE_EVIDENCE_MAX_TOKENS = 8196
+
 
 def _shine_cache_key(agent_config: Dict[str, Any], resume_dir: str, cfg_path: str, base_model: str) -> str:
     return "|".join([resume_dir, cfg_path, base_model, str(agent_config.get("shine_root", ""))])
@@ -69,11 +72,13 @@ def _shine_cache_key(agent_config: Dict[str, Any], resume_dir: str, cfg_path: st
 def _resolve_shine_lengths(
     agent_config: Dict[str, Any], dataset_config: Dict[str, Any]
 ) -> tuple[int, int, int]:
-    """Return (evidence_max_len, query_max_len, max_new_tokens)."""
-    if agent_config.get("use_mab_context_max_length", False):
-        evidence_len = int(dataset_config.get("context_max_length", 131072))
-    else:
-        evidence_len = int(agent_config.get("shine_context_max_length", 4500))
+    """Return (evidence_max_len, query_max_len, max_new_tokens).
+
+    ``evidence_max_len`` is finalized per row via ``configure_for_row`` (model window).
+    Never use MAB official ``context_max_length`` (can be 1.4M tokens).
+    """
+    explicit = int(agent_config.get("shine_context_max_length") or 0)
+    evidence_len = explicit if explicit > 0 else DEFAULT_SHINE_EVIDENCE_MAX_TOKENS
 
     if agent_config.get("use_mab_conversation_max_length", False):
         query_len = int(agent_config.get("shine_conversation_max_length", 4096))
@@ -89,7 +94,12 @@ def _resolve_shine_lengths(
 
 
 class ShineMABRunner:
-    """Context -> LoRA once per context; queries use question-only chat (SHINE mode)."""
+    """Context -> LoRA once per context; query uses δ-mem-aligned prompt when configured.
+
+    With ``query_include_context: true`` (default in SHINE_agent_qwen3_8b_deltamem.yaml):
+      1. Memorize: context chunks -> ``generate_lora_dict`` (SHINE memory)
+      2. Query: same prompt as δ-mem base (context + question) + injected LoRA
+    """
 
     def __init__(self, agent_config: Dict[str, Any], dataset_config: Dict[str, Any]):
         from omegaconf import OmegaConf
@@ -201,6 +211,29 @@ class ShineMABRunner:
         self._evidence_ids = None
         self._evidence_attention_mask = None
 
+    def configure_for_row(
+        self,
+        *,
+        model_context_window: int,
+        max_new_tokens: int,
+        max_context_chars: int = 0,
+    ) -> None:
+        """Cap LoRA evidence tokens for generate_lora_dict (independent of query prompt length)."""
+        buffer = 512
+        auto_cap = max(512, int(model_context_window) - int(max_new_tokens) - buffer)
+        if max_context_chars > 0:
+            # Rough char→token budget aligned with MAB_MAX_CONTEXT_CHARS preclip.
+            auto_cap = min(auto_cap, max(512, int(max_context_chars) // 3))
+        explicit = int(self.agent_config.get("shine_context_max_length") or 0)
+        budget = explicit if explicit > 0 else DEFAULT_SHINE_EVIDENCE_MAX_TOKENS
+        self.context_max_length = min(budget, auto_cap)
+        print(
+            f"[ShineMABRunner] sub_dataset={self.sub_dataset} "
+            f"evidence_max_len={self.context_max_length} "
+            f"(budget={budget}, auto_cap={auto_cap})",
+            flush=True,
+        )
+
     def reset_context(self):
         self._chunks = []
         self._loradict = None
@@ -218,15 +251,11 @@ class ShineMABRunner:
     def _build_loradict(self):
         t0 = time.time()
         evidence = "\n".join(self._chunks).strip()
-        enc = self.tokenizer(
-            evidence,
-            max_length=self.context_max_length,
-            truncation=True,
-            return_tensors="pt",
-            padding="max_length",
-        )
-        self._evidence_ids = enc["input_ids"].to(self.device)
-        self._evidence_attention_mask = enc["attention_mask"].to(self.device)
+        token_ids = self.tokenizer.encode(evidence, add_special_tokens=False)
+        if len(token_ids) > self.context_max_length:
+            token_ids = token_ids[-self.context_max_length :]
+        self._evidence_ids = torch.tensor([token_ids], dtype=torch.long, device=self.device)
+        self._evidence_attention_mask = torch.ones_like(self._evidence_ids)
         with torch.no_grad():
             self._loradict = self.metanetwork.generate_lora_dict(
                 self._evidence_ids,
@@ -234,6 +263,9 @@ class ShineMABRunner:
                 self.metalora,
             )
         self.memory_time += time.time() - t0
+
+    def set_query_max_length(self, max_length: int) -> None:
+        self.conversation_max_length = max(512, int(max_length))
 
     def query(self, formatted_query: str) -> Dict[str, Any]:
         if self._loradict is None:
@@ -248,7 +280,7 @@ class ShineMABRunner:
             max_length=self.conversation_max_length,
             truncation=True,
             return_dict=True,
-            padding="max_length",
+            padding=False,
             enable_thinking=False,
         )
         input_ids = input_enc["input_ids"].to(self.device)

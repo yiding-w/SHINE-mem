@@ -15,11 +15,17 @@ if [[ ! -d "${DELTA_MEM_ROOT}/deltamem" ]]; then
   exit 1
 fi
 
-echo "Applying SHINE patches to ${DELTA_MEM_ROOT}"
+echo "Applying SHINE + D2L patches to ${DELTA_MEM_ROOT}"
 
 mkdir -p "${DELTA_MEM_ROOT}/deltamem/eval"
 cp "${PATCH_ROOT}/deltamem/eval/shine_memory_agent_bench.py" \
   "${DELTA_MEM_ROOT}/deltamem/eval/shine_memory_agent_bench.py"
+cp "${PATCH_ROOT}/deltamem/eval/d2l_memory_agent_bench.py" \
+  "${DELTA_MEM_ROOT}/deltamem/eval/d2l_memory_agent_bench.py"
+cp "${PATCH_ROOT}/deltamem/eval/memory_agent_bench_protocol_light.py" \
+  "${DELTA_MEM_ROOT}/deltamem/eval/memory_agent_bench_protocol_light.py"
+cp "${PATCH_ROOT}/deltamem/eval/run_d2l_mab_main.py" \
+  "${DELTA_MEM_ROOT}/deltamem/eval/run_d2l_mab_main.py"
 
 cd "${DELTA_MEM_ROOT}"
 if [[ -f "${PATCH_ROOT}/benchmark_compare_shine.patch" ]]; then
@@ -28,6 +34,15 @@ if [[ -f "${PATCH_ROOT}/benchmark_compare_shine.patch" ]]; then
     echo "Applied benchmark_compare_shine.patch"
   else
     echo "benchmark_compare_shine.patch already applied or conflicts; skipping patch step"
+  fi
+fi
+
+if [[ -f "${PATCH_ROOT}/benchmark_compare_d2l.patch" ]]; then
+  if git apply --check "${PATCH_ROOT}/benchmark_compare_d2l.patch" 2>/dev/null; then
+    git apply "${PATCH_ROOT}/benchmark_compare_d2l.patch"
+    echo "Applied benchmark_compare_d2l.patch"
+  else
+    echo "benchmark_compare_d2l.patch already applied or conflicts; skipping patch step"
   fi
 fi
 
@@ -44,4 +59,4 @@ if [[ -f "${PATCH_ROOT}/scripts/run_shine_mab_qwen3_8b.sh" ]]; then
   chmod +x "${DELTA_MEM_ROOT}/scripts/run_shine_mab_qwen3_8b.sh"
 fi
 
-echo "SHINE patches applied."
+echo "SHINE + D2L patches applied."

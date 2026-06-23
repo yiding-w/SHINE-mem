@@ -7,7 +7,8 @@ checkpoints
 !MemoryAgentBench/requirements.txt
 !MemoryAgentBench/requirements-shine-mab.txt
 !MemoryAgentBench/requirements-delta-eval.txt
-!MemoryAgentBench/requirements-delta-eval.txt
+!MemoryAgentBench/requirements-d2l-mab.txt
+!MemoryAgentBench/requirements-d2l-runtime.txt
 tmp.py
 outputs
 data
@@ -49,9 +50,10 @@ visualize_loradict_statistics.py
 test_human.py
 generated_case_lora.pt
 
-# vendored clones (use setup_delta_mem_hgx001.sh)
+# vendored clones (use setup_delta_mem_hgx001.sh / setup_doc_to_lora_mab.sh)
 third_party/delta-Mem
 third_party/lm-evaluation-harness
+doc-to-lora
 
 # MemoryAgentBench
 MemoryAgentBench/outputs

@@ -1,0 +1,14 @@
+defaults:
+  - base                    # 基础配置 (includes hydra, parallel, wandb, seed)
+  - model: Qwen3_6-27B            # 模型配置
+  - m2p_transformer: full_prenorm_gatedlastnorm
+  - training: pretrain/origin       # 训练配置
+  - optimizer: pretrain/origin
+  - data: pretrain/oldpretrain  # 数据配置
+  - debug: origin           # 调试配置
+  - tokenizer: origin       # Tokenizer配置 (extra tokens, reserved slots)
+  - detach_state: origin  # DetachState配置
+  - _self_                  # 当前文件最终覆盖
+
+# Training mode
+mode: pretrain

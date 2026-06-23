@@ -1,0 +1,22 @@
+# δ-mem MAB eval deps for doc-to-lora env (transformers pinned by doc-to-lora, ~4.51.3).
+# Install torch separately to match your CUDA. Do NOT install requirements-delta-eval.txt here.
+
+datasets
+accelerate
+peft
+huggingface-hub
+tqdm
+numpy<2
+einops
+pydantic
+psutil
+packaging
+pyyaml
+requests
+aiohttp
+pandas
+pyarrow
+regex
+safetensors
+tokenizers
+filelock

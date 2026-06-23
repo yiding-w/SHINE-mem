@@ -1,0 +1,53 @@
+max_steps: 10000 # 3000               # Supports integer or "n-epoch" format (e.g. "2-epoch", "0.5-epoch")
+warmup_steps: 0.10 # 0.05 # Supports integer (exact steps, e.g. 100) or float in (0,1) as proportion (e.g. 0.1 = 10% of total steps)
+gradient_clipping: 1.0
+
+pp_batchsize:
+  local_batch_size: 16          # Per-node batch size (must be divisible by local_micro_batch_size)
+  local_micro_batch_size: 1     # Size of each micro-batch for pipeline parallelism (smaller = more micro-batches = less bubble)
+  gradient_accumulation_steps: 1
+
+tp_batchsize:
+  batch_size: 1                 # Per-DP-rank batch size for TP mode (each micro-batch processed independently)
+  gradient_accumulation_steps: 4  # Number of micro-batches to accumulate before optimizer step
+
+# Evaluation
+eval_steps: 500                # Run validation every N steps. -1=disabled, int=interval, list=specific steps
+evaluation_pp_batchsize:
+  local_batch_size: -1          # Per-node batch size for evaluation. -1=use entire val set as one batch, int=exact batch size
+  local_micro_batch_size: 1     # Micro-batch size for evaluation pipeline parallelism
+evaluation_tp_batchsize:
+  batch_size: 1                 # Per-DP-rank batch size for TP evaluation
+
+# Acceleration knobs — PP mode
+pp_knobs:
+  activation_checkpointing: false  # Recompute layer activations in backward (trade compute for memory)
+
+# Acceleration knobs — TP mode
+tp_knobs:
+  activation_checkpointing: true   # Recompute layer activations in backward
+  ckpt_skip_stride: 1              # 0 = ckpt all 64 layers; 1 = ckpt none (max speed)
+  compile_hypernetwork: true       # torch.compile the replicated hypernetwork (-5% step)
+  zero1: true                      # ZeRO-1 shards Adam state across DP
+
+# Checkpointing
+save_steps: 500          # Save checkpoint at these steps. int=interval, list=specific steps, -1=disabled
+forever_save_steps: 2000          # Steps to save permanently (never deleted). int=interval, list=specific steps, -1=disabled
+save_total_limit: 3             # Max number of non-forever checkpoints to keep. Oldest is deleted when limit is exceeded.
+resume_from: latest             # Resume from checkpoint. Options: path to checkpoint dir, "latest", null (no resume)
+
+# Logging
+logging_steps: 1
+log_dir: ./logs
+
+
+
+# Distillation
+distill:
+  enabled: false                    # Whether to enable distillation
+  mode: logits                      # "logits" or "hidden_states"
+  loss_type: kl_div                 # logits: kl_div, reverse_kl, jsd; hidden_states: mse, cosine, smooth_l1
+  coefficient: 1.0                  # Scaling factor for distill loss (total_loss = main_loss + coefficient * distill_loss)
+  temperature: 1.0                  # Temperature for logits-mode softmax (higher = softer distribution)
+  distill_local_batch_size: 16      # Must equal pp_batchsize.local_batch_size (enforced at runtime)
+  distill_micro_batch_size: 1       # Micro-batch size for distillation forward passes

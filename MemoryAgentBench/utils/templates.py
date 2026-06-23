@@ -90,6 +90,7 @@ AGENT_TYPE_MAPPING = {
     'Long_context_agent': 'long_context_agent',
     'HF_local': 'long_context_agent',
     'SHINE': 'long_context_agent',
+    'doc_to_lora': 'long_context_agent',
     'Agentic_memory': 'agentic_memory_agent'
 }
 

@@ -1,0 +1,25 @@
+# Phase 1: long-history memory SFT on Qwen3.5-4B, 2 GPUs (TP=1 / DP=2).
+# Single-window (no detach_state streaming) — good for histories up to ~8k tokens.
+# For 16k–128k switch to the streaming path (detach_state: full + chunked dataset).
+defaults:
+  - base
+  - model: Qwen3_5-4B                       # only ~4B option shipped in V2
+  - m2p_transformer: full_prenorm_gatedlastnorm_4b
+  - training: sft/origin
+  - optimizer: sft/origin
+  - data: sft/memory_longhist               # our synthesized data
+  - debug: origin
+  - tokenizer: origin
+  - detach_state: origin                    # 'empty' -> no streaming (Phase 1)
+  - _self_
+
+mode: sft
+
+# 2-GPU layout: pure data-parallel (each GPU holds a full 4B replica; base is frozen
+# so it fits an 80GB card comfortably). Switch to mode=tp + tensor_parallel_size=2
+# (DP=1) only if you OOM.
+parallel:
+  mode: tp
+  tensor_parallel_size: 1
+  data_parallel_size: -1          # computed = world_size / (tp_size) = 2
+  total_gpus: 2

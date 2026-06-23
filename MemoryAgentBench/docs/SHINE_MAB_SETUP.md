@@ -86,10 +86,12 @@ python main.py \
   --dataset_config configs/data_conf/Accurate_Retrieval/EventQA/Eventqa_full.yaml
 ```
 
-SHINE 行为（与论文一致）：
+SHINE 行为（δ-mem 对齐，`query_include_context: true`，见 `SHINE_agent_qwen3_8b_deltamem.yaml`）：
 
-1. **Memorize**：各 chunk 拼成 evidence，一次 `generate_lora_dict`
-2. **Query**：仅 user 问题 + 已注入 LoRA，不把长 context 放进 prompt
+1. **Memorize**：各 chunk 拼成 evidence，一次 `generate_lora_dict`（SHINE 记忆）
+2. **Query**：与 δ-mem **base 相同 prompt**（unified：`MEMORY_CONTEXT_QA_PROMPT_TEMPLATE` 含 context+question），并注入上一步 LoRA
+
+若 `query_include_context: false`，Query 仅问题（旧 SHINE 论文设定，与 δ-mem base 不可直接比）。
 
 ## 5. 批量 AR / TTL / LRU / SF
 

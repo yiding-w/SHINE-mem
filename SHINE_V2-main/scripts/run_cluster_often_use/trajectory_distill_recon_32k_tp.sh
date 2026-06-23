@@ -1,0 +1,1 @@
+./scripts/launch_cluster.sh start --nodes all --mode pretrain --parallel tp --tp_size 4 --name trajectory_distill_recon_32k_tp --data pretrain/trajectory_distill_recon --detach_state origin --training pretrain/savevram   --optimizer pretrain/lr1e-4 --m2p_transformer full_prenorm_gatedlastnorm_4layer --model Qwen3_6-27B_10lora

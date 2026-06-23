@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Model weights and large data files
+models
+old_data
+*.bin
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.ckpt
+
+# Cache and preprocessed data
+cache/
+
+# Training outputs and logs
+output/
+logs/
+
+# State dict dumps
+*-state-dict.txt
+
+# Debug files
+*_debug.txt
+
+# Cluster node configs (machine-specific)
+cluster_nodes/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log
+
+cache/compile/
+
+wandb
+
+checkpoint
+
+record.md
+record/**
+
+data/**
+
+./data_visualize/cache/** */

@@ -1,0 +1,65 @@
+
+# Model loading configuration for Qwen3.5-4B (pure DP, no TP/PP needed)
+name: Qwen3_5-4B
+path: "./models/Qwen3.5-4B"
+base_class: src_transformers.Qwen3_5.Qwen3_5ForCausalLM
+lora_class: src_transformers_lora.LoraQwen3_5.LoraQwen3_5ForCausalLM
+
+# Per-component LoRA ranks.
+# Each key maps to a specific linear projection in the model.
+# Qwen3_5 attention projections:
+#   q_query, q_gate  — independent LoRA on the query/gate halves of q_proj
+#   k_proj, v_proj, o_proj — standard attention projections
+# MLP projections:
+#   mlp_gate, mlp_up, mlp_down
+#
+# NOTE: layer_lora_numel must be divisible by hidden_size (2560).
+# Formula: layer_lora_numel = sum of (in_dim + out_dim) * lora_rank for each projection.
+# For Qwen3.5-4B full_attention layer (hidden=2560, intermediate=9216, kv_heads=4, heads=16, head_dim=256):
+#   q_query: (2560 + 2048) * rank = 4608 * rank    (in=hidden, out=heads*head_dim/2=16*256/2=2048)
+#   q_gate:  (2560 + 2048) * rank = 4608 * rank
+#   k_proj:  (2560 + 1024) * rank = 3584 * rank    (out=kv_heads*head_dim=4*256=1024)
+#   v_proj:  (2560 + 1024) * rank = 3584 * rank
+#   o_proj:  (4096 + 2560) * rank = 6656 * rank    (in=heads*head_dim=16*256=4096)
+#   mlp_gate:(2560 + 9216) * rank = 11776 * rank
+#   mlp_up:  (2560 + 9216) * rank = 11776 * rank
+#   mlp_down:(9216 + 2560) * rank = 11776 * rank
+# Total per layer = (4608+4608+3584+3584+6656+11776+11776+11776) * rank = 58368 * rank
+# With rank=20: layer_lora_numel = 58368 * 20 = 1167360
+# 1167360 / 2560 = 456 (exact!) => num_mem_token = 456 ✓
+lora_ranks:
+  q_query: 20                   
+  q_gate: 20                    
+  k_proj: 20                    
+  v_proj: 20                    
+  o_proj: 20                    
+  mlp_gate: 20                  
+  mlp_up: 20                    
+  mlp_down: 20                  
+
+# metalora_ranks: rank of the hypernetwork-generated LoRA (output dimension of hypernetwork per projection).
+# These determine how much capacity the hypernetwork has to modulate each projection.
+# 27B uses 640; for 4B you may want to scale down proportionally (e.g. 320) or keep 640.
+# Constraint: no strict divisibility requirement here, but larger = more hypernetwork params.
+metalora_ranks:
+  q_query: 320
+  q_gate: 320
+  k_proj: 320
+  v_proj: 320
+  o_proj: 320
+  mlp_gate: 320
+  mlp_up: 320
+  mlp_down: 320
+  
+# Pure DP mode: entire model on one GPU (32 layers total).
+# In TP mode with tp_size=1, this device_map is ignored by TPModelHypernetwork
+# (it loads everything to the local GPU automatically).
+# Kept here for PP mode compatibility if ever needed.
+device_map:
+  layer_prefix: "model.layers"
+  gpu_map:
+    - [0, 0, 31]
+  extra:
+    model.embed_tokens: 0
+    model.norm: 0
+    lm_head: 0

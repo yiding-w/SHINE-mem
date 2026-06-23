@@ -1,0 +1,31 @@
+# doc-to-lora (SakanaAI D2L) for δ-mem MAB protocol — comparable to base/SHINE settings.
+# Backbone: Qwen3-4B-Instruct (not 8B); report separately from Qwen3-8B base/SHINE table.
+agent_name: doc_to_lora_agent_qwen3_4b_deltamem
+model: d2l-qwen3-4b
+temperature: 0.4
+top_p: 0.9
+top_k: 10
+output_dir: ./outputs/d2l-qwen3-4b-deltamem
+
+# doc-to-lora repo (src/ on sys.path). Override with env D2L_ROOT.
+d2l_root: ../../doc-to-lora
+d2l_checkpoint_path: /ceph/home/muhan01/huggingfacemodels/doc-to-lora/qwen_4b_d2l/checkpoint-20000/pytorch_model.bin
+
+# D2L official eval chunk size; merged via combine_lora when multiple chunks.
+d2l_chunk_len: 8192
+
+# LoRA internalize token budget — match SHINE shine_context_max_length (8196).
+# Query prompt still uses full MAB_MAX_CONTEXT_CHARS (120K) like SHINE/base.
+d2l_context_max_length: 8196
+
+use_mab_generation_max_length: true
+
+# Match δ-mem base / SHINE: unified context + question at query, plus LoRA from memorized context.
+query_include_context: true
+
+# Default: flash_attention_2 when flash_attn is installed (doc-to-lora official path).
+# Fallback: export D2L_FORCE_SDPA=1 or set use_flash_attn: false + attn_implementation: sdpa
+attn_implementation: flash_attention_2
+use_flash_attn: true
+
+device: cuda

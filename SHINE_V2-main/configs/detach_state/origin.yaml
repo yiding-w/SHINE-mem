@@ -1,0 +1,6 @@
+# DetachState configuration
+# This config is referenced by main_*.yaml via `- detach_state: origin`
+
+# Type of detach state.
+# "empty" — no-op, equivalent to not using detach_state (default behavior).
+type: empty

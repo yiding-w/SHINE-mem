@@ -1,0 +1,35 @@
+# Wandb configuration
+wandb:
+  project: SHINE_V2
+  run_name: null    # Override via --name flag or WANDB_NAME env var
+  entity: null      # Override via WANDB_ENTITY env var
+
+# Global seed configuration
+seed:
+  dataset: 42       # Seed for all dataset operations: train/val split, shuffle, DP sharding, etc.
+
+# Suppress Hydra outputs directory and its built-in logging
+hydra:
+  run:
+    dir: .                    # Don't create outputs/<date>/<time>/ subdirs
+  output_subdir: null         # Don't create .hydra/ config snapshots
+  job_logging:                # Disable Hydra's job logging (we use our own)
+    version: 1
+    disable_existing_loggers: false
+    root:
+      handlers: []
+  hydra_logging:              # Disable Hydra's own logging
+    version: 1
+    disable_existing_loggers: false
+    root:
+      handlers: []
+
+# Parallel training configuration
+parallel:
+  mode: pp                   # Parallel mode: 'pp' (pipeline parallel) or 'tp' (tensor parallel)
+  # Automatic configuration based on world size
+  pipeline_parallel_size: 8  # Pipeline stages per node (PP path)
+  tensor_parallel_size: 2    # TP shards per node (TP path; ignored when mode=pp).
+                             # TP=2 DP=4 measured fastest on 27B / 8xA800: ~6x PP.
+  data_parallel_size: -1     # Computed at runtime by meta_train.py (world_size / total_gpus)
+  total_gpus: 8              # GPUs per node

@@ -1,0 +1,2 @@
+./scripts/launch_cluster.sh start --nodes 0-1 --mode pretrain --parallel tp --tp_size 4 --name testtp --data pretrain/oldpretrain --detach_state origin --training pretrain/origin_batchsize4   --optimizer pretrain/lr5e-5
+./scripts/launch_cluster.sh start --nodes 2-3 --mode pretrain --name testpp --data pretrain/oldpretrain --detach_state origin --training pretrain/origin_batchsize4   --optimizer pretrain/lr5e-5 
