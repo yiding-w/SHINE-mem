@@ -65,4 +65,5 @@ exec torchrun --nproc_per_node="$NPROC" --master_port="$MASTER_PORT" \
     parallel.total_gpus="$NPROC" \
     training.tp_batchsize.batch_size=1 \
     training.resume_from=null \
+    training.save_best_only=true \
     "$@"

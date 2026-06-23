@@ -2097,6 +2097,37 @@ def tp_main(cfg: DictConfig):
         cleanup_distributed()
         os._exit(0)
 
+    # --- save_best_only: keep ONLY the single best-by-val-ppl model (model-only,
+    # overwritten in place at checkpoint/<run>/final/model). Disables interval +
+    # end-of-training saves to avoid storage blowup. ---
+    save_best_only = bool(cfg.training.get("save_best_only", False))
+    best_val_ppl = float("inf")
+    if save_best_only and is_main_process_per_node():
+        logger.info("[save_best_only] keeping only the best-by-val-ppl model at final/model "
+                    "(interval/end checkpoints disabled).")
+
+    def _save_best_model(step: int, val_ppl: float):
+        """Overwrite final/model with the current model iff val_ppl improved. Collective barrier."""
+        nonlocal best_val_ppl
+        improved = torch.zeros(1, device=my_device)
+        if is_main_process() and val_ppl < best_val_ppl:
+            improved[0] = 1.0
+        if dist.is_initialized():
+            dist.broadcast(improved, src=0)
+        if improved.item() > 0:
+            if is_main_process():
+                best_val_ppl = val_ppl
+                final_dir = os.path.join(get_checkpoint_dir(run_name), "final")
+                model.save_model(os.path.join(final_dir, "model"))
+                ts_dir = os.path.join(final_dir, "training_state")
+                os.makedirs(ts_dir, exist_ok=True)
+                torch.save({"global_step": step, "epoch": epoch, "is_final": True,
+                            "best_val_ppl": float(val_ppl)},
+                           os.path.join(ts_dir, "metadata.pt"))
+                logger.info(f"[save_best_only] new best val_ppl={val_ppl:.4f} → overwrote "
+                            f"{os.path.join(final_dir, 'model')} (step {step})")
+            barrier()
+
     for epoch in range(start_epoch, num_epochs):
         train_loader.set_epoch(epoch) if hasattr(train_loader, "set_epoch") else None
         data_iter = iter(train_loader)
@@ -2324,7 +2355,7 @@ def tp_main(cfg: DictConfig):
 
                     # --- Checkpointing (before timing so save overhead is included in step_time, same as PP) ---
                     save_duration = 0.0
-                    if save_sched.should_run(global_step):
+                    if save_sched.should_run(global_step) and not save_best_only:
                         # ZeRO-1 consolidate is a collective op — all ranks must participate
                         from torch.distributed.optim import ZeroRedundancyOptimizer
                         if isinstance(optimizer, ZeroRedundancyOptimizer):
@@ -2635,7 +2666,7 @@ def tp_main(cfg: DictConfig):
                         # Disable masking during validation (same as PP)
                         if hasattr(collator, 'set_eval_mode'):
                             collator.set_eval_mode(True)
-                        _tp_run_evaluation(
+                        _eval_out = _tp_run_evaluation(
                             model=model,
                             val_loader=val_loader_for_eval,
                             tp_cfg=tp_cfg,
@@ -2650,6 +2681,8 @@ def tp_main(cfg: DictConfig):
                         # Re-enable masking after validation
                         if hasattr(collator, 'set_eval_mode'):
                             collator.set_eval_mode(False)
+                        if save_best_only and _eval_out is not None:
+                            _save_best_model(global_step, _eval_out[1])
 
                     # --- Profiler step (no-op when disabled) ---
                     if _profiler.step():
@@ -2688,7 +2721,7 @@ def tp_main(cfg: DictConfig):
                 logger.info(f"  [Final] Running final evaluation at step {global_step}...")
             if hasattr(collator, 'set_eval_mode'):
                 collator.set_eval_mode(True)
-            _tp_run_evaluation(
+            _eval_out = _tp_run_evaluation(
                 model=model,
                 val_loader=val_loader_for_eval,
                 tp_cfg=tp_cfg,
@@ -2702,14 +2735,20 @@ def tp_main(cfg: DictConfig):
             )
             if hasattr(collator, 'set_eval_mode'):
                 collator.set_eval_mode(False)
+            if save_best_only and _eval_out is not None:
+                _save_best_model(global_step, _eval_out[1])
         else:
             if is_main_process_per_node():
                 logger.info(f"  [Final] Skipping final evaluation (already evaluated at step {global_step})")
 
-    # Save final checkpoint (model-only, for downstream annealing/SFT)
-    if is_main_process_per_node():
-        logger.info(f"  [Final] Saving final checkpoint for run '{run_name}'...")
-    if is_main_process():
+    # Save final checkpoint (model-only, for downstream annealing/SFT).
+    # In save_best_only mode the best model is ALREADY at final/model — don't
+    # overwrite it with the last-step model.
+    if save_best_only:
+        if is_main_process_per_node():
+            logger.info(f"  [Final] save_best_only: keeping best model (val_ppl={best_val_ppl:.4f}) "
+                        f"at final/model; skipping last-step final save.")
+    elif is_main_process():
         final_dir = os.path.join(get_checkpoint_dir(run_name), "final")
         model_dir = os.path.join(final_dir, "model")
         model.save_model(model_dir)
