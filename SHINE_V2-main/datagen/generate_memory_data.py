@@ -282,7 +282,7 @@ def make_qa(world: World, depths: Dict[str, float], rng: random.Random) -> List[
 HF_FILLER_PRESETS: Dict[str, Tuple[str, Optional[str], str, str, bool]] = {
     "wiki":   ("wikimedia/wikipedia", "20231101.en", "train", "text", False),
     "arxiv":  ("ccdv/arxiv-summarization", None, "train", "article", False),
-    "dialog": ("daily_dialog", None, "train", "dialog", True),     # conversational
+    "dialog": ("li2017dailydialog/daily_dialog", None, "train", "dialog", True),  # conversational (parquet ref)
     "soda":   ("allenai/soda", None, "train", "dialogue", True),   # conversational
 }
 
@@ -339,8 +339,16 @@ def build_hf_filler(specs: List[str], total: int, seed: int) -> List[str]:
         try:
             ds = load_dataset(repo, config, split=split, streaming=True)
         except Exception as e:
-            print(f"[warn] failed to load HF dataset '{name}' ({repo},{config},{split}): {e}")
-            continue
+            # datasets>=4 removed loading scripts (e.g. daily_dialog). HF auto-converts
+            # every dataset to parquet on the 'refs/convert/parquet' ref — retry there.
+            try:
+                ds = load_dataset(repo, config, split=split, streaming=True,
+                                  revision="refs/convert/parquet")
+                print(f"[filler-hf] {name}: loaded via refs/convert/parquet (script fallback)")
+            except Exception as e2:
+                print(f"[warn] failed to load HF dataset '{name}' ({repo},{config},{split}): "
+                      f"{e} | parquet-fallback: {e2}")
+                continue
         for ex in ds:
             val = ex.get(field_name)
             if val is None:
