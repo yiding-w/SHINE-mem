@@ -59,3 +59,5 @@ MemoryAgentBench/agents
 MemoryAgentBench/.env
 MemoryAgentBench/cognee
 MemoryAgentBench/letta
+
+MemoryTest/teacher_loras
