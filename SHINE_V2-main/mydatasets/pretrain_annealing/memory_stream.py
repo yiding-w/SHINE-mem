@@ -103,10 +103,18 @@ def _build_label_mask_chat(tokenizer, conv_ids: List[int]) -> List[int]:
 
 
 def _encode_turns(tokenizer, turns: List[Dict[str, str]]) -> List[int]:
-    """Chat-template a list of {role,content} turns into token ids (no padding)."""
+    """Chat-template a list of {role,content} turns into token ids (no padding).
+
+    Match the args used by mydatasets/sft/msmarco_mqa* under transformers 5.5.4.
+    Passing add_special_tokens/return_tensors here makes 5.5.4's apply_chat_template
+    skip tokenization and return strings (-> 'str' object cannot be interpreted as int).
+    """
     return tokenizer.apply_chat_template(
-        turns, tokenize=True, add_generation_prompt=False,
-        return_tensors=None, add_special_tokens=False,
+        turns,
+        add_generation_prompt=False,
+        tokenize=True,
+        return_dict=False,
+        enable_thinking=False,
     )
 
 
