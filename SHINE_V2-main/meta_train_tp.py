@@ -2058,6 +2058,18 @@ def tp_main(cfg: DictConfig):
         os._exit(0)
 
     # ==================================================================
+    # 8a2. Memory-QA free-form generation mode (after model + checkpoint load)
+    # ==================================================================
+    if os.environ.get("MEMORY_QA_GEN", "") == "1":
+        from eval_memory_gen import run_memory_qa_gen
+        run_memory_qa_gen(model, cfg, tp_cfg, my_device)
+        if is_main_process_per_node():
+            logger.info("[MEMORY_QA_GEN] done. Exiting.")
+        _profiler_ctx.__exit__(None, None, None)
+        cleanup_distributed()
+        os._exit(0)
+
+    # ==================================================================
     # 8b. Evaluation Baseline Mode — base LLM only, no hypernetwork
     # ==================================================================
     _evaluation_baseline = os.environ.get("EVALUATION_BASELINE", "") == "1"
