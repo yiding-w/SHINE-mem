@@ -1713,6 +1713,19 @@ def tp_main(cfg: DictConfig):
                         f"starting fresh (zero wdict)."
                     )
 
+    # ==================================================================
+    # Memory-QA free-form generation (inference). Branch HERE — right after the
+    # model is loaded — so we skip all training-only setup (optimizer/profiler/
+    # peak-memory) which is irrelevant and can trip on inference runs.
+    # ==================================================================
+    if os.environ.get("MEMORY_QA_GEN", "") == "1":
+        from eval_memory_gen import run_memory_qa_gen
+        run_memory_qa_gen(model, cfg, tp_cfg, my_device)
+        if is_main_process_per_node():
+            logger.info("[MEMORY_QA_GEN] done. Exiting.")
+        cleanup_distributed()
+        os._exit(0)
+
     # ------------------------------------------------------------------
     # 5.6 Resolve config selections (needed for wandb tags + consistency check)
     # ------------------------------------------------------------------
@@ -2056,18 +2069,6 @@ def tp_main(cfg: DictConfig):
         # Use os._exit to avoid segfault during Python object destruction
         # (CUDA/NCCL cleanup race condition). The results are already saved
         # and fsync'd at this point.
-        os._exit(0)
-
-    # ==================================================================
-    # 8a2. Memory-QA free-form generation mode (after model + checkpoint load)
-    # ==================================================================
-    if os.environ.get("MEMORY_QA_GEN", "") == "1":
-        from eval_memory_gen import run_memory_qa_gen
-        run_memory_qa_gen(model, cfg, tp_cfg, my_device)
-        if is_main_process_per_node():
-            logger.info("[MEMORY_QA_GEN] done. Exiting.")
-        _profiler_ctx.__exit__(None, None, None)
-        cleanup_distributed()
         os._exit(0)
 
     # ==================================================================
