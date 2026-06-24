@@ -1576,7 +1576,8 @@ def tp_main(cfg: DictConfig):
 
     # Determine resume checkpoint
     resume_checkpoint_dir = None
-    load_model_only_flag = False
+    # Inference modes never have/need optimizer state — load weights only.
+    load_model_only_flag = os.environ.get("MEMORY_QA_GEN", "") == "1"
 
     # Read resume_from config (same key as PP: supports "latest", path, or null/None)
     _resume_from_raw = cfg.training.get("resume_from", "latest")
