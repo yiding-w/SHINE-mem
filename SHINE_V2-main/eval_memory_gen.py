@@ -61,7 +61,9 @@ def run_memory_qa_gen(model, cfg, tp_cfg, my_device):
     test_file = os.environ.get("MEMORY_QA_TEST_FILE") or os.path.join(
         cfg.data.get("data_path", "data/mem_synth"), cfg.data.get("val_file", "val.jsonl"))
     n_hist = int(os.environ.get("MEMORY_QA_NUM", "5"))
-    max_new = int(os.environ.get("MEMORY_QA_MAX_NEW", "32"))
+    max_new = int(os.environ.get("MEMORY_QA_MAX_NEW", "16"))
+    seg_sample = int(os.environ.get("MEMORY_QA_SEG_SAMPLE", "4"))  # decode per-seg QA for N sampled segments
+    use_kv = os.environ.get("MEMORY_QA_KV", "1") != "0"
     ctx_len_cap = int(cfg.data.get("context_seq_length", 2048))
     num_mem = int(getattr(model, "_num_mem_token", 0))
     n_layers = int(model._num_llm_layers)
@@ -86,28 +88,57 @@ def run_memory_qa_gen(model, cfg, tp_cfg, my_device):
         ctx[0, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=my_device)
         return ctx, torch.tensor([len(ids)], dtype=torch.long, device=my_device)
 
+    kv_state = {"ok": use_kv}  # disabled on first failure, then falls back to no-cache
+
     def _greedy(question, new_loradict, ds_l, ds_w):
         msgs = [{"role": "user", "content": question}]
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True,
                                       return_dict=False, enable_thinking=False)
-        ids = torch.tensor([ids], dtype=torch.long, device=my_device)
+        full = torch.tensor([ids], dtype=torch.long, device=my_device)
         gen = []
         model._active_w_transform = model.w_transform_conversation
-        for _ in range(max_new):
-            out = model.llm.model(input_ids=ids, attention_mask=None, loradict=new_loradict,
-                                  nograd_loradict=ds_l, nograd_wdict=ds_w, use_cache=False)
-            logits = model.llm.lm_head(out.last_hidden_state[:, -1, :])
-            nxt = int(logits.argmax(-1).item())
-            if nxt == im_end or nxt == eos_id:
-                break
-            gen.append(nxt)
-            ids = torch.cat([ids, torch.tensor([[nxt]], device=my_device)], dim=1)
+        try:
+            if kv_state["ok"]:
+                pkv = None
+                cur = full
+                for _ in range(max_new):
+                    out = model.llm.model(input_ids=cur, attention_mask=None, loradict=new_loradict,
+                                          nograd_loradict=ds_l, nograd_wdict=ds_w,
+                                          use_cache=True, past_key_values=pkv)
+                    pkv = out.past_key_values
+                    nxt = int(model.llm.lm_head(out.last_hidden_state[:, -1, :]).argmax(-1).item())
+                    if nxt == im_end or nxt == eos_id:
+                        break
+                    gen.append(nxt)
+                    cur = torch.tensor([[nxt]], dtype=torch.long, device=my_device)
+            else:
+                raise RuntimeError("kv disabled")
+        except Exception as e:
+            if kv_state["ok"]:
+                print(f"[memory_qa_gen] KV-cache decode failed ({e}); falling back to no-cache.", flush=True)
+                kv_state["ok"] = False
+            gen = []
+            cur = full
+            for _ in range(max_new):
+                out = model.llm.model(input_ids=cur, attention_mask=None, loradict=new_loradict,
+                                      nograd_loradict=ds_l, nograd_wdict=ds_w, use_cache=False)
+                nxt = int(model.llm.lm_head(out.last_hidden_state[:, -1, :]).argmax(-1).item())
+                if nxt == im_end or nxt == eos_id:
+                    break
+                gen.append(nxt)
+                cur = torch.cat([cur, torch.tensor([[nxt]], device=my_device)], dim=1)
         model._active_w_transform = None
         return _strip_think(tok.decode(gen, skip_special_tokens=True))
 
     for rec in records:
         segs = rec["segments"]
         final_qa = rec.get("final_qa", [])
+        K = len(segs)
+        if seg_sample <= 0 or seg_sample >= K:
+            sample_idx = set(range(K))
+        else:
+            step = max(1, K // seg_sample)
+            sample_idx = set(range(0, K, step))
         if model.detach_state is not None:
             model.detach_state.reset()
         for i, seg in enumerate(segs):
@@ -118,8 +149,8 @@ def run_memory_qa_gen(model, cfg, tp_cfg, my_device):
             loradict = model.generate_loradict(mem)
             new_loradict = {l: concat_loradict([loradict[l], model.metalora[l]]) for l in range(n_layers)}
 
-            qas = list(seg.get("qa", []))
-            if i == len(segs) - 1 and final_qa:
+            qas = list(seg.get("qa", [])) if i in sample_idx else []
+            if i == K - 1 and final_qa:
                 qas = qas + final_qa
             for qa in qas:
                 pred = _greedy(qa["question"], new_loradict, ds_l, ds_w)
