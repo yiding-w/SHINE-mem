@@ -1,0 +1,9 @@
+name: memory_stream
+dataset_module: mydatasets.pretrain_annealing.memory_stream
+context_seq_length: 2048      # per-segment memory window (the streaming chunk)
+conv_seq_length: 1024         # per-segment QA (+ final QA on last segment)
+data_path: "data/mem_synth"
+train_file: "train.jsonl"
+val_file: "val.jsonl"
+shuffle: false                # CRITICAL: streaming needs in-order, repo-contiguous
+validation_split_num: 256
