@@ -1,0 +1,42 @@
+# Data configuration for oldpretrainmask_group dataset
+# Same preprocessing/cache as oldpretrainmask, but supports multi-chunk data points.
+# group_dict defines the proportion of data points for each chunk count.
+# Training uses sequential (non-shuffled) access with contiguous DP sharding.
+name: oldpretrainmask_group
+dataset_module: mydatasets.pretrain.oldpretrainmask_group
+context_seq_length: 1120
+conv_seq_length: 1120
+
+# Data source settings (same as oldpretrainmask — shares the same cache)
+data_path: "old_data/transmla_pretrain_6B_tokens"
+data_format: "hf_dataset"
+
+# Tokenization cache settings (reuses oldpretrainmask's cache)
+cache_dir: "cache/oldpretrainmask_tokens"
+preprocess_workers: 32
+texts_per_shard: 1000
+
+# Shuffle settings
+shuffle: false
+preprocess_shuffle_seed: 42
+
+# Group configuration: {num_chunks_per_point: proportion_of_data_points}
+# Proportions are by data point count (not chunk count).
+# Example: 50% of data points span 1 chunk, 30% span 2 chunks, 20% span 3 chunks.
+# The actual number of data points per group is aligned to global_batch_size.
+# Supports dynamic global_batch_size changes without re-preprocessing.
+group_dict:
+  1: 0.5
+  2: 0.3
+  3: 0.2
+
+# Masking settings (same format as oldpretrainmask)
+mask:
+  ratio_start: 0.0
+  ratio_end: 0.0
+  ratio_std: 0.0
+  strategy: "span"
+  span_mean_length: 0
+  span_max_length: 0
+
+validation_split_num: 512

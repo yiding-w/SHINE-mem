@@ -1,0 +1,23 @@
+# Data configuration for msmarco_mqa_conv dataset (pretrain annealing)
+# Context is a COPY of conversation tokens (not the original evidence passage)
+# This enforces context_seq_length == conv_seq_length
+name: msmarco_mqa_conv
+dataset_module: mydatasets.pretrain_annealing.msmarco_mqa_conv    # Python module path for dynamic import
+context_seq_length: 1120                # Must equal conv_seq_length (context = conversation copy)
+conv_seq_length: 1120                   # Sequence length for conversation input
+
+# Data source settings (same as SFT msmarco_mqa)
+data_path: "old_data/ms_marco_mqa"     # Path to the dataset
+train_files:
+  - "train.jsonl"
+  - "train_v2.jsonl"
+val_file: "val.jsonl"
+
+# Cache settings
+cache_dir: "cache/msmarco_mqa_conv_tokens"  # Cache directory for tokenized shards
+texts_per_shard: 1000                   # Number of samples per shard
+preprocess_workers: 16                  # Number of parallel workers for tokenization
+
+# Validation settings
+validation_subset_num: 512              # Validation split size: -1=disabled, int=exact count, float(0~1)=fraction
+shuffle: true                          # Whether to shuffle data during training

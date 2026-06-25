@@ -1,0 +1,19 @@
+# Data configuration for trajectory_distill_transfer dataset
+# Loads trajectories from SHINE_SWE_DISTILLATION, tokenizes them via chat template,
+# groups by repo, and creates consecutive-pair samples for transfer learning.
+name: trajectory_distill_transfer
+dataset_module: mydatasets.pretrain.trajectory_distill_transfer  # Python module path for dynamic import
+
+# Maximum token length for a single trajectory (trajectories longer than this are discarded)
+max_token_length: 16384
+
+# Data source settings
+data_path: "data/SHINE_SWE_DISTILLATION"   # Path to the dataset directory (contains multiple shards)
+
+# Tokenization cache settings (shared with trajectory_distill_recon)
+cache_dir: "cache/trajectory_distill_recon_tokens"  # Directory for tokenized cache files
+preprocess_workers: 32                              # Number of parallel workers for tokenization
+
+# Training settings
+validation_split_num: 512             # Validation split size
+shuffle: false                        # MUST be false: repo-contiguous ordering is required

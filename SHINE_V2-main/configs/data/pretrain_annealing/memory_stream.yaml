@@ -1,0 +1,20 @@
+# Phase 2: streaming long-history memory QA (16k-128k).
+# Consumed by mydatasets/pretrain_annealing/memory_stream.py.
+# Input = intermediate JSONL from datagen/generate_memory_data.py (history_turns + qa).
+name: memory_stream
+dataset_module: mydatasets.pretrain_annealing.memory_stream
+
+# Per-SEGMENT length (one streaming step). Keep small so long histories become many
+# segments that detach_state accumulates across. NOT the total history length.
+context_seq_length: 2048      # memory segment size (the streaming chunk)
+conv_seq_length: 1024         # next-segment recon / final multi-QA chat
+
+data_path: "data/mem_synth"   # dir with train.jsonl / val.jsonl (intermediate format)
+train_file: "train.jsonl"
+val_file: "val.jsonl"
+
+# CRITICAL: must be false. Streaming needs repo-contiguous, in-order samples so
+# detach_state accumulates a history's segments and resets on repo change.
+shuffle: false
+
+validation_split_num: 256

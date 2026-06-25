@@ -1,0 +1,12 @@
+# Data configuration for "same" dataset — all samples identical
+# Used for PP vs TP alignment debugging.
+# Context and conversation are the SAME random token sequence.
+# Every sample in the dataset is IDENTICAL.
+name: same
+dataset_module: mydatasets.pretrain.same          # Python module path for dynamic import
+context_seq_length: 1120                          # Sequence length for context (must equal conv_seq_length)
+conv_seq_length: 1120                             # Sequence length for conversation (must equal context_seq_length)
+num_samples: 2048                                 # Number of samples (all identical)
+vocab_size: 50000                                 # Vocabulary size for random token generation
+validation_split_num: -1                          # No validation needed for debug
+shuffle: false                                    # No shuffle — all samples are the same anyway

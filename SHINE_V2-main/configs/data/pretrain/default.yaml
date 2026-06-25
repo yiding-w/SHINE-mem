@@ -1,0 +1,9 @@
+# Data configuration for synthetic/debug dataset
+name: default
+dataset_module: mydatasets.pretrain.default       # Python module path for dynamic import
+context_seq_length: 1024               # Sequence length for context input
+conv_seq_length: 1024                  # Sequence length for conversation input
+num_samples: 10000                     # Number of synthetic samples to generate
+vocab_size: 50000                      # Vocabulary size for random token generation
+validation_split_num: -1                     # Validation split size: -1=disabled, int=exact count, float(0~1)=fraction
+shuffle: true                          # Whether to shuffle data during training

@@ -1,0 +1,21 @@
+# Long-history memory QA (Phase 1: SFT single-window).
+# Produced by: datagen/generate_memory_data.py -> datagen/to_v2_sft.py
+# Reuses the msmarco_mqa SFT module (same {query_id, context, conversations} schema).
+name: memory_longhist
+dataset_module: mydatasets.sft.msmarco_mqa    # schema-compatible; no new code needed
+
+# History up to ~8k tokens fits in one window here. For 16k–128k use the streaming path.
+context_seq_length: 8192                # memory (history) window
+conv_seq_length: 512                    # QA turn (question + answer)
+
+data_path: "old_data/mem_sft"           # dir containing train.jsonl / val.jsonl
+train_files:
+  - "train.jsonl"
+val_file: "val.jsonl"
+
+cache_dir: "cache/memory_longhist_tokens"
+preprocess_workers: 32
+texts_per_shard: 1000
+
+validation_subset_num: 256              # -1=all, int=count, float(0~1)=fraction
+shuffle: true
