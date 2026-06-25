@@ -1,0 +1,26 @@
+# Data configuration for trajectory_all_transfer dataset
+# Loads trajectories from SHINE_SWE_DISTILLATION + SHINE_SWE_OPENSOURCE,
+# tokenizes them via chat template, groups by repo, and creates
+# consecutive-pair samples for transfer learning.
+# OPENSOURCE trajectories are filtered by resolved=True (only correct ones are used).
+name: trajectory_all_transfer
+dataset_module: mydatasets.pretrain.trajectory_all_transfer  # Python module path for dynamic import
+
+# Maximum token length for a single trajectory (trajectories longer than this are discarded)
+max_token_length: 18432
+
+# Data source settings (multiple paths, semicolon-separated)
+data_paths:
+  - "data/SHINE_SWE_DISTILLATION"
+  - "data/SHINE_SWE_OPENSOURCE"
+
+# Tokenization cache settings
+cache_dir: "cache/trajectory_all_transfer_tokens"  # Directory for tokenized cache files
+preprocess_workers: 32                             # Number of parallel workers for tokenization
+
+# Training settings
+validation_split_num: 512             # Validation split size
+shuffle: false                        # MUST be false: repo-contiguous ordering is required
+continuous_repo_num: 10               # Average consecutive samples from the same repo before switching.
+                                      # Long repos are split into chunks of this size, then chunks are
+                                      # globally shuffled. Set to -1 to disable (keep entire repo contiguous).

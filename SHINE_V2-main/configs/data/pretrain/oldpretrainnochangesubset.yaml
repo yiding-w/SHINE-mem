@@ -1,0 +1,28 @@
+# Data configuration for oldpretrainnochangesubset dataset
+# A random subset of the oldpretrainnochange dataset for overfitting tests.
+# Use this to verify training correctness on real data (loss should decrease).
+name: oldpretrainnochangesubset
+dataset_module: mydatasets.pretrain.oldpretrainnochangesubset    # Python module path for dynamic import
+context_seq_length: 1120                # Sequence length for context (evidence) input
+conv_seq_length: 1120                   # Sequence length for conversation input
+
+# Subset settings
+num_samples: 40                         # Number of groups to keep (keep small for overfitting)
+
+# Data source settings (same as oldpretrainnochange)
+data_path: "old_data/transmla_pretrain_6B_tokens"   # Path to the dataset
+data_format: "hf_dataset"              # "hf_dataset", "hf_disk", or "jsonl"
+
+# Group cache settings (same as oldpretrainnochange — shares the same cache)
+cache_dir: "old_data/transmla_pretrain_6B_tokens"  # Same as data_path to reuse existing cache files
+cache_name: "train"                     # Prefix for cache file names
+map_num_proc: 16                        # Number of parallel workers for token length computation
+map_batch_size: 2048                    # Batch size for HF Dataset.map
+num_cache: 100                          # Number of cache slots for greedy packing
+
+# Pretrain task settings
+completion_freq: 0.0                    # Probability of assigning <COMP> task (vs <RECON>)
+max_completion_ratio: 0.0               # Maximum ratio of text to use as completion target
+min_completion_ratio: 0.0               # Minimum ratio of text to use as completion target
+validation_split_num: -1                      # Validation split size: -1=disabled, int=exact count, float(0~1)=fraction
+shuffle: true                          # Whether to shuffle data during training

@@ -1,0 +1,21 @@
+# Data configuration for MS MARCO Multi-QA SFT dataset (preserve thinking mode)
+name: msmarco_mqa_preserve_thinking
+dataset_module: mydatasets.sft.msmarco_mqa_preserve_thinking    # Python module path for dynamic import
+context_seq_length: 2000                # Sequence length for context (evidence) input
+conv_seq_length: 1000                   # Sequence length for conversation input
+
+# Data source settings
+data_path: "old_data/ms_marco_mqa"      # Path to the dataset directory
+train_files:                            # Training JSONL files (concatenated)
+  - "train.jsonl"
+  - "train_v2.jsonl"
+val_file: "val.jsonl"                   # Validation JSONL file
+
+# Tokenization cache settings
+cache_dir: "cache/msmarco_mqa_preserve_thinking_tokens"   # Directory for tokenized cache files
+preprocess_workers: 32                  # Number of parallel workers for tokenization
+texts_per_shard: 1000                   # Number of samples per shard file
+
+# Validation settings
+validation_subset_num: 480               # -1 = use all val_file, int = exact count, float(0~1) = fraction of val set
+shuffle: true                          # Whether to shuffle data during training

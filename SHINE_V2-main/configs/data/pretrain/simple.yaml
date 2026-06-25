@@ -1,0 +1,11 @@
+# Data configuration for simple overfitting test dataset
+# Context and conversation are IDENTICAL random token sequences.
+# Use this to verify training correctness (loss should drop to ~0).
+name: simple
+dataset_module: mydatasets.pretrain.simple        # Python module path for dynamic import
+context_seq_length: 1024                  # Sequence length for context (must equal conv_seq_length)
+conv_seq_length: 1024                     # Sequence length for conversation (must equal context_seq_length)
+num_samples: 2048                          # Number of samples (keep small for overfitting)
+vocab_size: 50000                        # Vocabulary size for random token generation
+validation_split_num: 512                       # Validation split size: -1=disabled, int=exact count, float(0~1)=fraction
+shuffle: true                          # Whether to shuffle data during training

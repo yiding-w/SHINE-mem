@@ -1,0 +1,39 @@
+# Data configuration for oldpretrainmask dataset
+# Tokenizes texts as <usr><CTX><ass>text chat template with thinking tokens,
+# shuffles all token sequences (text-level shuffle), concatenates into a stream, and chunks.
+# Training uses sequential (non-shuffled) access with contiguous DP sharding.
+# context_ids = conversation_ids with random masking on content tokens.
+name: oldpretrainmask
+dataset_module: mydatasets.pretrain.oldpretrainmask    # Python module path for dynamic import
+context_seq_length: 1120                # Sequence length for context input
+conv_seq_length: 1120                   # Sequence length for conversation input (must == context_seq_length)
+
+# Data source settings
+data_path: "old_data/transmla_pretrain_6B_tokens"   # Path to the dataset
+data_format: "hf_dataset"              # "hf_dataset", "hf_disk", or "jsonl"
+
+# Tokenization cache settings
+cache_dir: "cache/oldpretrainmask_tokens"  # Directory for tokenized cache files
+preprocess_workers: 32                 # Number of parallel workers for tokenization
+texts_per_shard: 1000                  # Number of texts per shard file
+
+# Shuffle settings
+shuffle: true                         # Do NOT shuffle during training (sequential contiguous DP sharding)
+preprocess_shuffle_seed: 42            # Seed for shuffling token sequences during preprocessing
+
+# Masking settings for context_ids
+# context_ids is a copy of conversation_ids (same chunk) with random masking
+# applied to "content tokens" (non-special-token positions).
+mask:
+  # Dynamic mask ratio schedule: linearly increases from ratio_start to ratio_end
+  # over training steps. At each step, the actual ratio is sampled from
+  # N(current_mean, ratio_std^2), clamped to [0, 1].
+  ratio_start: 0.0                    # Mask ratio at the beginning of training
+  ratio_end: 0.0                      # Mask ratio at the end of training
+  ratio_std: 0.0                     # Std dev for per-step sampling around the current mean
+  strategy: "span"                   # Masking strategy: "random", "span"
+  # Span masking settings (only used when strategy == "span")
+  span_mean_length: 0                  # Mean span length (geometric distribution)
+  span_max_length: 0                  # Maximum span length
+
+validation_split_num: 512              # Validation split size: -1=disabled, int=exact count, float(0~1)=fraction
