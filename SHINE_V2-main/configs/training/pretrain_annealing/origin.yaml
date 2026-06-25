@@ -34,6 +34,7 @@ tp_knobs:
 save_steps: 200          # Save checkpoint at these steps. int=interval, list=specific steps, -1=disabled
 forever_save_steps: 1000          # Steps to save permanently (never deleted). int=interval, list=specific steps, -1=disabled
 save_total_limit: 3             # Max number of non-forever checkpoints to keep. Oldest is deleted when limit is exceeded.
+save_best_only: false           # If true: keep ONLY the best-by-val-ppl model at final/model (disables interval/end saves).
 resume_from: latest             # Resume from checkpoint. Options: path to checkpoint dir, "latest", null (no resume)
 
 # Logging
