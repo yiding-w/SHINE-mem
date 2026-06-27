@@ -1719,8 +1719,12 @@ def tp_main(cfg: DictConfig):
     # peak-memory) which is irrelevant and can trip on inference runs.
     # ==================================================================
     if os.environ.get("MEMORY_QA_GEN", "") == "1":
-        from eval_memory_gen import run_memory_qa_gen
-        run_memory_qa_gen(model, cfg, tp_cfg, my_device)
+        if os.environ.get("MEMORY_QA_ICL", "") == "1":
+            from eval_memory_gen import run_memory_qa_icl
+            run_memory_qa_icl(model, cfg, tp_cfg, my_device)
+        else:
+            from eval_memory_gen import run_memory_qa_gen
+            run_memory_qa_gen(model, cfg, tp_cfg, my_device)
         if is_main_process_per_node():
             logger.info("[MEMORY_QA_GEN] done. Exiting.")
         cleanup_distributed()
