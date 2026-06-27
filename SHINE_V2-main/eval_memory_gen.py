@@ -52,7 +52,7 @@ def _strip_think(text: str) -> str:
 
 @torch.no_grad()
 def run_memory_qa_gen(model, cfg, tp_cfg, my_device):
-    from utils.myddp import is_main_process, barrier
+    from utils.myparallel import is_main_process, barrier
 
     if not is_main_process():
         barrier()
@@ -188,7 +188,7 @@ def run_memory_qa_icl(model, cfg, tp_cfg, my_device):
     most-recent tokens (front-truncate, question stays at the tail) — this is
     exactly where ICL degrades and SHINE is supposed to win.
     """
-    from utils.myddp import is_main_process, barrier
+    from utils.myparallel import is_main_process, barrier
 
     if not is_main_process():
         barrier()
