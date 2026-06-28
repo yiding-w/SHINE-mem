@@ -1079,6 +1079,8 @@ def _tp_run_evaluation(
     _eval_running_mean_update_step = 0.0
     _eval_running_regu_sq_norm = 0.0
     _eval_repo_reset_count = 0
+    _eval_acc_correct = 0  # teacher-forced answer-token accuracy (numerator)
+    _eval_acc_total = 0    # answer tokens seen (denominator)
 
     val_loader.set_epoch(0)  # Fixed epoch for reproducibility
     val_iter = iter(val_loader)
@@ -1109,8 +1111,11 @@ def _tp_run_evaluation(
                             loradict=None,
                             nograd_loradict=None,
                             nograd_wdict=None,
+                            return_acc=True,
                         )
                     total_loss += loss.detach().float().item()
+                    _eval_acc_correct += int(getattr(model, "_last_eval_acc_correct", 0))
+                    _eval_acc_total += int(getattr(model, "_last_eval_acc_total", 0))
                     num_batches += 1
                     continue
 
@@ -1145,6 +1150,7 @@ def _tp_run_evaluation(
                             distill_conversation_ids=_distill_conv_ids,
                             distill_labels=_distill_labels,
                             grad_accum_steps=1,
+                            return_acc=True,
                         )
                         # _result is (total_loss, distill_loss_detached)
                         # total_loss = ce_loss + coeff * distill_loss (no regu_loss)
@@ -1164,8 +1170,14 @@ def _tp_run_evaluation(
                             conversation_ids=mb_dev["conversation_ids"],
                             labels=mb_dev["labels"],
                             grad_accum_steps=1,
+                            return_acc=True,
                         )
                         total_loss += loss.detach().float().item()
+
+                # Answer-token accuracy (teacher-forced) — stashed on the model
+                # by compute_loss(return_acc=True).
+                _eval_acc_correct += int(getattr(model, "_last_eval_acc_correct", 0))
+                _eval_acc_total += int(getattr(model, "_last_eval_acc_total", 0))
 
                 # Write detach_state for eval accumulation (no backward needed in eval)
                 model.post_backward_detach_state(grad_accum_steps=1)
@@ -1240,6 +1252,16 @@ def _tp_run_evaluation(
         _global_eval_update = 0.0
         _global_eval_repo_reset = 0.0
 
+    # Answer-token accuracy: SUM counts across DP replicas only (TP ranks
+    # duplicate the same data + same full-vocab logits, so they must NOT be
+    # summed). token_acc = correct / total over the whole eval set.
+    _acc_correct, _acc_total = _eval_acc_correct, _eval_acc_total
+    if dp_group is not None and dist.get_world_size(dp_group) > 1:
+        _acc_tensor = torch.tensor([float(_acc_correct), float(_acc_total)], device=my_device)
+        dist.all_reduce(_acc_tensor, op=dist.ReduceOp.SUM, group=dp_group)
+        _acc_correct, _acc_total = _acc_tensor[0].item(), _acc_tensor[1].item()
+    eval_token_acc = (_acc_correct / _acc_total) if _acc_total > 0 else 0.0
+
     avg_ppl = math.exp(min(avg_loss, 20.0))
     # Total loss = CE + coefficient * distill (coefficient applied in distill_loss_fn)
     _distill_coeff = distill_loss_fn.coefficient if distill_loss_fn is not None else 1.0
@@ -1260,7 +1282,8 @@ def _tp_run_evaluation(
             )
         logger.info(
             f"  [Eval Step {global_step}] "
-            f"val_loss={avg_loss:.4f}, val_ppl={avg_ppl:.2f}"
+            f"val_loss={avg_loss:.4f}, val_ppl={avg_ppl:.2f}, "
+            f"val_token_acc={eval_token_acc:.4f} ({int(_acc_correct)}/{int(_acc_total)})"
             f"{_eval_distill_suffix}, "
             f"val_batches={num_batches}, "
             f"eval_time={format_duration(eval_duration)}, "
@@ -1285,6 +1308,7 @@ def _tp_run_evaluation(
             "eval/distill_loss": avg_distill_loss,
             "eval/total_loss": total_loss_val,
             "eval/total_ppl": total_ppl,
+            "eval/token_acc": eval_token_acc,
         }
         # DetachState metrics for eval
         if model.detach_state is not None and num_batches > 0:

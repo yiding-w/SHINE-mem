@@ -661,6 +661,7 @@ class TPModelHypernetwork(nn.Module):
         return_per_token_loss: bool = False,
         nograd_loradict: Optional[Dict] = None,
         nograd_wdict: Optional[Dict] = None,
+        return_acc: bool = False,
     ):
         """Step 4 — run the LLM with the generated loradict, then compute
         causal-LM CE loss against shifted labels.
@@ -692,6 +693,24 @@ class TPModelHypernetwork(nn.Module):
         B, S_minus_1, H = shift_hs.shape
         flat_hs = shift_hs.reshape(B * S_minus_1, H)
         flat_labels = shift_labels.reshape(B * S_minus_1)
+
+        # ------------------------------------------------------------------
+        # Optional teacher-forced answer-token accuracy (eval only). Runs
+        # lm_head ONLY on answer positions (labels != -100), so it is cheap
+        # and low-memory. Stored on self as a side channel -> the compute_loss
+        # return signature is unchanged (zero cost when return_acc=False).
+        # NOTE: lm_head produces FULL-vocab logits on every (TP) rank (the
+        # CE paths below rely on this too), so argmax is globally correct.
+        # ------------------------------------------------------------------
+        if return_acc:
+            keep = (flat_labels != -100).nonzero(as_tuple=True)[0]
+            n_corr = 0
+            for i in range(0, keep.numel(), 1024):
+                idx = keep[i:i + 1024]
+                pred = self.llm.lm_head(flat_hs[idx]).argmax(dim=-1)
+                n_corr += int((pred == flat_labels[idx]).sum().item())
+            self._last_eval_acc_correct = n_corr
+            self._last_eval_acc_total = int(keep.numel())
 
         # ------------------------------------------------------------------
         # per-token loss path (debug only): materialise full logits, use
@@ -892,6 +911,7 @@ class TPModelHypernetwork(nn.Module):
         distill_conversation_ids: Optional[torch.LongTensor] = None,
         distill_labels: Optional[torch.LongTensor] = None,
         grad_accum_steps: int = 1,
+        return_acc: bool = False,
     ):
         """One forward of the multi-step pipeline.
 
@@ -946,6 +966,7 @@ class TPModelHypernetwork(nn.Module):
             return_per_token_loss=return_per_token_loss,
             nograd_loradict=ds_nograd_loradict,
             nograd_wdict=ds_nograd_wdict,
+            return_acc=return_acc,
         )
         self._active_w_transform = None
         torch.cuda.nvtx.range_pop()  # Step4_Conversation_Forward
