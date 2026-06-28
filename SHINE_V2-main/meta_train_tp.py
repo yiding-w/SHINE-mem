@@ -841,6 +841,7 @@ def _train_step(
     distill_batch: Optional[dict] = None,
     distill_loss_fn=None,
     return_per_token_loss: bool = False,
+    return_acc: bool = False,
 ) -> tuple:
     """Run one micro-batch forward+backward; step optimizer when
     ``(micro_step + 1) % grad_accum_steps == 0``.
@@ -879,6 +880,7 @@ def _train_step(
                 distill_conversation_ids=_distill_conv_ids,
                 distill_labels=_distill_labels,
                 grad_accum_steps=grad_accum_steps,
+                return_acc=return_acc,
             )
             loss, _per_token_loss, _distill_loss_val = _result
         elif return_per_token_loss and not _has_distill:
@@ -890,6 +892,7 @@ def _train_step(
                 labels=labels,
                 return_per_token_loss=True,
                 grad_accum_steps=grad_accum_steps,
+                return_acc=return_acc,
             )
             loss, _per_token_loss = _result
         elif not return_per_token_loss and _has_distill:
@@ -903,6 +906,7 @@ def _train_step(
                 distill_conversation_ids=_distill_conv_ids,
                 distill_labels=_distill_labels,
                 grad_accum_steps=grad_accum_steps,
+                return_acc=return_acc,
             )
             loss, _distill_loss_val = _result
         else:
@@ -913,6 +917,7 @@ def _train_step(
                 conversation_ids=conv_ids,
                 labels=labels,
                 grad_accum_steps=grad_accum_steps,
+                return_acc=return_acc,
             )
             loss = _result
 
@@ -2033,6 +2038,13 @@ def tp_main(cfg: DictConfig):
     micro_step = 0
     running_loss = 0.0 if resume_checkpoint_dir is None or load_model_only_flag else running_loss
     running_distill_loss = 0.0
+    # Train answer-token accuracy window (computed only on to-be-logged steps to
+    # keep overhead negligible; SUM-reduced over DP in the logging block).
+    _train_acc_on = os.environ.get("MEMORY_QA_TRAIN_ACC", "1") != "0"
+    _train_acc_corr = 0
+    _train_acc_tot = 0
+    _train_ans_corr = 0
+    _train_ans_tot = 0
     running_regu_sq_norm = 0.0
     running_reset_ratio = 0.0
     running_mean_update_step = 0.0
@@ -2264,6 +2276,9 @@ def tp_main(cfg: DictConfig):
                     (log_train_detail_sched is not None and log_train_detail_sched.should_run(global_step + 1))
                     or log_train_detail_ppl_threshold > 0
                 )
+                # Compute train answer-token accuracy only on steps that will be
+                # logged (logging_steps cadence) -> negligible extra cost.
+                _train_acc_this = _train_acc_on and logging_steps > 0 and ((global_step + 1) % logging_steps == 0)
 
                 accum_loss, stepped, _skipped, _grad_norm_metrics, _per_token_loss, _distill_loss_item, _regu_sq_norm_local = _train_step(
                     model=model,
@@ -2283,10 +2298,16 @@ def tp_main(cfg: DictConfig):
                     distill_batch=_distill_batch,
                     distill_loss_fn=distill_loss_fn,
                     return_per_token_loss=_need_detail,
+                    return_acc=_train_acc_this,
                 )
                 _accum_regu_sq_norm += _regu_sq_norm_local
                 if _distill_loss_item is not None:
                     _accum_distill_loss += _distill_loss_item
+                if _train_acc_this:
+                    _train_acc_corr += int(getattr(model, "_last_eval_acc_correct", 0))
+                    _train_acc_tot += int(getattr(model, "_last_eval_acc_total", 0))
+                    _train_ans_corr += int(getattr(model, "_last_eval_ans_correct", 0))
+                    _train_ans_tot += int(getattr(model, "_last_eval_ans_total", 0))
                 micro_step += 1
 
                 # Accumulate detail info for later logging (same as PP)
@@ -2541,6 +2562,18 @@ def tp_main(cfg: DictConfig):
                             total_conv_total_tokens += step_conv_total_tokens
                             total_conv_valid_tokens += step_conv_valid_tokens
 
+                        # Train answer-token accuracy: SUM counts over DP only.
+                        _tr_ac, _tr_at = _train_acc_corr, _train_acc_tot
+                        _tr_nc, _tr_nt = _train_ans_corr, _train_ans_tot
+                        if dp_group is not None and dp_size > 1:
+                            _tr_t = torch.tensor([float(_tr_ac), float(_tr_at), float(_tr_nc), float(_tr_nt)],
+                                                 device=my_device)
+                            dist.all_reduce(_tr_t, op=dist.ReduceOp.SUM, group=dp_group)
+                            _tr_ac, _tr_at, _tr_nc, _tr_nt = (_tr_t[0].item(), _tr_t[1].item(),
+                                                              _tr_t[2].item(), _tr_t[3].item())
+                        _train_token_acc = (_tr_ac / _tr_at) if _tr_at > 0 else None
+                        _train_answer_acc = (_tr_nc / _tr_nt) if _tr_nt > 0 else None
+
                         # All-reduce detach_state metrics across DP replicas
                         if model.detach_state is not None:
                             _local_regu = running_regu_sq_norm / logging_steps if logging_steps > 0 else 0.0
@@ -2590,9 +2623,12 @@ def tp_main(cfg: DictConfig):
                                     f",\trepo_reset_ratio={_global_avg_repo_reset:.4f}"
                                     f",\tmean_upd_step={_global_avg_update:.1f}"
                                 )
+                            _tr_acc_suffix = ""
+                            if _train_token_acc is not None:
+                                _tr_acc_suffix = f",\ttoken_acc={_train_token_acc:.4f},\tanswer_acc={_train_answer_acc:.4f}"
                             logger.info(
                                 f"  [Step {global_step}/{max_steps}]\t"
-                                f"epoch={epoch},\tloss={_global_avg_ce_loss:.4f},\tppl={_global_ce_ppl:.2f}{_distill_suffix},\t"
+                                f"epoch={epoch},\tloss={_global_avg_ce_loss:.4f},\tppl={_global_ce_ppl:.2f}{_tr_acc_suffix}{_distill_suffix},\t"
                                 f"epoch_avg_loss={_global_epoch_avg_loss:.4f},\tepoch_avg_ppl={_global_epoch_avg_ppl:.2f}{_regu_suffix},\t"
                                 f"lr={lr_now:.2e},\t"
                                 f"step_time={format_duration(last_step_duration)}{save_suffix},\t"
@@ -2614,6 +2650,10 @@ def tp_main(cfg: DictConfig):
                                     "train/total_conv_valid_tokens": total_conv_valid_tokens,
                                     "train/step_time": last_step_duration,
                                 }
+                                if _train_token_acc is not None:
+                                    wandb_metrics["train/token_acc"] = _train_token_acc
+                                if _train_answer_acc is not None:
+                                    wandb_metrics["train/answer_acc"] = _train_answer_acc
                                 # DetachState metrics (regu_sq_norm, reset_ratio, mean_update_step)
                                 if model.detach_state is not None:
                                     wandb_metrics["train/regu_sq_norm"] = _global_avg_regu
@@ -2657,6 +2697,10 @@ def tp_main(cfg: DictConfig):
                         running_reset_ratio = 0.0
                         running_mean_update_step = 0.0
                         running_repo_reset_count = 0
+                        _train_acc_corr = 0
+                        _train_acc_tot = 0
+                        _train_ans_corr = 0
+                        _train_ans_tot = 0
                         step_context_tokens = 0
                         step_conv_total_tokens = 0
                         step_conv_valid_tokens = 0

@@ -36,7 +36,7 @@ import torch
 
 from utils.mytokenizer import create_tokenizer, NOTHINKING_CHAT_TEMPLATE
 from utils.myloradict import concat_loradict
-from mydatasets.pretrain_annealing.memory_stream import _encode_turns, _qa_to_messages  # noqa: F401
+from mydatasets.pretrain_annealing.memory_stream import _encode_turns, _qa_to_messages, filter_by_segments  # noqa: F401
 
 
 def _load_jsonl(path):
@@ -74,7 +74,7 @@ def _gen_eval_core(model, cfg, my_device, *, n_hist, max_new, seg_sample, use_kv
     pad_id = tok.pad_token_id or 0
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
     eos_id = tok.eos_token_id
-    records = _load_jsonl(test_file)[:n_hist]
+    records = filter_by_segments(_load_jsonl(test_file))[:n_hist]
     model.eval()
     hit, total = collections.Counter(), collections.Counter()
     examples = []
@@ -282,7 +282,7 @@ def run_memory_qa_icl(model, cfg, tp_cfg, my_device):
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
     eos_id = tok.eos_token_id
 
-    records = _load_jsonl(test_file)[:n_hist]
+    records = filter_by_segments(_load_jsonl(test_file))[:n_hist]
     print(f"\n[memory_qa_icl] ICL baseline (no SHINE): {len(records)} histories from "
           f"{test_file} (max_len={max_len}, max_new={max_new})", flush=True)
 

@@ -258,10 +258,25 @@ def preprocess(cfg, model_path: str):
     return None
 
 
+def filter_by_segments(records: List[Dict]) -> List[Dict]:
+    """Keep only histories whose n_segments is in MEM_SEGMENTS (e.g. "8,16").
+    Lets you train/eval on just the short (easy) histories without regenerating
+    data. Unset/empty -> keep everything. Falls back to len(segments) if a
+    record has no n_segments field."""
+    raw = os.environ.get("MEM_SEGMENTS", "").strip()
+    if not raw:
+        return records
+    keep = {int(x) for x in raw.split(",") if x.strip()}
+    out = [r for r in records
+           if int(r.get("n_segments", len(r.get("segments", [])))) in keep]
+    logger.info(f"[memory_stream] MEM_SEGMENTS={sorted(keep)} -> kept {len(out)}/{len(records)} histories")
+    return out
+
+
 def create_dataset_and_collator(cfg, model_path: str, pad_token_id: int, num_mem_token: int = 0):
     data_cfg = cfg.data
     train_path, _ = _data_files(data_cfg)
-    records = _load_jsonl(train_path)
+    records = filter_by_segments(_load_jsonl(train_path))
     ctx_len = int(data_cfg.context_seq_length)
     conv_len = int(data_cfg.conv_seq_length)
     tok_cfg = cfg.get("tokenizer", None)
@@ -281,7 +296,7 @@ def create_val_dataset(cfg, model_path: str, pad_token_id: int, num_mem_token: i
     _, val_path = _data_files(data_cfg)
     if not val_path or not os.path.isfile(val_path):
         return None
-    records = _load_jsonl(val_path)
+    records = filter_by_segments(_load_jsonl(val_path))
     ctx_len = int(data_cfg.context_seq_length)
     tok_cfg = cfg.get("tokenizer", None)
     return MemoryStreamDataset(model_path, records, ctx_len, tokenizer_cfg=tok_cfg)
