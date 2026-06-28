@@ -134,11 +134,14 @@ def _qa_to_messages(qa: List[Dict[str, str]]) -> List[Dict[str, str]]:
 
 class MemoryStreamDataset(BaseDataset):
     def __init__(self, model_path: str, records: List[Dict], context_seq_length: int,
-                 tokenizer_cfg=None):
+                 tokenizer_cfg=None, apply_deferred: bool = False):
         super().__init__(model_path, tokenizer_cfg=tokenizer_cfg)
         self.tokenizer = create_tokenizer(model_path, tokenizer_cfg=tokenizer_cfg,
                                            chat_template=NOTHINKING_CHAT_TEMPLATE)
         self.budget = int(context_seq_length)
+        # Deferred cross-segment QA augmentation (MEM_DEFERRED_QA) is applied to
+        # TRAIN only; val stays untouched so val_ppl / save_best stays meaningful.
+        self.apply_deferred = apply_deferred
         self.samples: List[Dict[str, Any]] = []
         self._build(records)
 
@@ -153,7 +156,7 @@ class MemoryStreamDataset(BaseDataset):
         forces the hypernetwork to actually learn cross-segment retrieval (raises
         the cross-segment QA ratio WITHOUT regenerating data). Selection is
         crc32-seeded per (repo, si) so it is identical across DP/TP ranks."""
-        n_deferred = int(os.environ.get("MEM_DEFERRED_QA", "0"))
+        n_deferred = int(os.environ.get("MEM_DEFERRED_QA", "0")) if self.apply_deferred else 0
         for rec in records:
             repo = str(rec.get("id"))
             segments = rec["segments"]
@@ -263,7 +266,8 @@ def create_dataset_and_collator(cfg, model_path: str, pad_token_id: int, num_mem
     conv_len = int(data_cfg.conv_seq_length)
     tok_cfg = cfg.get("tokenizer", None)
 
-    dataset = MemoryStreamDataset(model_path, records, ctx_len, tokenizer_cfg=tok_cfg)
+    dataset = MemoryStreamDataset(model_path, records, ctx_len, tokenizer_cfg=tok_cfg,
+                                  apply_deferred=True)
     collator = MemoryStreamCollator(model_path, ctx_len, conv_len, pad_token_id=pad_token_id,
                                     num_mem_token=num_mem_token, tokenizer_cfg=tok_cfg)
     logger.info(f"[memory_stream] {len(records)} histories -> {len(dataset)} stream samples "
