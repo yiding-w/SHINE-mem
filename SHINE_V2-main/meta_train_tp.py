@@ -1081,6 +1081,8 @@ def _tp_run_evaluation(
     _eval_repo_reset_count = 0
     _eval_acc_correct = 0  # teacher-forced answer-token accuracy (numerator)
     _eval_acc_total = 0    # answer tokens seen (denominator)
+    _eval_ans_correct = 0  # answer-level exact match (whole-answer correct)
+    _eval_ans_total = 0    # answers seen
 
     val_loader.set_epoch(0)  # Fixed epoch for reproducibility
     val_iter = iter(val_loader)
@@ -1116,6 +1118,8 @@ def _tp_run_evaluation(
                     total_loss += loss.detach().float().item()
                     _eval_acc_correct += int(getattr(model, "_last_eval_acc_correct", 0))
                     _eval_acc_total += int(getattr(model, "_last_eval_acc_total", 0))
+                    _eval_ans_correct += int(getattr(model, "_last_eval_ans_correct", 0))
+                    _eval_ans_total += int(getattr(model, "_last_eval_ans_total", 0))
                     num_batches += 1
                     continue
 
@@ -1178,6 +1182,8 @@ def _tp_run_evaluation(
                 # by compute_loss(return_acc=True).
                 _eval_acc_correct += int(getattr(model, "_last_eval_acc_correct", 0))
                 _eval_acc_total += int(getattr(model, "_last_eval_acc_total", 0))
+                _eval_ans_correct += int(getattr(model, "_last_eval_ans_correct", 0))
+                _eval_ans_total += int(getattr(model, "_last_eval_ans_total", 0))
 
                 # Write detach_state for eval accumulation (no backward needed in eval)
                 model.post_backward_detach_state(grad_accum_steps=1)
@@ -1256,11 +1262,16 @@ def _tp_run_evaluation(
     # duplicate the same data + same full-vocab logits, so they must NOT be
     # summed). token_acc = correct / total over the whole eval set.
     _acc_correct, _acc_total = _eval_acc_correct, _eval_acc_total
+    _ans_correct, _ans_total = _eval_ans_correct, _eval_ans_total
     if dp_group is not None and dist.get_world_size(dp_group) > 1:
-        _acc_tensor = torch.tensor([float(_acc_correct), float(_acc_total)], device=my_device)
+        _acc_tensor = torch.tensor(
+            [float(_acc_correct), float(_acc_total), float(_ans_correct), float(_ans_total)],
+            device=my_device)
         dist.all_reduce(_acc_tensor, op=dist.ReduceOp.SUM, group=dp_group)
         _acc_correct, _acc_total = _acc_tensor[0].item(), _acc_tensor[1].item()
+        _ans_correct, _ans_total = _acc_tensor[2].item(), _acc_tensor[3].item()
     eval_token_acc = (_acc_correct / _acc_total) if _acc_total > 0 else 0.0
+    eval_answer_acc = (_ans_correct / _ans_total) if _ans_total > 0 else 0.0
 
     avg_ppl = math.exp(min(avg_loss, 20.0))
     # Total loss = CE + coefficient * distill (coefficient applied in distill_loss_fn)
@@ -1283,7 +1294,8 @@ def _tp_run_evaluation(
         logger.info(
             f"  [Eval Step {global_step}] "
             f"val_loss={avg_loss:.4f}, val_ppl={avg_ppl:.2f}, "
-            f"val_token_acc={eval_token_acc:.4f} ({int(_acc_correct)}/{int(_acc_total)})"
+            f"val_token_acc={eval_token_acc:.4f} ({int(_acc_correct)}/{int(_acc_total)}), "
+            f"val_answer_acc={eval_answer_acc:.4f} ({int(_ans_correct)}/{int(_ans_total)})"
             f"{_eval_distill_suffix}, "
             f"val_batches={num_batches}, "
             f"eval_time={format_duration(eval_duration)}, "
@@ -1309,6 +1321,7 @@ def _tp_run_evaluation(
             "eval/total_loss": total_loss_val,
             "eval/total_ppl": total_ppl,
             "eval/token_acc": eval_token_acc,
+            "eval/answer_acc": eval_answer_acc,
         }
         # DetachState metrics for eval
         if model.detach_state is not None and num_batches > 0:
