@@ -1913,6 +1913,20 @@ def tp_main(cfg: DictConfig):
     eval_steps_raw = cfg.training.get("eval_steps", -1)
     eval_sched = DebugSchedule(eval_steps_raw, "eval_steps")
 
+    # Generation-eval schedule: per-type free-decode accuracy during training.
+    # Off by default; set MEMORY_QA_GEN_EVERY=500 to run every 500 steps.
+    # MEMORY_QA_GEN_RECALL=1 additionally runs the deferred-recall probe (answer
+    # each segment's QA from the FULL accumulated W -> isolates detach_state).
+    gen_eval_sched = DebugSchedule(int(os.environ.get("MEMORY_QA_GEN_EVERY", "-1")), "gen_eval")
+    _gen_eval_recall = os.environ.get("MEMORY_QA_GEN_RECALL", "") == "1"
+    _gen_eval_nhist = int(os.environ.get("MEMORY_QA_GEN_NUM", "8"))
+    if (int(os.environ.get("MEMORY_QA_GEN_EVERY", "-1")) > 0
+            and tp_cfg["tensor_parallel_size"] > 1 and is_main_process_per_node()):
+        logger.warning(
+            "[gen_eval] MEMORY_QA_GEN_EVERY set but tensor_parallel_size>1 — "
+            "in-loop generation eval is main-rank-only and would deadlock under "
+            "TP collectives, so it will be SKIPPED. Use pure DP (tp_size=1) to enable it.")
+
     # Debug schedules (same as PP)
     log_peak_memory_sched = DebugSchedule(
         cfg.get("debug", {}).get("log_peak_memory_steps", -1), "log_peak_memory_steps")
@@ -2725,6 +2739,31 @@ def tp_main(cfg: DictConfig):
                             collator.set_eval_mode(False)
                         if save_best_only and _eval_out is not None:
                             _save_best_model(global_step, _eval_out[1])
+
+                    # Generation eval: per-type free-decode accuracy (+ optional
+                    # deferred-recall probe). Heavy (greedy decode), so gated on
+                    # its own schedule. Runs on main rank; others wait at barrier.
+                    # Main-only decode => only safe at TP=1 (TP>1 forward has
+                    # collectives that would deadlock); skip under TP>1.
+                    if (gen_eval_sched.should_run(global_step)
+                            and tp_cfg["tensor_parallel_size"] == 1):
+                        from eval_memory_gen import run_memory_qa_gen_inloop
+                        for _ge_recall, _ge_prefix in ([(False, "gen")]
+                                + ([(True, "gen_recall")] if _gen_eval_recall else [])):
+                            _ge_hit, _ge_tot = run_memory_qa_gen_inloop(
+                                model, cfg, tp_cfg, my_device,
+                                recall=_ge_recall, n_hist=_gen_eval_nhist,
+                            )
+                            if _ge_tot is not None and is_main_process_per_node():
+                                logger.info(
+                                    f"  [GenEval {_ge_prefix} step {global_step}] "
+                                    + ", ".join(f"{t}={_ge_hit[t]}/{_ge_tot[t]}" for t in sorted(_ge_tot))
+                                    + f", overall={sum(_ge_hit.values())}/{max(1, sum(_ge_tot.values()))}"
+                                )
+                            if _ge_tot is not None and is_main_process() and use_wandb and wandb is not None:
+                                _ge_metrics = {f"{_ge_prefix}/acc_{t}": _ge_hit[t] / max(1, _ge_tot[t]) for t in _ge_tot}
+                                _ge_metrics[f"{_ge_prefix}/acc_overall"] = sum(_ge_hit.values()) / max(1, sum(_ge_tot.values()))
+                                wandb.log(_ge_metrics, step=global_step)
 
                     # --- Profiler step (no-op when disabled) ---
                     if _profiler.step():

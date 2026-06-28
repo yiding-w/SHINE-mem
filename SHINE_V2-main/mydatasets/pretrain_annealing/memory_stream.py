@@ -34,6 +34,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import zlib
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -143,7 +145,15 @@ class MemoryStreamDataset(BaseDataset):
     def _build(self, records: List[Dict]) -> None:
         """One stream sample per segment: context=segment history (writes W),
         conversation=per-segment QA (answer-only loss). The LAST segment also
-        carries the cross-segment final_qa (W then holds all prior segments)."""
+        carries the cross-segment final_qa (W then holds all prior segments).
+
+        MEM_DEFERRED_QA=N (env, default 0): for each segment si>0, also append N
+        questions drawn from EARLIER segments (j<si). At this stream position W
+        holds segments 0..si-1, so the answer lives ONLY in accumulated W -> this
+        forces the hypernetwork to actually learn cross-segment retrieval (raises
+        the cross-segment QA ratio WITHOUT regenerating data). Selection is
+        crc32-seeded per (repo, si) so it is identical across DP/TP ranks."""
+        n_deferred = int(os.environ.get("MEM_DEFERRED_QA", "0"))
         for rec in records:
             repo = str(rec.get("id"))
             segments = rec["segments"]
@@ -154,6 +164,16 @@ class MemoryStreamDataset(BaseDataset):
                 qa = list(seg.get("qa", []))
                 if si == K - 1 and final_qa:
                     qa = qa + final_qa  # cross-segment QA exercises reading accumulated W
+                if n_deferred > 0 and si > 0:
+                    pool = []
+                    for pj in range(si):  # only EARLIER segments (answer is in W)
+                        for q in segments[pj].get("qa", []):
+                            q2 = dict(q)
+                            q2["type"] = str(q.get("type", "segment_retrieval")) + "_deferred"
+                            pool.append(q2)
+                    if pool:
+                        rng = random.Random(zlib.crc32(f"{repo}:{si}".encode()))
+                        qa = qa + rng.sample(pool, min(n_deferred, len(pool)))
                 conv_ids = _encode_turns(self.tokenizer, _qa_to_messages(qa))
                 self.samples.append({
                     "context_token_ids": ctx_ids,
