@@ -155,7 +155,8 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
     print(
         f"\n[squad_qa_gen] {len(records)} examples split={split} data={data_path} "
         f"ctx_cap={ctx_len_cap} max_new={max_new} "
-        f"eval_mode={eval_mode} query_include_context={query_include_context}",
+        f"eval_mode={eval_mode} prompt_context={run_context} "
+        f"shine_query_include_context={query_include_context}",
         flush=True,
     )
 
@@ -177,9 +178,16 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
 
     def _greedy(question: str, context: str, new_loradict, *, include_context: bool):
         if include_context:
-            prompt = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+            prompt = (
+                "Read the context and answer the question. "
+                "Return only the shortest answer span from the context.\n\n"
+                f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+            )
         else:
-            prompt = question
+            prompt = (
+                "Answer the question. Return only the shortest possible answer.\n\n"
+                f"Question: {question}\nAnswer:"
+            )
         ids = tok.apply_chat_template(
             [{"role": "user", "content": prompt}],
             add_generation_prompt=True,
