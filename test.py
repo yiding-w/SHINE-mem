@@ -470,7 +470,14 @@ def main(cfg: DictConfig):
     hydra_run_dir = os.getcwd()
     ckpt_root = os.path.join("checkpoints", f"{cfg.name}", "train")
 
-    if cfg.test_global_step == "latest":
+    test_checkpoint_dir = cfg.test.get("checkpoint_dir", None)
+    if test_checkpoint_dir:
+        resume_dir = str(test_checkpoint_dir)
+        if not os.path.isabs(resume_dir):
+            resume_dir = os.path.abspath(resume_dir)
+        if not os.path.isdir(resume_dir):
+            raise ValueError(f"Requested resume dir {resume_dir} does not exist.")
+    elif cfg.test_global_step == "latest":
         resume_dir = get_latest_checkpoint(ckpt_root)
     elif cfg.test_global_step == "final":
         resume_dir = os.path.join(ckpt_root, "final")
@@ -752,44 +759,34 @@ def main(cfg: DictConfig):
         if ddp_is_active():
             dist.barrier()
 
-        test_and_save(
-            cfg=cfg,
-            metanetwork_ddp_or_module=metanetwork,
-            tokenizer=tokenizer,
-            testloader=test_loader,
-            split_name=names[i],  # e.g. "squad_XXX"
-            f1_metric=f1_metric,
-            use_metanet=True,
-            metalora=metalora,
-            device=device,
-            output_suffix=".json",
-        )
+        eval_mode = str(cfg.test.get("eval_mode", "shine")).lower()
+        valid_modes = {"shine", "plain", "context", "lora_context", "all"}
+        if eval_mode not in valid_modes:
+            raise ValueError(f"Unknown test.eval_mode={eval_mode}. Expected one of {sorted(valid_modes)}")
 
-        # # Uncomment if you want baselines too (will also produce *_results.json for each)
-        # test_and_save(
-        #     cfg=cfg,
-        #     metanetwork_ddp_or_module=metanetwork,
-        #     tokenizer=tokenizer,
-        #     testloader=test_loader_no_metanet,
-        #     split_name=f"{names[i]}_no_metanet",
-        #     f1_metric=f1_metric,
-        #     use_metanet=False,
-        #     metalora=None,
-        #     device=device,
-        #     output_suffix=".json",
-        # )
-        # test_and_save(
-        #     cfg=cfg,
-        #     metanetwork_ddp_or_module=metanetwork,
-        #     tokenizer=tokenizer,
-        #     testloader=test_loader_only_question,
-        #     split_name=f"{names[i]}_only_question",
-        #     f1_metric=f1_metric,
-        #     use_metanet=False,
-        #     metalora=None,
-        #     device=device,
-        #     output_suffix=".json",
-        # )
+        jobs = []
+        if eval_mode in {"shine", "all"}:
+            jobs.append((test_loader, names[i], True, metalora))
+        if eval_mode in {"plain", "all"}:
+            jobs.append((test_loader_only_question, f"{names[i]}_only_question", False, None))
+        if eval_mode in {"context", "all"}:
+            jobs.append((test_loader_no_metanet, f"{names[i]}_no_metanet", False, None))
+        if eval_mode in {"lora_context", "all"}:
+            jobs.append((test_loader_no_metanet, f"{names[i]}_lora_context", True, metalora))
+
+        for loader, split_name, use_metanet, job_metalora in jobs:
+            test_and_save(
+                cfg=cfg,
+                metanetwork_ddp_or_module=metanetwork,
+                tokenizer=tokenizer,
+                testloader=loader,
+                split_name=split_name,
+                f1_metric=f1_metric,
+                use_metanet=use_metanet,
+                metalora=job_metalora,
+                device=device,
+                output_suffix=".json",
+            )
 
     ddp_cleanup_if_needed()
 

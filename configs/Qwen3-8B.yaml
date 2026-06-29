@@ -115,6 +115,8 @@ test:
   num_workers: 4 
   num_samples: 1000
   shuffle: true
+  eval_mode: shine
+  checkpoint_dir: null
   judger_model: gpt-4.1-nano
   max_concurrency: 32
   max_retries: 6
