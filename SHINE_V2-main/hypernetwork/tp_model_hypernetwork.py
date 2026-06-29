@@ -703,14 +703,34 @@ class TPModelHypernetwork(nn.Module):
         # CE paths below rely on this too), so argmax is globally correct.
         # ------------------------------------------------------------------
         if return_acc:
-            keep = (flat_labels != -100).nonzero(as_tuple=True)[0]
-            n_corr = 0
-            for i in range(0, keep.numel(), 1024):
-                idx = keep[i:i + 1024]
-                pred = self.llm.lm_head(flat_hs[idx]).argmax(dim=-1)
-                n_corr += int((pred == flat_labels[idx]).sum().item())
-            self._last_eval_acc_correct = n_corr
-            self._last_eval_acc_total = int(keep.numel())
+            # no_grad: argmax accuracy must not extend the autograd graph (this
+            # path also runs during training when train-acc logging is on).
+            with torch.no_grad():
+                keep = flat_labels != -100                      # (N,) answer-token mask
+                keep_idx = keep.nonzero(as_tuple=True)[0]
+                corr = torch.zeros_like(flat_labels, dtype=torch.bool)
+                n_corr = 0
+                for i in range(0, keep_idx.numel(), 1024):
+                    idx = keep_idx[i:i + 1024]
+                    pred = self.llm.lm_head(flat_hs[idx]).argmax(dim=-1)
+                    c = pred == flat_labels[idx]
+                    corr[idx] = c
+                    n_corr += int(c.sum().item())
+                # (1) token-level accuracy (lenient: per answer-token, incl. scaffolding)
+                self._last_eval_acc_correct = n_corr
+                self._last_eval_acc_total = int(keep_idx.numel())
+                # (2) answer-level exact match (strict: a contiguous run of answer
+                #     tokens counts only if EVERY token is argmax-correct -> getting
+                #     just the easy scaffolding right scores 0). The -100 question
+                #     tokens split the sequence into one run per answer.
+                prev = torch.zeros_like(keep)
+                prev[1:] = keep[:-1]
+                run_id = torch.cumsum((keep & ~prev).long(), dim=0)   # 1..R at keep positions
+                num_runs = int(run_id[keep].amax().item()) if keep.any() else 0
+                wrong = keep & ~corr
+                num_bad = int(torch.unique(run_id[wrong]).numel()) if wrong.any() else 0
+                self._last_eval_ans_correct = num_runs - num_bad
+                self._last_eval_ans_total = num_runs
 
         # ------------------------------------------------------------------
         # per-token loss path (debug only): materialise full logits, use
