@@ -1187,7 +1187,7 @@ def _tp_run_evaluation(
 
                 # Step+1, get_reset_stats, then threshold reset (same order as training)
                 if model.detach_state is not None:
-                    _ds_batch_size = model.detach_state._local_batch_size
+                    _ds_batch_size = getattr(model.detach_state, "_local_batch_size", 0)
                     for _si in range(_ds_batch_size):
                         model.detach_state.update_steps(_si)
                     _eval_reset_ratio, _eval_mean_upd = model.detach_state.get_reset_stats()
