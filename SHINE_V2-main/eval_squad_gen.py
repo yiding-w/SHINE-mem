@@ -28,6 +28,12 @@ from utils.mytokenizer import create_tokenizer, NOTHINKING_CHAT_TEMPLATE
 from utils.myloradict import concat_loradict
 
 
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover
+    tqdm = None
+
+
 def _strip_think(text: str) -> str:
     m = re.split(r"</think>", text, maxsplit=1)
     out = (m[1] if len(m) > 1 else m[0]).strip()
@@ -195,7 +201,18 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
     total_f1 = 0.0
     total_em = 0.0
 
-    for idx, ex in enumerate(records):
+    iterator = enumerate(records)
+    pbar = None
+    if tqdm is not None:
+        pbar = tqdm(
+            iterator,
+            total=len(records),
+            desc="SQuAD eval",
+            dynamic_ncols=True,
+        )
+        iterator = pbar
+
+    for idx, ex in iterator:
         context = str(ex["context"]).strip()
         question = str(ex["question"]).strip()
         golds = _answers_text(ex)
@@ -219,6 +236,8 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
         em = max(_exact_match(pred, gold) for gold in golds)
         total_f1 += f1
         total_em += em
+        avg_f1 = total_f1 / (idx + 1)
+        avg_em = total_em / (idx + 1)
         outputs.append({
             "id": ex.get("id", str(idx)),
             "context": context,
@@ -229,10 +248,12 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
             "em": em,
         })
 
+        if pbar is not None:
+            pbar.set_postfix(f1=f"{avg_f1:.4f}", em=f"{avg_em:.4f}")
         if (idx + 1) % 50 == 0 or idx + 1 == len(records):
             print(
                 f"[squad_qa_gen] {idx + 1}/{len(records)} "
-                f"F1={total_f1 / (idx + 1):.4f} EM={total_em / (idx + 1):.4f}",
+                f"F1={avg_f1:.4f} EM={avg_em:.4f}",
                 flush=True,
             )
 
