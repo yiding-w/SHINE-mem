@@ -513,12 +513,16 @@ def main(cfg: DictConfig):
                 os.path.join("data", "squad"),
                 split="validation",
             )
-            data = data.shuffle(seed=42)
-            N = 1000
+            if cfg.test.get("shuffle", True):
+                data = data.shuffle(seed=42)
+            N = int(cfg.test.get("num_samples", 1000))
             subset = data.select(range(N))
             datasets.append(GroupedSquadDataset(subset, tokenizer, cfg.test.context_avg_len))
             if is_main_process():
-                logger.info(f"Loaded {cfg.test.source}/{testset} with {len(data)} samples")
+                logger.info(
+                    f"Loaded {cfg.test.source}/{testset} with {len(subset)} samples "
+                    f"(from {len(data)}, shuffle={cfg.test.get('shuffle', True)})"
+                )
         collator = SquadCollator(
             tokenizer=tokenizer,
             context_max_length=cfg.test.context_max_length,

@@ -113,6 +113,8 @@ test:
   save_path: test/${name}
   batch_size: 4
   num_workers: 4 
+  num_samples: 1000
+  shuffle: true
   judger_model: gpt-4.1-nano
   max_concurrency: 32
   max_retries: 6
