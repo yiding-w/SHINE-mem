@@ -51,7 +51,13 @@ def _strip_think(text: str) -> str:
 
 
 def _include_final_qa(cfg, model) -> bool:
-    """Cross-segment final_qa is meaningful only with non-empty detach_state."""
+    """Cross-segment final_qa is meaningful only with non-empty detach_state.
+    Override with MEM_FINAL_QA=1 (force on) / 0 (force off)."""
+    env = os.environ.get("MEM_FINAL_QA", "")
+    if env == "1":
+        return True
+    if env == "0":
+        return False
     ds_cfg = cfg.get("detach_state", None)
     if ds_cfg is None:
         return False

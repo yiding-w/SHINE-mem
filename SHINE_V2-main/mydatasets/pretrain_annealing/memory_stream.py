@@ -130,7 +130,14 @@ def _qa_to_messages(qa: List[Dict[str, str]]) -> List[Dict[str, str]]:
 
 
 def _include_final_qa(cfg) -> bool:
-    """Cross-segment final_qa is only learnable when detach_state accumulates W."""
+    """Cross-segment final_qa is only learnable when detach_state accumulates W.
+    Override with MEM_FINAL_QA=1 (force on, e.g. to measure final_qa on the
+    no-W baseline) or MEM_FINAL_QA=0 (force off); unset -> auto by detach_state."""
+    env = os.environ.get("MEM_FINAL_QA", "")
+    if env == "1":
+        return True
+    if env == "0":
+        return False
     ds_cfg = cfg.get("detach_state", None)
     if ds_cfg is None:
         return False
