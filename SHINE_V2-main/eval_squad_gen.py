@@ -35,8 +35,12 @@ except Exception:  # pragma: no cover
 
 
 def _strip_think(text: str) -> str:
+    text = text.strip()
+    if text.startswith("<think>") and "</think>" not in text:
+        return ""
     m = re.split(r"</think>", text, maxsplit=1)
     out = (m[1] if len(m) > 1 else m[0]).strip()
+    out = re.sub(r"^<think>\s*", "", out, flags=re.IGNORECASE).strip()
     out = re.sub(r"^(final answer|answer)\s*:\s*", "", out, flags=re.IGNORECASE).strip()
     return out.splitlines()[0].strip() if out else ""
 
@@ -126,13 +130,30 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
         eval_mode = "both" if plain_baseline else "shine"
         if context_baseline:
             eval_mode = "all" if eval_mode == "both" else "shine_context"
-    valid_modes = {"shine", "plain", "context", "both", "all", "shine_context"}
+    valid_modes = {
+        "shine",
+        "plain",
+        "context",
+        "both",
+        "all",
+        "shine_context",
+        "lora_context",
+        "shine_lora_context",
+    }
     if eval_mode not in valid_modes:
         raise ValueError(f"Unknown SQUAD_EVAL_MODE='{eval_mode}'. Expected one of {sorted(valid_modes)}")
 
-    run_shine = eval_mode in {"shine", "both", "all", "shine_context"}
+    run_shine = eval_mode in {
+        "shine",
+        "both",
+        "all",
+        "shine_context",
+        "lora_context",
+        "shine_lora_context",
+    }
     run_plain = eval_mode in {"plain", "both", "all"}
     run_context = eval_mode in {"context", "all", "shine_context"}
+    shine_include_context = query_include_context or eval_mode in {"lora_context", "shine_lora_context"}
 
     ctx_len_cap = int(cfg.data.get("context_seq_length", 2048))
     num_mem = int(getattr(model, "_num_mem_token", 0))
@@ -146,6 +167,14 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
     pad_id = tok.pad_token_id or 0
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
     eos_id = tok.eos_token_id
+    banned_token_ids = set()
+    for token in ("<think>", "</think>"):
+        tid = tok.convert_tokens_to_ids(token)
+        if isinstance(tid, int) and tid >= 0 and tid != tok.unk_token_id:
+            banned_token_ids.add(tid)
+        ids = tok(token, add_special_tokens=False, return_attention_mask=False)["input_ids"]
+        if len(ids) == 1:
+            banned_token_ids.add(int(ids[0]))
 
     records = _load_squad_records(data_path, split)
     if limit > 0:
@@ -156,7 +185,7 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
         f"\n[squad_qa_gen] {len(records)} examples split={split} data={data_path} "
         f"ctx_cap={ctx_len_cap} max_new={max_new} "
         f"eval_mode={eval_mode} prompt_context={run_context} "
-        f"shine_query_include_context={query_include_context}",
+        f"shine_query_include_context={shine_include_context}",
         flush=True,
     )
 
@@ -176,20 +205,26 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
         ctx[0, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=my_device)
         return ctx, torch.tensor([len(ids)], dtype=torch.long, device=my_device)
 
+    system_prompt = (
+        "You are a concise assistant. Output only the final answer, "
+        "in a few words, as short as possible. No explanations. "
+        "Do not output anything else."
+    )
+
     def _greedy(question: str, context: str, new_loradict, *, include_context: bool):
         if include_context:
             prompt = (
-                "Read the context and answer the question. "
-                "Return only the shortest answer span from the context.\n\n"
-                f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
+                f"Reference:\n{context}\n\n"
+                f"Based on the reference, answer this question:\n{question}"
             )
         else:
-            prompt = (
-                "Answer the question. Return only the shortest possible answer.\n\n"
-                f"Question: {question}\nAnswer:"
-            )
+            prompt = question
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
         ids = tok.apply_chat_template(
-            [{"role": "user", "content": prompt}],
+            messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=False,
@@ -211,7 +246,10 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
                     past_key_values=pkv,
                 )
                 pkv = out.past_key_values
-                nxt = int(model.llm.lm_head(out.last_hidden_state[:, -1, :]).argmax(-1).item())
+                logits = model.llm.lm_head(out.last_hidden_state[:, -1, :])
+                if banned_token_ids:
+                    logits[:, list(banned_token_ids)] = -torch.inf
+                nxt = int(logits.argmax(-1).item())
                 if nxt == im_end or nxt == eos_id:
                     break
                 gen.append(nxt)
@@ -265,7 +303,7 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
                 layer: concat_loradict([loradict[layer], model.metalora[layer]])
                 for layer in range(n_layers)
             }
-            pred = _greedy(question, context, new_loradict, include_context=query_include_context)
+            pred = _greedy(question, context, new_loradict, include_context=shine_include_context)
             f1 = max(_f1_score(pred, gold) for gold in golds)
             em = max(_exact_match(pred, gold) for gold in golds)
             total_f1 += f1
@@ -334,7 +372,7 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
         "num_examples": len(outputs),
         "split": split,
         "eval_mode": eval_mode,
-        "query_include_context": query_include_context,
+        "query_include_context": shine_include_context,
         "plain_baseline": run_plain,
         "context_baseline": run_context,
     }
