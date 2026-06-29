@@ -119,6 +119,20 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
         os.path.join("outputs", "squad_shine_v2", f"squad_{split}.json"),
     )
     query_include_context = os.environ.get("SQUAD_QUERY_INCLUDE_CONTEXT", "0") == "1"
+    plain_baseline = os.environ.get("SQUAD_PLAIN_BASELINE", "0") == "1"
+    context_baseline = os.environ.get("SQUAD_CONTEXT_BASELINE", "0") == "1"
+    eval_mode = os.environ.get("SQUAD_EVAL_MODE", "").strip().lower()
+    if not eval_mode:
+        eval_mode = "both" if plain_baseline else "shine"
+        if context_baseline:
+            eval_mode = "all" if eval_mode == "both" else "shine_context"
+    valid_modes = {"shine", "plain", "context", "both", "all", "shine_context"}
+    if eval_mode not in valid_modes:
+        raise ValueError(f"Unknown SQUAD_EVAL_MODE='{eval_mode}'. Expected one of {sorted(valid_modes)}")
+
+    run_shine = eval_mode in {"shine", "both", "all", "shine_context"}
+    run_plain = eval_mode in {"plain", "both", "all"}
+    run_context = eval_mode in {"context", "all", "shine_context"}
 
     ctx_len_cap = int(cfg.data.get("context_seq_length", 2048))
     num_mem = int(getattr(model, "_num_mem_token", 0))
@@ -140,7 +154,8 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     print(
         f"\n[squad_qa_gen] {len(records)} examples split={split} data={data_path} "
-        f"ctx_cap={ctx_len_cap} max_new={max_new} query_include_context={query_include_context}",
+        f"ctx_cap={ctx_len_cap} max_new={max_new} "
+        f"eval_mode={eval_mode} query_include_context={query_include_context}",
         flush=True,
     )
 
@@ -160,8 +175,8 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
         ctx[0, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=my_device)
         return ctx, torch.tensor([len(ids)], dtype=torch.long, device=my_device)
 
-    def _greedy(question: str, context: str, new_loradict):
-        if query_include_context:
+    def _greedy(question: str, context: str, new_loradict, *, include_context: bool):
+        if include_context:
             prompt = f"Context:\n{context}\n\nQuestion: {question}\nAnswer:"
         else:
             prompt = question
@@ -200,6 +215,10 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
     outputs = []
     total_f1 = 0.0
     total_em = 0.0
+    plain_total_f1 = 0.0
+    plain_total_em = 0.0
+    context_total_f1 = 0.0
+    context_total_em = 0.0
 
     iterator = enumerate(records)
     pbar = None
@@ -217,53 +236,115 @@ def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
         question = str(ex["question"]).strip()
         golds = _answers_text(ex)
 
-        ctx_ids, ctx_lens = _context_tensor(context)
-        mem = model.compute_memory_states(
-            ctx_ids,
-            None,
-            ctx_lens,
-            nograd_loradict=None,
-            nograd_wdict=None,
-        )
-        loradict = model.generate_loradict(mem)
-        new_loradict = {
-            layer: concat_loradict([loradict[layer], model.metalora[layer]])
-            for layer in range(n_layers)
-        }
-        pred = _greedy(question, context, new_loradict)
-
-        f1 = max(_f1_score(pred, gold) for gold in golds)
-        em = max(_exact_match(pred, gold) for gold in golds)
-        total_f1 += f1
-        total_em += em
-        avg_f1 = total_f1 / (idx + 1)
-        avg_em = total_em / (idx + 1)
-        outputs.append({
+        row = {
             "id": ex.get("id", str(idx)),
             "context": context,
             "question": question,
             "answers": golds,
-            "prediction": pred,
-            "f1": f1,
-            "em": em,
-        })
+        }
+
+        if run_shine:
+            ctx_ids, ctx_lens = _context_tensor(context)
+            mem = model.compute_memory_states(
+                ctx_ids,
+                None,
+                ctx_lens,
+                nograd_loradict=None,
+                nograd_wdict=None,
+            )
+            loradict = model.generate_loradict(mem)
+            new_loradict = {
+                layer: concat_loradict([loradict[layer], model.metalora[layer]])
+                for layer in range(n_layers)
+            }
+            pred = _greedy(question, context, new_loradict, include_context=query_include_context)
+            f1 = max(_f1_score(pred, gold) for gold in golds)
+            em = max(_exact_match(pred, gold) for gold in golds)
+            total_f1 += f1
+            total_em += em
+            row.update({
+                "prediction": pred,
+                "f1": f1,
+                "em": em,
+            })
+
+        if run_plain:
+            plain_pred = _greedy(question, context, None, include_context=False)
+            plain_f1 = max(_f1_score(plain_pred, gold) for gold in golds)
+            plain_em = max(_exact_match(plain_pred, gold) for gold in golds)
+            plain_total_f1 += plain_f1
+            plain_total_em += plain_em
+            row.update({
+                "plain_prediction": plain_pred,
+                "plain_f1": plain_f1,
+                "plain_em": plain_em,
+            })
+
+        if run_context:
+            context_pred = _greedy(question, context, None, include_context=True)
+            context_f1 = max(_f1_score(context_pred, gold) for gold in golds)
+            context_em = max(_exact_match(context_pred, gold) for gold in golds)
+            context_total_f1 += context_f1
+            context_total_em += context_em
+            row.update({
+                "context_prediction": context_pred,
+                "context_f1": context_f1,
+                "context_em": context_em,
+            })
+
+        outputs.append(row)
 
         if pbar is not None:
-            pbar.set_postfix(f1=f"{avg_f1:.4f}", em=f"{avg_em:.4f}")
+            postfix = {}
+            if run_shine:
+                postfix["f1"] = f"{total_f1 / (idx + 1):.4f}"
+                postfix["em"] = f"{total_em / (idx + 1):.4f}"
+            if run_plain:
+                postfix["plain_f1"] = f"{plain_total_f1 / (idx + 1):.4f}"
+                postfix["plain_em"] = f"{plain_total_em / (idx + 1):.4f}"
+            if run_context:
+                postfix["ctx_f1"] = f"{context_total_f1 / (idx + 1):.4f}"
+                postfix["ctx_em"] = f"{context_total_em / (idx + 1):.4f}"
+            pbar.set_postfix(postfix)
         if (idx + 1) % 50 == 0 or idx + 1 == len(records):
-            print(
-                f"[squad_qa_gen] {idx + 1}/{len(records)} "
-                f"F1={avg_f1:.4f} EM={avg_em:.4f}",
-                flush=True,
-            )
+            msg = f"[squad_qa_gen] {idx + 1}/{len(records)}"
+            if run_shine:
+                msg += f" | SHINE F1={total_f1 / (idx + 1):.4f} EM={total_em / (idx + 1):.4f}"
+            if run_plain:
+                msg += (
+                    f" | plain_noctx F1={plain_total_f1 / (idx + 1):.4f} "
+                    f"EM={plain_total_em / (idx + 1):.4f}"
+                )
+            if run_context:
+                msg += (
+                    f" | plain_ctx F1={context_total_f1 / (idx + 1):.4f} "
+                    f"EM={context_total_em / (idx + 1):.4f}"
+                )
+            print(msg, flush=True)
 
     summary = {
         "num_examples": len(outputs),
-        "avg_f1": total_f1 / max(1, len(outputs)),
-        "avg_em": total_em / max(1, len(outputs)),
         "split": split,
+        "eval_mode": eval_mode,
         "query_include_context": query_include_context,
+        "plain_baseline": run_plain,
+        "context_baseline": run_context,
     }
+    if run_shine:
+        summary.update({
+            "avg_f1": total_f1 / max(1, len(outputs)),
+            "avg_em": total_em / max(1, len(outputs)),
+        })
+    if run_plain:
+        summary.update({
+            "plain_noctx_avg_f1": plain_total_f1 / max(1, len(outputs)),
+            "plain_noctx_avg_em": plain_total_em / max(1, len(outputs)),
+        })
+    if run_context:
+        summary.update({
+            "plain_ctx_avg_f1": context_total_f1 / max(1, len(outputs)),
+            "plain_ctx_avg_em": context_total_em / max(1, len(outputs)),
+        })
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump({"summary": summary, "examples": outputs}, f, ensure_ascii=False, indent=2)
 

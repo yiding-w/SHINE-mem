@@ -99,6 +99,18 @@ def _set_env_from_cfg(cfg: DictConfig) -> None:
     if qic is not None:
         os.environ["SQUAD_QUERY_INCLUDE_CONTEXT"] = "1" if bool(qic) else "0"
 
+    eval_mode = _cfg_select(cfg, "squad.eval_mode")
+    if eval_mode is not None:
+        os.environ["SQUAD_EVAL_MODE"] = str(eval_mode)
+
+    plain = _cfg_select(cfg, "squad.plain_baseline")
+    if plain is not None:
+        os.environ["SQUAD_PLAIN_BASELINE"] = "1" if bool(plain) else "0"
+
+    context = _cfg_select(cfg, "squad.context_baseline")
+    if context is not None:
+        os.environ["SQUAD_CONTEXT_BASELINE"] = "1" if bool(context) else "0"
+
 
 @hydra.main(version_base=None, config_path="configs", config_name="main_pretrain_annealing")
 def main(cfg: DictConfig) -> None:
