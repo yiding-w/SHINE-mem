@@ -35,6 +35,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import zlib
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -141,19 +143,31 @@ def _include_final_qa(cfg) -> bool:
 
 class MemoryStreamDataset(BaseDataset):
     def __init__(self, model_path: str, records: List[Dict], context_seq_length: int,
-                 tokenizer_cfg=None, include_final_qa: bool = False):
+                 tokenizer_cfg=None, include_final_qa: bool = False,
+                 apply_deferred: bool = False):
         super().__init__(model_path, tokenizer_cfg=tokenizer_cfg)
         self.tokenizer = create_tokenizer(model_path, tokenizer_cfg=tokenizer_cfg,
                                            chat_template=NOTHINKING_CHAT_TEMPLATE)
         self.budget = int(context_seq_length)
         self.include_final_qa = bool(include_final_qa)
+        # Deferred cross-segment QA augmentation (MEM_DEFERRED_QA) is applied to
+        # TRAIN only; val stays untouched so val_ppl / save_best stays meaningful.
+        self.apply_deferred = apply_deferred
         self.samples: List[Dict[str, Any]] = []
         self._build(records)
 
     def _build(self, records: List[Dict]) -> None:
         """One stream sample per segment: context=segment history (writes W),
         conversation=per-segment QA (answer-only loss). The LAST segment also
-        carries the cross-segment final_qa (W then holds all prior segments)."""
+        carries the cross-segment final_qa (W then holds all prior segments).
+
+        MEM_DEFERRED_QA=N (env, default 0): for each segment si>0, also append N
+        questions drawn from EARLIER segments (j<si). At this stream position W
+        holds segments 0..si-1, so the answer lives ONLY in accumulated W -> this
+        forces the hypernetwork to actually learn cross-segment retrieval (raises
+        the cross-segment QA ratio WITHOUT regenerating data). Selection is
+        crc32-seeded per (repo, si) so it is identical across DP/TP ranks."""
+        n_deferred = int(os.environ.get("MEM_DEFERRED_QA", "0")) if self.apply_deferred else 0
         for rec in records:
             repo = str(rec.get("id"))
             segments = rec["segments"]
@@ -164,6 +178,16 @@ class MemoryStreamDataset(BaseDataset):
                 qa = list(seg.get("qa", []))
                 if self.include_final_qa and si == K - 1 and final_qa:
                     qa = qa + final_qa  # cross-segment QA exercises reading accumulated W
+                if n_deferred > 0 and si > 0:
+                    pool = []
+                    for pj in range(si):  # only EARLIER segments (answer is in W)
+                        for q in segments[pj].get("qa", []):
+                            q2 = dict(q)
+                            q2["type"] = str(q.get("type", "segment_retrieval")) + "_deferred"
+                            pool.append(q2)
+                    if pool:
+                        rng = random.Random(zlib.crc32(f"{repo}:{si}".encode()))
+                        qa = qa + rng.sample(pool, min(n_deferred, len(pool)))
                 conv_ids = _encode_turns(self.tokenizer, _qa_to_messages(qa))
                 self.samples.append({
                     "context_token_ids": ctx_ids,
@@ -245,17 +269,33 @@ def preprocess(cfg, model_path: str):
     return None
 
 
+def filter_by_segments(records: List[Dict]) -> List[Dict]:
+    """Keep only histories whose n_segments is in MEM_SEGMENTS (e.g. "8,16").
+    Lets you train/eval on just the short (easy) histories without regenerating
+    data. Unset/empty -> keep everything. Falls back to len(segments) if a
+    record has no n_segments field."""
+    raw = os.environ.get("MEM_SEGMENTS", "").strip()
+    if not raw:
+        return records
+    keep = {int(x) for x in raw.split(",") if x.strip()}
+    out = [r for r in records
+           if int(r.get("n_segments", len(r.get("segments", [])))) in keep]
+    logger.info(f"[memory_stream] MEM_SEGMENTS={sorted(keep)} -> kept {len(out)}/{len(records)} histories")
+    return out
+
+
 def create_dataset_and_collator(cfg, model_path: str, pad_token_id: int, num_mem_token: int = 0):
     data_cfg = cfg.data
     train_path, _ = _data_files(data_cfg)
-    records = _load_jsonl(train_path)
+    records = filter_by_segments(_load_jsonl(train_path))
     ctx_len = int(data_cfg.context_seq_length)
     conv_len = int(data_cfg.conv_seq_length)
     tok_cfg = cfg.get("tokenizer", None)
     include_final = _include_final_qa(cfg)
 
     dataset = MemoryStreamDataset(model_path, records, ctx_len, tokenizer_cfg=tok_cfg,
-                                  include_final_qa=include_final)
+                                  include_final_qa=include_final,
+                                  apply_deferred=True)
     collator = MemoryStreamCollator(model_path, ctx_len, conv_len, pad_token_id=pad_token_id,
                                     num_mem_token=num_mem_token, tokenizer_cfg=tok_cfg)
     logger.info(f"[memory_stream] {len(records)} histories -> {len(dataset)} stream samples "
@@ -269,7 +309,7 @@ def create_val_dataset(cfg, model_path: str, pad_token_id: int, num_mem_token: i
     _, val_path = _data_files(data_cfg)
     if not val_path or not os.path.isfile(val_path):
         return None
-    records = _load_jsonl(val_path)
+    records = filter_by_segments(_load_jsonl(val_path))
     ctx_len = int(data_cfg.context_seq_length)
     tok_cfg = cfg.get("tokenizer", None)
     include_final = _include_final_qa(cfg)
