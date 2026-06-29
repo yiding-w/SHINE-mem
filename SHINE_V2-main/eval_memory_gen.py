@@ -50,6 +50,14 @@ def _strip_think(text: str) -> str:
     return (m[1] if len(m) > 1 else m[0]).strip()
 
 
+def _include_final_qa(cfg, model) -> bool:
+    """Cross-segment final_qa is meaningful only with non-empty detach_state."""
+    ds_cfg = cfg.get("detach_state", None)
+    if ds_cfg is None:
+        return False
+    return model.detach_state is not None and str(ds_cfg.get("type", "empty")) != "empty"
+
+
 @torch.no_grad()
 def run_memory_qa_gen(model, cfg, tp_cfg, my_device):
     from utils.myddp import is_main_process, barrier
@@ -75,8 +83,10 @@ def run_memory_qa_gen(model, cfg, tp_cfg, my_device):
     eos_id = tok.eos_token_id
 
     records = _load_jsonl(test_file)[:n_hist]
+    include_final = _include_final_qa(cfg, model)
     print(f"\n[memory_qa_gen] {len(records)} histories from {test_file} "
-          f"(num_mem={num_mem}, ctx_cap={ctx_len_cap}, max_new={max_new})", flush=True)
+          f"(num_mem={num_mem}, ctx_cap={ctx_len_cap}, max_new={max_new}, "
+          f"include_final_qa={include_final})", flush=True)
 
     model.eval()
     hit, total = collections.Counter(), collections.Counter()
@@ -150,7 +160,7 @@ def run_memory_qa_gen(model, cfg, tp_cfg, my_device):
             new_loradict = {l: concat_loradict([loradict[l], model.metalora[l]]) for l in range(n_layers)}
 
             qas = list(seg.get("qa", [])) if i in sample_idx else []
-            if i == K - 1 and final_qa:
+            if include_final and i == K - 1 and final_qa:
                 qas = qas + final_qa
             for qa in qas:
                 pred = _greedy(qa["question"], new_loradict, ds_l, ds_w)

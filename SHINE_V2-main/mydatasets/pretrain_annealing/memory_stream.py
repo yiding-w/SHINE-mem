@@ -12,7 +12,8 @@ Per history (segments s_1..s_K, one stream step each, all sharing repo=id):
     step i : context_ids = s_i.history  (writes s_i into W),
              conversation_ids = s_i per-segment QA  (answer-only loss)
     last step additionally appends final_qa (cross-segment: conflict/multi-hop/
-             temporal/TTL) -> exercises reading the accumulated W.
+             temporal/TTL) only when detach_state is active -> exercises reading
+             the accumulated W.
 
 WHY per-segment QA (not next-segment reconstruction): detach_state stores W with
 requires_grad=False, so the final QA loss cannot backprop into earlier steps. Each
@@ -126,17 +127,26 @@ def _qa_to_messages(qa: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return msgs
 
 
+def _include_final_qa(cfg) -> bool:
+    """Cross-segment final_qa is only learnable when detach_state accumulates W."""
+    ds_cfg = cfg.get("detach_state", None)
+    if ds_cfg is None:
+        return False
+    return str(ds_cfg.get("type", "empty")) != "empty"
+
+
 # ---------------------------------------------------------------------------
 # Dataset: builds the ordered, repo-contiguous sample list (on-the-fly tokenize)
 # ---------------------------------------------------------------------------
 
 class MemoryStreamDataset(BaseDataset):
     def __init__(self, model_path: str, records: List[Dict], context_seq_length: int,
-                 tokenizer_cfg=None):
+                 tokenizer_cfg=None, include_final_qa: bool = False):
         super().__init__(model_path, tokenizer_cfg=tokenizer_cfg)
         self.tokenizer = create_tokenizer(model_path, tokenizer_cfg=tokenizer_cfg,
                                            chat_template=NOTHINKING_CHAT_TEMPLATE)
         self.budget = int(context_seq_length)
+        self.include_final_qa = bool(include_final_qa)
         self.samples: List[Dict[str, Any]] = []
         self._build(records)
 
@@ -152,7 +162,7 @@ class MemoryStreamDataset(BaseDataset):
             for si, seg in enumerate(segments):
                 ctx_ids = _encode_turns(self.tokenizer, seg["history_turns"])
                 qa = list(seg.get("qa", []))
-                if si == K - 1 and final_qa:
+                if self.include_final_qa and si == K - 1 and final_qa:
                     qa = qa + final_qa  # cross-segment QA exercises reading accumulated W
                 conv_ids = _encode_turns(self.tokenizer, _qa_to_messages(qa))
                 self.samples.append({
@@ -242,12 +252,14 @@ def create_dataset_and_collator(cfg, model_path: str, pad_token_id: int, num_mem
     ctx_len = int(data_cfg.context_seq_length)
     conv_len = int(data_cfg.conv_seq_length)
     tok_cfg = cfg.get("tokenizer", None)
+    include_final = _include_final_qa(cfg)
 
-    dataset = MemoryStreamDataset(model_path, records, ctx_len, tokenizer_cfg=tok_cfg)
+    dataset = MemoryStreamDataset(model_path, records, ctx_len, tokenizer_cfg=tok_cfg,
+                                  include_final_qa=include_final)
     collator = MemoryStreamCollator(model_path, ctx_len, conv_len, pad_token_id=pad_token_id,
                                     num_mem_token=num_mem_token, tokenizer_cfg=tok_cfg)
     logger.info(f"[memory_stream] {len(records)} histories -> {len(dataset)} stream samples "
-                f"(ctx_len={ctx_len}, conv_len={conv_len})")
+                f"(ctx_len={ctx_len}, conv_len={conv_len}, include_final_qa={include_final})")
     return dataset, collator
 
 
@@ -260,7 +272,10 @@ def create_val_dataset(cfg, model_path: str, pad_token_id: int, num_mem_token: i
     records = _load_jsonl(val_path)
     ctx_len = int(data_cfg.context_seq_length)
     tok_cfg = cfg.get("tokenizer", None)
-    return MemoryStreamDataset(model_path, records, ctx_len, tokenizer_cfg=tok_cfg)
+    include_final = _include_final_qa(cfg)
+    logger.info(f"[memory_stream] val include_final_qa={include_final}")
+    return MemoryStreamDataset(model_path, records, ctx_len, tokenizer_cfg=tok_cfg,
+                               include_final_qa=include_final)
 
 
 def debug(cfg, model_path: str):

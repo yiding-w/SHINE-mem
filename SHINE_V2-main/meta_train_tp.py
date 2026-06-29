@@ -1577,7 +1577,10 @@ def tp_main(cfg: DictConfig):
     # Determine resume checkpoint
     resume_checkpoint_dir = None
     # Inference modes never have/need optimizer state — load weights only.
-    load_model_only_flag = os.environ.get("MEMORY_QA_GEN", "") == "1"
+    load_model_only_flag = (
+        os.environ.get("MEMORY_QA_GEN", "") == "1"
+        or os.environ.get("SQUAD_QA_GEN", "") == "1"
+    )
 
     # Read resume_from config (same key as PP: supports "latest", path, or null/None)
     _resume_from_raw = cfg.training.get("resume_from", "latest")
@@ -1723,6 +1726,14 @@ def tp_main(cfg: DictConfig):
         run_memory_qa_gen(model, cfg, tp_cfg, my_device)
         if is_main_process_per_node():
             logger.info("[MEMORY_QA_GEN] done. Exiting.")
+        cleanup_distributed()
+        os._exit(0)
+
+    if os.environ.get("SQUAD_QA_GEN", "") == "1":
+        from eval_squad_gen import run_squad_qa_gen
+        run_squad_qa_gen(model, cfg, tp_cfg, my_device)
+        if is_main_process_per_node():
+            logger.info("[SQUAD_QA_GEN] done. Exiting.")
         cleanup_distributed()
         os._exit(0)
 
