@@ -98,7 +98,7 @@ def _load_squad_records(path: str | None, split: str) -> List[Dict[str, Any]]:
 
 @torch.no_grad()
 def run_squad_qa_gen(model, cfg, tp_cfg, my_device):
-    from utils.myddp import is_main_process, barrier
+    from utils.myparallel import is_main_process, barrier
 
     if not is_main_process():
         barrier()
