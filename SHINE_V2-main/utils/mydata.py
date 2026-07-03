@@ -448,7 +448,12 @@ class PipelineDataLoader:
         self._batch_counter = 0
 
     def __iter__(self):
-        """Initialize iterator for the data loader."""
+        """Initialize iterator for the data loader.
+
+        If ``_batches_to_skip`` > 0 (set by ``load_state_dict``), fast-forwards
+        the underlying DataLoader iterator by consuming (and discarding) that
+        many batches so that training resumes from the exact position.
+        """
         if not self.is_first_stage:
             # Reset batch counter so non-first stages can track epoch boundary
             self._batch_counter = 0
@@ -465,6 +470,21 @@ class PipelineDataLoader:
             self._dl_generator_pre_iter_state = self._dl_generator.get_state().clone()
 
         self.iter = iter(self.data_loader)
+
+        # Fast-forward: skip batches already processed before checkpoint
+        _skip = getattr(self, '_batches_to_skip', 0)
+        if _skip > 0:
+            for _ in range(_skip):
+                try:
+                    next(self.iter)
+                except StopIteration:
+                    break
+            # _batch_counter stays at the restored value (already accounts for skipped batches)
+            self._batches_to_skip = 0  # Only skip once after resume
+        else:
+            # Normal epoch start: reset batch counter
+            self._batch_counter = 0
+
         return self
 
     def __next__(self):
@@ -491,6 +511,7 @@ class PipelineDataLoader:
 
         try:
             batch = next(self.iter)
+            self._batch_counter += 1  # Track position for checkpoint resume
 
             # Collator returns List[Dict] (list of sub-items).
             # Each sub-item is a dict with standard tensor keys.
@@ -635,10 +656,12 @@ class PipelineDataLoader:
         Restores the generator to the state it had BEFORE ``iter()`` was
         called for the saved epoch.  When the training loop subsequently
         calls ``iter()``, the generator will seed workers identically to
-        the original run.
+        the original run, and fast-forward past already-processed batches.
         """
         self.current_epoch = state.get("current_epoch", 0)
         self._batch_counter = state.get("batch_counter", 0)
+        # Store how many batches to skip on next iter() call
+        self._batches_to_skip = self._batch_counter
         if "dl_generator_pre_iter_state" in state and hasattr(self, "_dl_generator"):
             self._dl_generator.set_state(state["dl_generator_pre_iter_state"])
             self._dl_generator_pre_iter_state = state["dl_generator_pre_iter_state"].clone()

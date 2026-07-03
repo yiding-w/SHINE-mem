@@ -19,6 +19,7 @@
 #   --detach_state <name>      e.g. origin, full
 #   --parallel <pp|tp>         Parallelism strategy (default: pp)
 #   --tp_size <N>              Tensor parallel size (default: 2, only for --parallel tp)
+#   --sp_size <N>              Sequence parallel size (default: 1, only for --parallel tp)
 
 set -e
 
@@ -43,9 +44,12 @@ DETACH_STATE_CONFIG=""
 FORCE_OVERWRITE=""
 PARALLEL_MODE="pp"
 TP_SIZE="2"
+SP_SIZE="1"
 NODES_SPEC=""
 VERBOSE=""
 EVALUATION_BASELINE=""
+EVALUATION_EXPORT_LORA=""
+EXPORT_LORA_MAX_TRAJ=""
 shift 1 2>/dev/null || true
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -113,6 +117,10 @@ while [[ $# -gt 0 ]]; do
             TP_SIZE="$2"
             shift 2
             ;;
+        --sp_size)
+            SP_SIZE="$2"
+            shift 2
+            ;;
         --verbose)
             VERBOSE="1"
             shift 1
@@ -120,6 +128,14 @@ while [[ $# -gt 0 ]]; do
         --evaluation_baseline)
             EVALUATION_BASELINE="1"
             shift 1
+            ;;
+        --evaluation_export_lora)
+            EVALUATION_EXPORT_LORA="1"
+            shift 1
+            ;;
+        --export_lora_max_traj)
+            EXPORT_LORA_MAX_TRAJ="$2"
+            shift 2
             ;;
         *)
             echo "Unknown option: $1"
@@ -142,7 +158,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --force_overwrite           Force resume even if configs differ from checkpoint"
             echo "  --parallel <pp|tp>          Parallelism strategy (default: pp)"
             echo "  --tp_size <N>               Tensor parallel size (default: 2, only for --parallel tp)"
+            echo "  --sp_size <N>               Sequence parallel size (default: 1, only for --parallel tp)"
             echo "  --evaluation_baseline       Run only one baseline evaluation (base LLM, no hypernetwork) then exit"
+            echo "  --evaluation_export_lora    Run evaluation and export LoRA adapters per repo then exit"
+            echo "  --export_lora_max_traj <N>  Max trajectories per repo for export_lora mode (required)"
             echo "  --verbose                   Show GPU memory/utilization in status"
             exit 1
             ;;
@@ -169,6 +188,11 @@ if [ "$ACTION" = "start" ]; then
     fi
     if [ "$PARALLEL_MODE" != "pp" ] && [ "$PARALLEL_MODE" != "tp" ]; then
         echo "Error: --parallel must be 'pp' or 'tp', got '$PARALLEL_MODE'."
+        exit 1
+    fi
+    if [ "$PARALLEL_MODE" = "pp" ] && [ "$SP_SIZE" -gt 1 ]; then
+        echo "Error: Sequence parallelism (--sp_size $SP_SIZE) is not supported with pipeline parallelism (--parallel pp)."
+        echo "  PP + SP is not yet implemented. Use --parallel tp with --sp_size."
         exit 1
     fi
     if [ -z "$EXP_NAME" ]; then
@@ -489,8 +513,9 @@ case "$ACTION" in
         echo "Log path: $LOG_PATH"
         if [ "$PARALLEL_MODE" = "tp" ]; then
             echo "TP size: $TP_SIZE"
-            echo "DP per node: $((8 / TP_SIZE))"
-            echo "Total DP: $(( (8 / TP_SIZE) * TOTAL_NODES ))"
+            echo "SP size: $SP_SIZE"
+            echo "DP per node: $((8 / (TP_SIZE * SP_SIZE)))"
+            echo "Total DP: $(( (8 / (TP_SIZE * SP_SIZE)) * TOTAL_NODES ))"
         else
             echo "Pipeline stages: $PIPELINE_STAGES"
         fi
@@ -524,10 +549,10 @@ case "$ACTION" in
             echo "Starting node $rank on $node"
             if [ "$PARALLEL_MODE" = "tp" ]; then
                 remote_exec "$user" "$node" "$key" "$password_flag" \
-"mkdir -p $WORK_DIR/$LOG_PATH && cd $WORK_DIR && export WANDB_NAME='$WANDB_RUN_NAME' && export TRAINING_MODE='$TRAINING_MODE' && export EXP_NAME='$EXP_NAME' && export ANNEALING_NAME='$ANNEALING_NAME' && export SFT_NAME='$SFT_NAME' && export DATA_CONFIG='$DATA_CONFIG' && export MODEL_CONFIG='$MODEL_CONFIG' && export TRAINING_CONFIG='$TRAINING_CONFIG' && export OPTIMIZER_CONFIG='$OPTIMIZER_CONFIG' && export M2P_TRANSFORMER_CONFIG='$M2P_TRANSFORMER_CONFIG' && export DEBUG_CONFIG='$DEBUG_CONFIG' && export TOKENIZER_CONFIG='$TOKENIZER_CONFIG' && export DETACH_STATE_CONFIG='$DETACH_STATE_CONFIG' && export LAUNCH_CMD='$LAUNCH_CMD' && export FORCE_OVERWRITE='$FORCE_OVERWRITE' && export EVALUATION_BASELINE='$EVALUATION_BASELINE' && export LOG_SUBDIR='$LOG_SUBDIR' && nohup ./scripts/run_training_tp.sh $TOTAL_NODES $rank $MASTER_IP $TP_SIZE > $LOG_PATH/node_${rank}.log 2>&1 &" &
+"mkdir -p $WORK_DIR/$LOG_PATH && cd $WORK_DIR && export WANDB_NAME='$WANDB_RUN_NAME' && export TRAINING_MODE='$TRAINING_MODE' && export EXP_NAME='$EXP_NAME' && export ANNEALING_NAME='$ANNEALING_NAME' && export SFT_NAME='$SFT_NAME' && export DATA_CONFIG='$DATA_CONFIG' && export MODEL_CONFIG='$MODEL_CONFIG' && export TRAINING_CONFIG='$TRAINING_CONFIG' && export OPTIMIZER_CONFIG='$OPTIMIZER_CONFIG' && export M2P_TRANSFORMER_CONFIG='$M2P_TRANSFORMER_CONFIG' && export DEBUG_CONFIG='$DEBUG_CONFIG' && export TOKENIZER_CONFIG='$TOKENIZER_CONFIG' && export DETACH_STATE_CONFIG='$DETACH_STATE_CONFIG' && export LAUNCH_CMD='$LAUNCH_CMD' && export FORCE_OVERWRITE='$FORCE_OVERWRITE' && export EVALUATION_BASELINE='$EVALUATION_BASELINE' && export EVALUATION_EXPORT_LORA='$EVALUATION_EXPORT_LORA' && export EXPORT_LORA_MAX_TRAJ='$EXPORT_LORA_MAX_TRAJ' && export LOG_SUBDIR='$LOG_SUBDIR' && export DEBUG_RESUME='${DEBUG_RESUME:-}' && nohup ./scripts/run_training_tp.sh $TOTAL_NODES $rank $MASTER_IP $TP_SIZE $SP_SIZE > $LOG_PATH/node_${rank}.log 2>&1 &" &
             else
                 remote_exec "$user" "$node" "$key" "$password_flag" \
-"mkdir -p $WORK_DIR/$LOG_PATH && cd $WORK_DIR && export WANDB_NAME='$WANDB_RUN_NAME' && export TRAINING_MODE='$TRAINING_MODE' && export EXP_NAME='$EXP_NAME' && export ANNEALING_NAME='$ANNEALING_NAME' && export SFT_NAME='$SFT_NAME' && export DATA_CONFIG='$DATA_CONFIG' && export MODEL_CONFIG='$MODEL_CONFIG' && export TRAINING_CONFIG='$TRAINING_CONFIG' && export OPTIMIZER_CONFIG='$OPTIMIZER_CONFIG' && export M2P_TRANSFORMER_CONFIG='$M2P_TRANSFORMER_CONFIG' && export DEBUG_CONFIG='$DEBUG_CONFIG' && export TOKENIZER_CONFIG='$TOKENIZER_CONFIG' && export DETACH_STATE_CONFIG='$DETACH_STATE_CONFIG' && export LAUNCH_CMD='$LAUNCH_CMD' && export FORCE_OVERWRITE='$FORCE_OVERWRITE' && export EVALUATION_BASELINE='$EVALUATION_BASELINE' && export LOG_SUBDIR='$LOG_SUBDIR' && nohup ./scripts/run_training.sh $TOTAL_NODES $rank $MASTER_IP $PIPELINE_STAGES > $LOG_PATH/node_${rank}.log 2>&1 &" &
+"mkdir -p $WORK_DIR/$LOG_PATH && cd $WORK_DIR && export WANDB_NAME='$WANDB_RUN_NAME' && export TRAINING_MODE='$TRAINING_MODE' && export EXP_NAME='$EXP_NAME' && export ANNEALING_NAME='$ANNEALING_NAME' && export SFT_NAME='$SFT_NAME' && export DATA_CONFIG='$DATA_CONFIG' && export MODEL_CONFIG='$MODEL_CONFIG' && export TRAINING_CONFIG='$TRAINING_CONFIG' && export OPTIMIZER_CONFIG='$OPTIMIZER_CONFIG' && export M2P_TRANSFORMER_CONFIG='$M2P_TRANSFORMER_CONFIG' && export DEBUG_CONFIG='$DEBUG_CONFIG' && export TOKENIZER_CONFIG='$TOKENIZER_CONFIG' && export DETACH_STATE_CONFIG='$DETACH_STATE_CONFIG' && export LAUNCH_CMD='$LAUNCH_CMD' && export FORCE_OVERWRITE='$FORCE_OVERWRITE' && export EVALUATION_BASELINE='$EVALUATION_BASELINE' && export EVALUATION_EXPORT_LORA='$EVALUATION_EXPORT_LORA' && export EXPORT_LORA_MAX_TRAJ='$EXPORT_LORA_MAX_TRAJ' && export LOG_SUBDIR='$LOG_SUBDIR' && export DEBUG_RESUME='${DEBUG_RESUME:-}' && nohup ./scripts/run_training.sh $TOTAL_NODES $rank $MASTER_IP $PIPELINE_STAGES > $LOG_PATH/node_${rank}.log 2>&1 &" &
             fi
         done
         

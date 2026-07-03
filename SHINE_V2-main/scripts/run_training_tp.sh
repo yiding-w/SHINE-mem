@@ -17,6 +17,7 @@ NUM_NODES=${1:-1}
 NODE_RANK=${2:-0}
 MASTER_IP=${3:-localhost}
 TP_SIZE=${4:-2}  # TP=2 DP=4 per node measured ~6x PP on Qwen3.6-27B
+SP_SIZE=${5:-1}  # Sequence parallel size (default: 1 = disabled)
 
 # --- Network proxy for external access (wandb, etc.) ---
 export http_proxy=http://star-proxy.oa.com:3128
@@ -52,13 +53,16 @@ export WANDB_MODE=online
 export PYTHONDONTWRITEBYTECODE=1
 
 # --- Compile cache (tp) ---
-# Triton/Inductor caches use local /tmp to avoid CephFS "Stale file handle" errors
+# Triton/Inductor caches MUST use local /tmp to avoid CephFS "Stale file handle" errors
 # (multiple GPU workers on the same node concurrently read/write cache files).
-# TileLang cache stays on shared FS (rarely causes issues and benefits from persistence).
+# We clean old caches on startup to prevent /tmp from filling up.
+# TileLang cache stays on shared FS (single-writer, benefits from persistence).
 CACHE_BASE="$(cd "$(dirname "$0")/.." && pwd)/cache/compile/tp"
 NODE_CACHE_DIR="${CACHE_BASE}/node_${NODE_RANK}"
 LOCAL_CACHE_DIR="/tmp/shine_compile_cache_tp_node_${NODE_RANK}"
 
+# Clean old local cache to free /tmp space (will be regenerated on first run)
+rm -rf "${LOCAL_CACHE_DIR}"
 mkdir -p "${LOCAL_CACHE_DIR}/triton" "${LOCAL_CACHE_DIR}/inductor"
 mkdir -p "${NODE_CACHE_DIR}/tilelang"
 
@@ -190,7 +194,7 @@ validate_mode_prefix "optimizer" "$OPTIMIZER_CONFIG" "$TRAINING_MODE"
 validate_mode_prefix "data" "$DATA_CONFIG" "$TRAINING_MODE"
 
 # Build Hydra overrides
-HYDRA_OVERRIDES="parallel.mode=tp parallel.tensor_parallel_size=$TP_SIZE parallel.pipeline_parallel_size=1 parallel.total_gpus=$GPUS_PER_NODE"
+HYDRA_OVERRIDES="parallel.mode=tp parallel.tensor_parallel_size=$TP_SIZE parallel.sequence_parallel_size=$SP_SIZE parallel.pipeline_parallel_size=1 parallel.total_gpus=$GPUS_PER_NODE"
 if [ -n "$DATA_CONFIG" ]; then
     HYDRA_OVERRIDES="$HYDRA_OVERRIDES data=${DATA_CONFIG}"
 fi

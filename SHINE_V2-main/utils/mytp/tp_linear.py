@@ -66,7 +66,10 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-__all__ = ["ColwiseLoraLinear", "RowwiseLoraLinear", "shard_linear_weight"]
+__all__ = [
+    "ColwiseLoraLinear", "RowwiseLoraLinear", "shard_linear_weight",
+    "scatter_hidden_forward", "gather_hidden_forward",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +114,87 @@ def _make_full_helper(in_features: int, out_features_full: int, bias: bool):
 # only because the in-place sum-reduce makes every rank's output equal
 # and every rank's upstream gradient identical, which is exactly what
 # identity-backward propagates.
+
+
+# ---------------------------------------------------------------------------
+# Hidden-dim Sequence Parallelism: scatter/gather along hidden dimension
+# ---------------------------------------------------------------------------
+# These autograd Functions implement the residual-stream splitting scheme:
+# between layers, hidden_states is stored as [B, S, H/TP] (each rank holds
+# a different slice of the hidden dimension). At the start of each layer's
+# forward, AllGather restores [B, S, H]; at the end, a slice reduces it
+# back to [B, S, H/TP]. This reduces CPU-offload traffic by (1 - 1/TP).
+
+
+class _ScatterHiddenForward(torch.autograd.Function):
+    """Slice hidden dim in forward; AllGather in backward.
+
+    Forward: [B, S, H] → [B, S, H/TP] (take this rank's slice)
+    Backward: [B, S, H/TP] → [B, S, H] (AllGather grad from all ranks)
+    """
+
+    @staticmethod
+    def forward(ctx, x, tp_group, tp_world, tp_rank):
+        ctx.tp_group = tp_group
+        ctx.tp_world = tp_world
+        if tp_group is None or tp_world <= 1:
+            return x
+        H = x.shape[-1]
+        H_local = H // tp_world
+        return x[..., tp_rank * H_local : (tp_rank + 1) * H_local].contiguous()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if ctx.tp_group is None or ctx.tp_world <= 1:
+            return grad_output, None, None, None
+        # AllGather along hidden dim: each rank contributes its H/TP slice
+        chunks = [torch.empty_like(grad_output) for _ in range(ctx.tp_world)]
+        dist.all_gather(chunks, grad_output.contiguous(), group=ctx.tp_group)
+        return torch.cat(chunks, dim=-1), None, None, None
+
+
+class _GatherHiddenForward(torch.autograd.Function):
+    """AllGather hidden dim in forward; slice in backward.
+
+    Forward: [B, S, H/TP] → [B, S, H] (AllGather from all ranks)
+    Backward: [B, S, H] → [B, S, H/TP] (take this rank's grad slice)
+    """
+
+    @staticmethod
+    def forward(ctx, x, tp_group, tp_world, tp_rank):
+        ctx.tp_group = tp_group
+        ctx.tp_world = tp_world
+        ctx.tp_rank = tp_rank
+        if tp_group is None or tp_world <= 1:
+            return x
+        chunks = [torch.empty_like(x) for _ in range(tp_world)]
+        dist.all_gather(chunks, x.contiguous(), group=tp_group)
+        return torch.cat(chunks, dim=-1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if ctx.tp_group is None or ctx.tp_world <= 1:
+            return grad_output, None, None, None
+        H = grad_output.shape[-1]
+        H_local = H // ctx.tp_world
+        return grad_output[..., ctx.tp_rank * H_local : (ctx.tp_rank + 1) * H_local].contiguous(), None, None, None
+
+
+@torch.compiler.disable
+def scatter_hidden_forward(x: Tensor, tp_group, tp_world: int, tp_rank: int) -> Tensor:
+    """Slice hidden dim: [B, S, H] → [B, S, H/TP]. Backward: AllGather."""
+    return _ScatterHiddenForward.apply(x, tp_group, tp_world, tp_rank)
+
+
+@torch.compiler.disable
+def gather_hidden_forward(x: Tensor, tp_group, tp_world: int, tp_rank: int) -> Tensor:
+    """AllGather hidden dim: [B, S, H/TP] → [B, S, H]. Backward: slice."""
+    return _GatherHiddenForward.apply(x, tp_group, tp_world, tp_rank)
+
+
+# ---------------------------------------------------------------------------
+# TP autograd region helper: identity forward, all-reduce-SUM backward
+# ---------------------------------------------------------------------------
 
 
 class _CopyToTPRegion(torch.autograd.Function):

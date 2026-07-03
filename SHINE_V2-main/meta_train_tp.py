@@ -39,6 +39,7 @@ import time
 import warnings
 from contextlib import nullcontext
 from typing import Optional
+import json
 
 import hydra
 import torch
@@ -88,6 +89,7 @@ from utils.mytraining_debug import (
     compute_loss_spike_metrics,
     check_dp_param_consistency,
     check_tp_param_consistency,
+    check_sp_param_consistency,
     log_training_detail,
 )
 from utils.myloradict import collect_loradict_tensors
@@ -244,14 +246,46 @@ def _broadcast_metalora_from_tp_rank0(metalora_dict, tp_cfg) -> None:
             dist.broadcast(t.data, src=src_global, group=tp_group)
 
 
+def _broadcast_trainable_from_sp_rank0(module: nn.Module, tp_cfg) -> None:
+    """Make every SP rank start with bit-identical trainable params.
+
+    When SP > 1, different SP ranks within the same TP×SP group may have
+    different random initial weights (no seed sync).  This broadcast from
+    sp_rank=0 ensures all SP ranks hold identical parameters.
+    """
+    sp_group = tp_cfg.get("sp_process_group")
+    if sp_group is None or dist.get_world_size(sp_group) <= 1:
+        return
+    src_global = dist.get_global_rank(sp_group, 0)
+    for p in module.parameters():
+        if p.requires_grad:
+            dist.broadcast(p.data, src=src_global, group=sp_group)
+
+
+def _broadcast_metalora_from_sp_rank0(metalora_dict, tp_cfg) -> None:
+    """Make every SP rank start with bit-identical metalora tensors.
+
+    Same as _broadcast_trainable_from_sp_rank0 but operates on the
+    metalora dict structure (not an nn.Module).
+    """
+    sp_group = tp_cfg.get("sp_process_group")
+    if sp_group is None or dist.get_world_size(sp_group) <= 1:
+        return
+    from utils.myloradict import collect_loradict_tensors
+    src_global = dist.get_global_rank(sp_group, 0)
+    for t in collect_loradict_tensors(metalora_dict):
+        if t.requires_grad:
+            dist.broadcast(t.data, src=src_global, group=sp_group)
+
+
 def _broadcast_mem_tokens(model: 'TPModelHypernetwork', tp_cfg) -> None:
-    """Broadcast mem_tokens from TP rank 0 and DP rank 0.
+    """Broadcast mem_tokens from TP rank 0, SP rank 0, and DP rank 0.
 
     mem_tokens lives on model.llm.model and is zero-initialised, so all
     ranks are naturally identical at construction time.  However, after
     resume from checkpoint the loaded values may differ across ranks if
     the checkpoint was saved by a single rank.  This function ensures
-    bit-identical mem_tokens across both TP and DP groups.
+    bit-identical mem_tokens across TP, SP, and DP groups.
     """
     mem = getattr(model.llm.model, "mem_tokens", None)
     if mem is None:
@@ -262,6 +296,12 @@ def _broadcast_mem_tokens(model: 'TPModelHypernetwork', tp_cfg) -> None:
     if tp_group is not None and dist.get_world_size(tp_group) > 1:
         src_global = dist.get_global_rank(tp_group, 0)
         dist.broadcast(mem.data, src=src_global, group=tp_group)
+
+    # SP-group broadcast
+    sp_group = tp_cfg.get("sp_process_group")
+    if sp_group is not None and dist.get_world_size(sp_group) > 1:
+        src_global = dist.get_global_rank(sp_group, 0)
+        dist.broadcast(mem.data, src=src_global, group=sp_group)
 
     # DP-group broadcast
     dp_group = tp_cfg.get("dp_process_group")
@@ -345,7 +385,7 @@ def _create_optimizer_scheduler(
         )
         if is_main_process_per_node():
             logger.info(
-                f"[Optimizer] ZeRO-1 over DP={dist.get_world_size(dp_group)}: "
+                f"[Optimizer] ZeRO-1 over node-local {dist.get_world_size(dp_group)} ranks: "
                 f"{len(decay)} decay + {len(no_decay)} no_decay + "
                 f"{len(metalora_tensors)} metalora + "
                 f"{len(w_transform_params)} w_transform = "
@@ -444,9 +484,6 @@ def _tp_save_checkpoint(
     # Save training state
     os.makedirs(training_state_dir, exist_ok=True)
 
-    # Save optimizer state (keyed by globally unique param names)
-    _tp_save_optimizer_state(model, optimizer, training_state_dir)
-
     # Save scheduler state
     torch.save(lr_scheduler.state_dict(),
                os.path.join(training_state_dir, "scheduler.pt"))
@@ -467,6 +504,14 @@ def _tp_save_checkpoint(
         "parallel_mode": "tp",
         "config_selections": kwargs.get("config_selections", None),
         "launch_cmd": kwargs.get("launch_cmd", ""),
+        "prev_repo": kwargs.get("prev_repo", None),
+        # Parallel topology for resume validation
+        "parallel_topology": {
+            "tp_size": kwargs.get("tp_size", None),
+            "sp_size": kwargs.get("sp_size", None),
+            "gpus_per_node": kwargs.get("gpus_per_node", None),
+            "num_nodes": kwargs.get("num_nodes", None),
+        },
     }
     if train_loader is not None and hasattr(train_loader, "state_dict"):
         metadata["dataloader_state"] = train_loader.state_dict()
@@ -496,96 +541,62 @@ def _tp_rotate_checkpoints(run_name: str, forever_save_steps, save_total_limit: 
             logger.warning(f"  [Checkpoint] Failed to delete step_{oldest_step}: {e}")
 
 
-def _tp_save_optimizer_state(model: TPModelHypernetwork, optimizer, training_state_dir: str):
-    """Save optimizer state with globally unique param keys (PP-compatible).
+def _tp_save_optimizer_state_sharded(
+    model: TPModelHypernetwork, optimizer, training_state_dir: str, local_rank: int
+):
+    """Save per-rank optimizer shard (ZeRO-1 sharded save — no consolidation needed).
 
-    Uses safetensors for tensor data and .pt for non-tensor metadata.
-    Keys use the same ``hypernet.<name>`` and ``metalora_layer<N>_tensor<M>``
-    convention as PP's save.
+    Each rank saves its own local optimizer state shard to a file keyed by
+    local_rank. On resume, each rank loads its own shard. This avoids the
+    expensive consolidate_state_dict() all-gather.
 
-    Note: If using ZeroRedundancyOptimizer, the caller must call
-    ``optimizer.consolidate_state_dict(to=0)`` before this function
-    (it's a collective op that all ranks must participate in).
+    Only ranks on node 0 need to save (all nodes have identical shards due to
+    replicated parameters + identical node-local ZeRO-1 partitioning).
     """
     from safetensors.torch import save_file
-    from utils.myloradict import collect_loradict_tensors
+    from torch.distributed.optim import ZeroRedundancyOptimizer
 
-    # Access the underlying module if torch.compile wrapped it
-    hypernet = model.hypernetwork
-    if hasattr(hypernet, "_orig_mod"):
-        hypernet = hypernet._orig_mod
+    # For ZeRO optimizer, get the local optimizer's state directly
+    if isinstance(optimizer, ZeroRedundancyOptimizer):
+        # Access the underlying local optimizer state (only this rank's shard)
+        local_opt = optimizer.optim
+        opt_sd = local_opt.state_dict()
+    else:
+        opt_sd = optimizer.state_dict()
 
-    # Build param_id → globally unique key mapping
-    flat_params = []
-    for group in optimizer.param_groups:
-        for p in group["params"]:
-            flat_params.append(p)
-
-    id_to_flat_idx = {id(p): idx for idx, p in enumerate(flat_params)}
-    idx_to_key = {}
-
-    for name, param in hypernet.named_parameters():
-        pid = id(param)
-        if pid in id_to_flat_idx:
-            idx_to_key[id_to_flat_idx[pid]] = f"hypernet.{name}"
-
-    # Metalora tensors (same key convention as PP: metalora_layer<N>_tensor<M>)
-    if hasattr(model, 'metalora') and model.metalora is not None:
-        for layer_idx, layer_lora in model.metalora.items():
-            tensors = collect_loradict_tensors(layer_lora)
-            for t_idx, t in enumerate(tensors):
-                pid = id(t)
-                if pid in id_to_flat_idx:
-                    idx_to_key[id_to_flat_idx[pid]] = (
-                        f"metalora_layer{layer_idx}_tensor{t_idx}"
-                    )
-
-    # W-Transform parameters
-    for wt_name in ['w_transform_context', 'w_transform_conversation']:
-        wt_module = getattr(model, wt_name, None)
-        if wt_module is not None:
-            for pname, param in wt_module.named_parameters():
-                pid = id(param)
-                if pid in id_to_flat_idx:
-                    idx_to_key[id_to_flat_idx[pid]] = (
-                        f"w_transform_{wt_name}_{pname}"
-                    )
-
-    # Extract optimizer state
-    opt_sd = optimizer.state_dict()
     tensors_dict = {}
     meta_dict = {}
 
     for str_idx, state in opt_sd["state"].items():
         idx = int(str_idx) if isinstance(str_idx, str) else str_idx
-        key = idx_to_key.get(idx)
-        if key is not None:
-            param_meta = {}
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    tensors_dict[f"{key}__{k}"] = v.cpu()
-                else:
-                    param_meta[k] = v
-            if param_meta:
-                meta_dict[key] = param_meta
+        param_meta = {}
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                tensors_dict[f"param{idx}__{k}"] = v.cpu()
+            else:
+                param_meta[k] = v
+        if param_meta:
+            meta_dict[str(idx)] = param_meta
 
-    # Save param_groups metadata
+    # Save param_groups metadata (lr, betas, etc.)
     groups_meta = []
     for g in opt_sd["param_groups"]:
         meta = {k: v for k, v in g.items() if k != "params"}
+        # Also save param indices for reconstruction
+        meta["_param_indices"] = g["params"]
         groups_meta.append(meta)
 
-    # Write files (use stage0 to match PP convention)
+    # Write per-rank files
     if tensors_dict:
         save_file(tensors_dict, os.path.join(
-            training_state_dir, "optimizer_tensors_stage0.safetensors"))
+            training_state_dir, f"optimizer_tensors_rank{local_rank}.safetensors"))
 
     payload = {
         "non_tensor_state": meta_dict,
         "param_groups_meta": groups_meta,
     }
     torch.save(payload, os.path.join(
-        training_state_dir, "optimizer_meta_stage0.pt"))
+        training_state_dir, f"optimizer_meta_rank{local_rank}.pt"))
 
 
 def _tp_load_checkpoint(
@@ -594,21 +605,54 @@ def _tp_load_checkpoint(
     lr_scheduler,
     checkpoint_dir: str,
     my_device: torch.device,
+    local_rank: int = 0,
+    tp_cfg: dict = None,
 ) -> dict:
     """Load a full checkpoint (model + optimizer + scheduler + metadata).
 
-    Compatible with both TP-saved and PP-saved checkpoints.
+    Uses sharded optimizer loading — each rank loads its own shard by local_rank.
+    Validates that parallel topology matches the checkpoint.
 
     Returns training metadata dict.
     """
     model_dir = os.path.join(checkpoint_dir, "model")
     training_state_dir = os.path.join(checkpoint_dir, "training_state")
 
+    # Load and validate metadata first
+    metadata_path = os.path.join(training_state_dir, "metadata.pt")
+    if os.path.exists(metadata_path):
+        metadata = torch.load(metadata_path, map_location="cpu")
+    else:
+        metadata = {}
+
+    # --- Validate parallel topology ---
+    saved_topo = metadata.get("parallel_topology")
+    if saved_topo is not None and tp_cfg is not None:
+        current_topo = {
+            "tp_size": tp_cfg.get("tensor_parallel_size"),
+            "sp_size": tp_cfg.get("sequence_parallel_size"),
+            "gpus_per_node": tp_cfg.get("total_gpus"),
+        }
+        mismatches = []
+        for key in ["tp_size", "sp_size", "gpus_per_node"]:
+            saved_val = saved_topo.get(key)
+            current_val = current_topo.get(key)
+            if saved_val is not None and current_val is not None and saved_val != current_val:
+                mismatches.append(f"  {key}: checkpoint={saved_val}, current={current_val}")
+        if mismatches:
+            raise RuntimeError(
+                f"[_tp_load_checkpoint] RESUME FAILED — parallel topology mismatch!\n"
+                f"The checkpoint was saved with a different parallel configuration.\n"
+                + "\n".join(mismatches) + "\n"
+                f"Sharded optimizer state requires identical topology to resume.\n"
+                f"Checkpoint: {checkpoint_dir}"
+            )
+
     # Load model parameters (PP-compatible)
     model.load_model(model_dir)
 
-    # Load optimizer state
-    _tp_load_optimizer_state(model, optimizer, training_state_dir, my_device)
+    # Load optimizer state (sharded per-rank)
+    _tp_load_optimizer_state_sharded(optimizer, training_state_dir, local_rank, my_device)
 
     # Load scheduler state
     sched_path = os.path.join(training_state_dir, "scheduler.pt")
@@ -617,13 +661,6 @@ def _tp_load_checkpoint(
         lr_scheduler.load_state_dict(sched_state)
     else:
         logger.warning("No scheduler checkpoint found at %s", sched_path)
-
-    # Load training metadata
-    metadata_path = os.path.join(training_state_dir, "metadata.pt")
-    if os.path.exists(metadata_path):
-        metadata = torch.load(metadata_path, map_location="cpu")
-    else:
-        metadata = {}
 
     return metadata
 
@@ -650,165 +687,79 @@ def _tp_load_model_only(
     return metadata
 
 
-def _tp_load_optimizer_state(
-    model: TPModelHypernetwork, optimizer, training_state_dir: str, my_device: torch.device
+def _tp_load_optimizer_state_sharded(
+    optimizer, training_state_dir: str, local_rank: int, my_device: torch.device
 ):
-    """Load optimizer state from PP-compatible safetensors files.
+    """Load per-rank optimizer shard (ZeRO-1 sharded load).
 
-    Reads optimizer_tensors_stage*.safetensors and optimizer_meta_stage*.pt,
-    loading only the keys that belong to this model's hypernetwork params.
+    Each rank loads its own shard file keyed by local_rank. This is the
+    counterpart to _tp_save_optimizer_state_sharded().
     """
-    import glob
     from safetensors import safe_open
+    from torch.distributed.optim import ZeroRedundancyOptimizer
 
-    st_files = sorted(glob.glob(
-        os.path.join(training_state_dir, "optimizer_tensors_stage*.safetensors")))
-    meta_files = sorted(glob.glob(
-        os.path.join(training_state_dir, "optimizer_meta_stage*.pt")))
+    st_file = os.path.join(training_state_dir, f"optimizer_tensors_rank{local_rank}.safetensors")
+    meta_file = os.path.join(training_state_dir, f"optimizer_meta_rank{local_rank}.pt")
 
-    if not st_files:
+    if not os.path.exists(st_file):
         raise FileNotFoundError(
-            f"[_tp_load_optimizer_state] STRICT LOAD FAILED — "
-            f"No optimizer_tensors_stage*.safetensors files found in {training_state_dir}. "
+            f"[_tp_load_optimizer_state_sharded] STRICT LOAD FAILED — "
+            f"No optimizer shard file found for rank {local_rank}: {st_file}\n"
             f"Cannot resume training without optimizer state."
         )
 
-    # Access the underlying module if torch.compile wrapped it
-    hypernet = model.hypernetwork
-    if hasattr(hypernet, "_orig_mod"):
-        hypernet = hypernet._orig_mod
-
-    # Build param key mapping for this model
-    flat_params = []
-    for group in optimizer.param_groups:
-        for p in group["params"]:
-            flat_params.append(p)
-
-    id_to_flat_idx = {id(p): idx for idx, p in enumerate(flat_params)}
-    idx_to_key = {}
-    for name, param in hypernet.named_parameters():
-        pid = id(param)
-        if pid in id_to_flat_idx:
-            idx_to_key[id_to_flat_idx[pid]] = f"hypernet.{name}"
-
-    # Metalora tensors (same key convention as PP)
-    from utils.myloradict import collect_loradict_tensors
-    if hasattr(model, 'metalora') and model.metalora is not None:
-        for layer_idx, layer_lora in model.metalora.items():
-            tensors = collect_loradict_tensors(layer_lora)
-            for t_idx, t in enumerate(tensors):
-                pid = id(t)
-                if pid in id_to_flat_idx:
-                    idx_to_key[id_to_flat_idx[pid]] = (
-                        f"metalora_layer{layer_idx}_tensor{t_idx}"
-                    )
-
-    # W-Transform parameters
-    for wt_name in ['w_transform_context', 'w_transform_conversation']:
-        wt_module = getattr(model, wt_name, None)
-        if wt_module is not None:
-            for pname, param in wt_module.named_parameters():
-                pid = id(param)
-                if pid in id_to_flat_idx:
-                    idx_to_key[id_to_flat_idx[pid]] = (
-                        f"w_transform_{wt_name}_{pname}"
-                    )
-
-    key_to_idx = {v: k for k, v in idx_to_key.items()}
-    my_param_keys = set(key_to_idx.keys())
-
-    # Load needed tensors from all stage files
+    # Load tensors
     device_str = str(my_device)
-    needed_tensors = {}
-    for f in st_files:
-        with safe_open(f, framework="pt", device=device_str) as sf:
-            for flat_key in sf.keys():
-                sep_idx = flat_key.rfind("__")
-                if sep_idx == -1:
-                    continue
-                param_key = flat_key[:sep_idx]
-                if param_key in my_param_keys:
-                    needed_tensors[flat_key] = sf.get_tensor(flat_key)
+    state_dict_state = {}
+    with safe_open(st_file, framework="pt", device=device_str) as sf:
+        for flat_key in sf.keys():
+            sep_idx = flat_key.rfind("__")
+            if sep_idx == -1:
+                continue
+            param_key = flat_key[:sep_idx]  # "param<idx>"
+            state_name = flat_key[sep_idx + 2:]
+            idx = int(param_key.replace("param", ""))
+            if idx not in state_dict_state:
+                state_dict_state[idx] = {}
+            state_dict_state[idx][state_name] = sf.get_tensor(flat_key)
 
     # Load non-tensor metadata
-    non_tensor_state = {}
-    groups_meta = None
-    for f in meta_files:
-        payload = torch.load(f, map_location="cpu")
-        for k, v in payload.get("non_tensor_state", {}).items():
-            if k in my_param_keys:
-                non_tensor_state[k] = v
-        if groups_meta is None:
-            groups_meta = payload.get("param_groups_meta")
+    if os.path.exists(meta_file):
+        payload = torch.load(meta_file, map_location="cpu")
+        non_tensor_state = payload.get("non_tensor_state", {})
+        groups_meta = payload.get("param_groups_meta", [])
+    else:
+        non_tensor_state = {}
+        groups_meta = []
 
-    # Reconstruct named state
-    merged_named_state = {}
-    for flat_key, tensor in needed_tensors.items():
-        sep_idx = flat_key.rfind("__")
-        param_key = flat_key[:sep_idx]
-        state_name = flat_key[sep_idx + 2:]
-        if param_key not in merged_named_state:
-            merged_named_state[param_key] = {}
-        merged_named_state[param_key][state_name] = tensor
+    # Merge non-tensor state (e.g. step count as int)
+    for str_idx, meta in non_tensor_state.items():
+        idx = int(str_idx)
+        if idx not in state_dict_state:
+            state_dict_state[idx] = {}
+        state_dict_state[idx].update(meta)
 
-    for param_key, meta in non_tensor_state.items():
-        if param_key not in merged_named_state:
-            merged_named_state[param_key] = {}
-        merged_named_state[param_key].update(meta)
-
-    # Reconstruct optimizer state_dict
-    # Note: Do NOT call optimizer.state_dict() here — for ZeroRedundancyOptimizer
-    # it requires consolidate_state_dict() first (which is a collective op).
-    # Instead, build param_groups directly from the optimizer's live param_groups.
-    new_state = {}
-    for key, state in merged_named_state.items():
-        idx = key_to_idx.get(key)
-        if idx is not None:
-            new_state[idx] = state
-
-    # Build param_groups from the optimizer's current param_groups attribute
-    # (this is always accessible without consolidation)
-    current_param_groups = []
-    for group in optimizer.param_groups:
-        # Copy group metadata (lr, betas, eps, weight_decay, etc.) but replace
-        # 'params' with integer indices matching the flat param list
-        group_copy = {k: v for k, v in group.items() if k != "params"}
-        group_copy["params"] = [id_to_flat_idx[id(p)] for p in group["params"]
-                                if id(p) in id_to_flat_idx]
-        current_param_groups.append(group_copy)
+    # Reconstruct param_groups with saved hyperparameters
+    param_groups = []
+    for gm in groups_meta:
+        group = {k: v for k, v in gm.items() if k != "_param_indices"}
+        group["params"] = gm.get("_param_indices", [])
+        param_groups.append(group)
 
     load_sd = {
-        "state": new_state,
-        "param_groups": current_param_groups,
+        "state": state_dict_state,
+        "param_groups": param_groups,
     }
 
-    # Restore param_groups hyperparameters from saved
-    if groups_meta is not None and len(groups_meta) == len(load_sd["param_groups"]):
-        for saved_meta, group in zip(groups_meta, load_sd["param_groups"]):
-            for k, v in saved_meta.items():
-                if k in group:
-                    group[k] = v
-
-    # --- Strict check: fail if any parameter is missing optimizer state ---
-    missing_keys = my_param_keys - set(merged_named_state.keys())
-    if missing_keys:
-        raise RuntimeError(
-            f"[_tp_load_optimizer_state] STRICT LOAD FAILED — "
-            f"{len(missing_keys)}/{len(my_param_keys)} parameters have NO optimizer state "
-            f"in checkpoint at {training_state_dir}.\n"
-            f"  First 5 missing: {sorted(missing_keys)[:5]}\n"
-            f"  Scanned files: {[os.path.basename(f) for f in st_files]}\n"
-            f"  This means the checkpoint is incomplete or incompatible. "
-            f"All parameters must have saved optimizer state for resume."
-        )
-
-    optimizer.load_state_dict(load_sd)
+    # Load into the optimizer (for ZeRO, load into the local optimizer)
+    if isinstance(optimizer, ZeroRedundancyOptimizer):
+        optimizer.optim.load_state_dict(load_sd)
+    else:
+        optimizer.load_state_dict(load_sd)
 
     # Fix device mismatch for fused Adam: after load_state_dict, 'step' tensors
-    # may remain on CPU (they were saved as int in non_tensor_state). Fused Adam
-    # requires all state tensors (including step) on the same CUDA device.
+    # may remain on CPU. Fused Adam requires all state tensors on CUDA.
     target_device = my_device
-    # For ZeroRedundancyOptimizer, access the underlying local optimizer's state
     opt_state = optimizer.state
     if hasattr(optimizer, 'optim') and hasattr(optimizer.optim, 'state'):
         opt_state = optimizer.optim.state
@@ -931,10 +882,6 @@ def _train_step(
         scaled.backward()
         torch.cuda.nvtx.range_pop()  # Backward
 
-    # After backward: write detach_state (must be after backward to avoid
-    # inplace conflicts with autograd graph)
-    model.post_backward_detach_state(grad_accum_steps=grad_accum_steps)
-
     loss_val = loss.detach().float().item()
     accum_loss += loss_val
 
@@ -949,17 +896,25 @@ def _train_step(
 
     if do_step:
         # TP-sum on hypernetwork grads (each rank had partial grad),
+        # then SP-sum (each SP rank saw partial sequence),
         # then DP-avg across replicas.
         torch.cuda.nvtx.range_push("GradSync")
         _tp_sum_grads(model.hypernetwork, tp_cfg.get("tp_process_group"), tp_cfg["tensor_parallel_size"])
+        # SP-sum: each SP rank only saw a chunk of the sequence, so grads are partial
+        _sp_group = tp_cfg.get("sp_process_group")
+        _sp_world = tp_cfg.get("sequence_parallel_size", 1)
+        if _sp_group is not None and _sp_world > 1:
+            _tp_sum_grads(model.hypernetwork, _sp_group, _sp_world)
         _dp_avg_grads(model.hypernetwork, tp_cfg.get("dp_process_group"))
 
-        # Metalora gradient sync: TP-sum + DP-avg (same as PP's _sync_metalora_gradients)
+        # Metalora gradient sync: TP-sum + SP-sum + DP-avg
         for layer_idx, layer_lora in model.metalora.items():
             _tp_sum_grads_tensors(layer_lora, tp_cfg.get("tp_process_group"), tp_cfg["tensor_parallel_size"])
+            if _sp_group is not None and _sp_world > 1:
+                _tp_sum_grads_tensors(layer_lora, _sp_group, _sp_world)
             _dp_avg_grads_tensors(layer_lora, tp_cfg.get("dp_process_group"))
 
-        # W-Transform gradient sync: TP-sum + DP-avg
+        # W-Transform gradient sync: TP-sum + SP-sum + DP-avg
         # (L and R have partial grads on each TP rank due to sharded W)
         for wt_name in ('w_transform_context', 'w_transform_conversation'):
             wt_module = getattr(model, wt_name, None)
@@ -967,15 +922,24 @@ def _train_step(
                 # Access underlying module if torch.compile wrapped it
                 _wt = wt_module._orig_mod if hasattr(wt_module, '_orig_mod') else wt_module
                 _tp_sum_grads(_wt, tp_cfg.get("tp_process_group"), tp_cfg["tensor_parallel_size"])
+                if _sp_group is not None and _sp_world > 1:
+                    _tp_sum_grads(_wt, _sp_group, _sp_world)
                 _dp_avg_grads(_wt, tp_cfg.get("dp_process_group"))
         torch.cuda.nvtx.range_pop()  # GradSync
 
-        # NaN/Inf: broadcast skip decision across DP replicas
+        # NaN/Inf: broadcast skip decision across SP + DP replicas
+        # All ranks that share the same parameters must agree on skip/no-skip,
+        # otherwise gradients diverge and parameters become inconsistent.
         _skip_step = False
         if monitor_nan_inf:
             my_device = tp_cfg["device"]
             _skip_tensor = torch.tensor([1.0 if _local_nan_inf else 0.0],
                                          dtype=torch.float32, device=my_device)
+            # SP group: different SP ranks see different sequence chunks and may
+            # independently detect NaN; sync so all SP ranks make same decision.
+            _sp_skip_group = tp_cfg.get("sp_process_group")
+            if _sp_skip_group is not None and tp_cfg.get("sequence_parallel_size", 1) > 1:
+                dist.all_reduce(_skip_tensor, op=dist.ReduceOp.MAX, group=_sp_skip_group)
             dp_group = tp_cfg.get("dp_process_group")
             if dp_group is not None:
                 dist.all_reduce(_skip_tensor, op=dist.ReduceOp.MAX, group=dp_group)
@@ -1084,10 +1048,6 @@ def _tp_run_evaluation(
     _eval_running_mean_update_step = 0.0
     _eval_running_regu_sq_norm = 0.0
     _eval_repo_reset_count = 0
-    _eval_acc_correct = 0  # teacher-forced answer-token accuracy (numerator)
-    _eval_acc_total = 0    # answer tokens seen (denominator)
-    _eval_ans_correct = 0  # answer-level exact match (whole-answer correct)
-    _eval_ans_total = 0    # answers seen
 
     val_loader.set_epoch(0)  # Fixed epoch for reproducibility
     val_iter = iter(val_loader)
@@ -1118,13 +1078,8 @@ def _tp_run_evaluation(
                             loradict=None,
                             nograd_loradict=None,
                             nograd_wdict=None,
-                            return_acc=True,
                         )
                     total_loss += loss.detach().float().item()
-                    _eval_acc_correct += int(getattr(model, "_last_eval_acc_correct", 0))
-                    _eval_acc_total += int(getattr(model, "_last_eval_acc_total", 0))
-                    _eval_ans_correct += int(getattr(model, "_last_eval_ans_correct", 0))
-                    _eval_ans_total += int(getattr(model, "_last_eval_ans_total", 0))
                     num_batches += 1
                     continue
 
@@ -1159,7 +1114,6 @@ def _tp_run_evaluation(
                             distill_conversation_ids=_distill_conv_ids,
                             distill_labels=_distill_labels,
                             grad_accum_steps=1,
-                            return_acc=True,
                         )
                         # _result is (total_loss, distill_loss_detached)
                         # total_loss = ce_loss + coeff * distill_loss (no regu_loss)
@@ -1179,16 +1133,8 @@ def _tp_run_evaluation(
                             conversation_ids=mb_dev["conversation_ids"],
                             labels=mb_dev["labels"],
                             grad_accum_steps=1,
-                            return_acc=True,
                         )
                         total_loss += loss.detach().float().item()
-
-                # Answer-token accuracy (teacher-forced) — stashed on the model
-                # by compute_loss(return_acc=True).
-                _eval_acc_correct += int(getattr(model, "_last_eval_acc_correct", 0))
-                _eval_acc_total += int(getattr(model, "_last_eval_acc_total", 0))
-                _eval_ans_correct += int(getattr(model, "_last_eval_ans_correct", 0))
-                _eval_ans_total += int(getattr(model, "_last_eval_ans_total", 0))
 
                 # Write detach_state for eval accumulation (no backward needed in eval)
                 model.post_backward_detach_state(grad_accum_steps=1)
@@ -1196,14 +1142,10 @@ def _tp_run_evaluation(
                 # Accumulate regu_sq_norm
                 _eval_running_regu_sq_norm += _eval_regu_sq if _eval_regu_sq else 0.0
 
-                # Step+1, get_reset_stats, then threshold reset (same order as training)
+                # set_last_sq_norms → update_steps → get_reset_stats → maybe_reset_slice
+                # (same order as training loop)
                 if model.detach_state is not None:
-                    _ds_batch_size = getattr(model.detach_state, "_local_batch_size", 0)
-                    for _si in range(_ds_batch_size):
-                        model.detach_state.update_steps(_si)
-                    _eval_reset_ratio, _eval_mean_upd = model.detach_state.get_reset_stats()
-                    _eval_running_reset_ratio += _eval_reset_ratio
-                    _eval_running_mean_update_step += _eval_mean_upd
+                    _ds_batch_size = model.detach_state._local_batch_size
                     if _eval_regu_sq and _eval_regu_sq > 0:
                         # All-reduce across TP for full sq_norm before threshold check
                         _sq_t = torch.tensor([_eval_regu_sq], dtype=torch.float64, device=my_device)
@@ -1212,6 +1154,11 @@ def _tp_run_evaluation(
                             dist.all_reduce(_sq_t, op=dist.ReduceOp.SUM, group=tp_group)
                         _eval_sq_norms_per_sample = [_sq_t.item()] * _ds_batch_size
                         model.detach_state.set_last_sq_norms(_eval_sq_norms_per_sample)
+                    for _si in range(_ds_batch_size):
+                        model.detach_state.update_steps(_si)
+                    _eval_reset_ratio, _eval_mean_upd = model.detach_state.get_reset_stats()
+                    _eval_running_reset_ratio += _eval_reset_ratio
+                    _eval_running_mean_update_step += _eval_mean_upd
                     for _si in range(_ds_batch_size):
                         model.detach_state.maybe_reset_slice(_si)
 
@@ -1263,21 +1210,6 @@ def _tp_run_evaluation(
         _global_eval_update = 0.0
         _global_eval_repo_reset = 0.0
 
-    # Answer-token accuracy: SUM counts across DP replicas only (TP ranks
-    # duplicate the same data + same full-vocab logits, so they must NOT be
-    # summed). token_acc = correct / total over the whole eval set.
-    _acc_correct, _acc_total = _eval_acc_correct, _eval_acc_total
-    _ans_correct, _ans_total = _eval_ans_correct, _eval_ans_total
-    if dp_group is not None and dist.get_world_size(dp_group) > 1:
-        _acc_tensor = torch.tensor(
-            [float(_acc_correct), float(_acc_total), float(_ans_correct), float(_ans_total)],
-            device=my_device)
-        dist.all_reduce(_acc_tensor, op=dist.ReduceOp.SUM, group=dp_group)
-        _acc_correct, _acc_total = _acc_tensor[0].item(), _acc_tensor[1].item()
-        _ans_correct, _ans_total = _acc_tensor[2].item(), _acc_tensor[3].item()
-    eval_token_acc = (_acc_correct / _acc_total) if _acc_total > 0 else 0.0
-    eval_answer_acc = (_ans_correct / _ans_total) if _ans_total > 0 else 0.0
-
     avg_ppl = math.exp(min(avg_loss, 20.0))
     # Total loss = CE + coefficient * distill (coefficient applied in distill_loss_fn)
     _distill_coeff = distill_loss_fn.coefficient if distill_loss_fn is not None else 1.0
@@ -1298,9 +1230,7 @@ def _tp_run_evaluation(
             )
         logger.info(
             f"  [Eval Step {global_step}] "
-            f"val_loss={avg_loss:.4f}, val_ppl={avg_ppl:.2f}, "
-            f"val_token_acc={eval_token_acc:.4f} ({int(_acc_correct)}/{int(_acc_total)}), "
-            f"val_answer_acc={eval_answer_acc:.4f} ({int(_ans_correct)}/{int(_ans_total)})"
+            f"val_loss={avg_loss:.4f}, val_ppl={avg_ppl:.2f}"
             f"{_eval_distill_suffix}, "
             f"val_batches={num_batches}, "
             f"eval_time={format_duration(eval_duration)}, "
@@ -1325,8 +1255,6 @@ def _tp_run_evaluation(
             "eval/distill_loss": avg_distill_loss,
             "eval/total_loss": total_loss_val,
             "eval/total_ppl": total_ppl,
-            "eval/token_acc": eval_token_acc,
-            "eval/answer_acc": eval_answer_acc,
         }
         # DetachState metrics for eval
         if model.detach_state is not None and num_batches > 0:
@@ -1372,6 +1300,7 @@ def tp_main(cfg: DictConfig):
     # 1. Parallel setup — TP only on the new path
     # ------------------------------------------------------------------
     tensor_parallel_size = int(cfg.parallel.get("tensor_parallel_size", cfg.parallel.total_gpus))
+    sequence_parallel_size = int(cfg.parallel.get("sequence_parallel_size", 1))
     if cfg.parallel.get("pipeline_parallel_size", 1) > 1 and is_main_process_per_node():
         logger.warning(
             f"[main] parallel.pipeline_parallel_size={cfg.parallel.pipeline_parallel_size} "
@@ -1380,12 +1309,15 @@ def tp_main(cfg: DictConfig):
     tp_cfg = setup_tensor_parallel(
         total_gpus=cfg.parallel.total_gpus,
         tensor_parallel_size=tensor_parallel_size,
+        sequence_parallel_size=sequence_parallel_size,
     )
     my_device = tp_cfg["device"]
     if is_main_process_per_node():
         logger.info(
-            f"TP={tp_cfg['tensor_parallel_size']} DP={tp_cfg['data_parallel_size']} "
-            f"tp_rank={tp_cfg['tp_rank']} dp_rank={tp_cfg['data_parallel_rank']} device={my_device}"
+            f"TP={tp_cfg['tensor_parallel_size']} SP={tp_cfg['sequence_parallel_size']} "
+            f"DP={tp_cfg['data_parallel_size']} "
+            f"tp_rank={tp_cfg['tp_rank']} sp_rank={tp_cfg.get('sp_rank', 0)} "
+            f"dp_rank={tp_cfg['data_parallel_rank']} device={my_device}"
         )
     all_gpu_stats("After TP setup")
 
@@ -1408,9 +1340,14 @@ def tp_main(cfg: DictConfig):
         tp_rank=tp_cfg["tp_rank"],
         tp_world=tp_cfg["tensor_parallel_size"],
         tp_process_group=tp_cfg.get("tp_process_group"),
+        sp_group=tp_cfg.get("sp_process_group"),
+        sp_world=tp_cfg.get("sequence_parallel_size", 1),
         dtype=torch.bfloat16,
-        activation_checkpointing=cfg.training.get("tp_knobs", {}).get("activation_checkpointing", True),
-        ckpt_skip_stride=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride", 0),
+        activation_checkpointing_llm=cfg.training.get("tp_knobs", {}).get("activation_checkpointing_llm", True),
+        activation_checkpointing_m2p=cfg.training.get("tp_knobs", {}).get("activation_checkpointing_m2p", True),
+        ckpt_skip_stride_llm=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride_llm", 0),
+        ckpt_skip_stride_m2p=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride_m2p", 0),
+        cpu_offload=cfg.training.get("tp_knobs", {}).get("cpu_offload", False),
         compile_hypernetwork=cfg.training.get("tp_knobs", {}).get("compile_hypernetwork", True),
     )
     all_gpu_stats("After model load")
@@ -1561,7 +1498,7 @@ def tp_main(cfg: DictConfig):
         beta2=cfg.optimizer.beta2,
         eps=cfg.optimizer.eps,
         warmup_steps=warmup_steps,
-        dp_group=tp_cfg.get("dp_process_group"),
+        dp_group=tp_cfg.get("node_process_group"),
         use_zero1=cfg.training.get("tp_knobs", {}).get("zero1", True),
     )
 
@@ -1579,6 +1516,16 @@ def tp_main(cfg: DictConfig):
         _wt_module = getattr(model, _wt_name, None)
         if _wt_module is not None:
             _broadcast_trainable_from_tp_rank0(_wt_module, tp_cfg)
+    # SP broadcast: ensure all SP ranks within a group hold identical params
+    if tp_cfg.get("sequence_parallel_size", 1) > 1:
+        if is_main_process_per_node():
+            logger.info("  [INIT] Broadcasting hypernetwork + metalora params from SP rank 0 …")
+        _broadcast_trainable_from_sp_rank0(model.hypernetwork, tp_cfg)
+        _broadcast_metalora_from_sp_rank0(model.metalora, tp_cfg)
+        for _wt_name in ('w_transform_context', 'w_transform_conversation'):
+            _wt_module = getattr(model, _wt_name, None)
+            if _wt_module is not None:
+                _broadcast_trainable_from_sp_rank0(_wt_module, tp_cfg)
     if is_main_process_per_node():
         logger.info("  [INIT] Broadcasting hypernetwork + metalora params from DP rank 0 …")
     # Then: ensure all DP replicas hold identical params
@@ -1623,7 +1570,6 @@ def tp_main(cfg: DictConfig):
         os.environ.get("MEMORY_QA_GEN", "") == "1"
         or os.environ.get("SQUAD_QA_GEN", "") == "1"
     )
-
     # Read resume_from config (same key as PP: supports "latest", path, or null/None)
     _resume_from_raw = cfg.training.get("resume_from", "latest")
     if _resume_from_raw is not None and str(_resume_from_raw).lower() not in ("null", "none", ""):
@@ -1683,6 +1629,13 @@ def tp_main(cfg: DictConfig):
                         )
 
     _resume_metadata = {}  # Store metadata for wandb resume
+    # In evaluation modes, we only need model weights — skip optimizer/scheduler loading
+    _eval_baseline_env = os.environ.get("EVALUATION_BASELINE", "") == "1"
+    _eval_export_env = os.environ.get("EVALUATION_EXPORT_LORA", "") == "1"
+    if (_eval_baseline_env or _eval_export_env) and not load_model_only_flag:
+        load_model_only_flag = True
+        if is_main_process_per_node():
+            logger.info("  [Resume] Evaluation mode detected — loading model-only (skipping optimizer/scheduler).")
     if resume_checkpoint_dir is not None:
         if load_model_only_flag:
             if is_main_process_per_node():
@@ -1702,6 +1655,8 @@ def tp_main(cfg: DictConfig):
                 lr_scheduler=lr_scheduler,
                 checkpoint_dir=resume_checkpoint_dir,
                 my_device=my_device,
+                local_rank=dist.get_rank() % tp_cfg["total_gpus"],
+                tp_cfg=tp_cfg,
             )
             global_step = _resume_metadata.get("global_step", 0)
             start_epoch = _resume_metadata.get("epoch", 0)
@@ -1725,13 +1680,20 @@ def tp_main(cfg: DictConfig):
                     f"  [Resume] Restored from step {global_step}, epoch {start_epoch}, "
                     f"elapsed={_saved_elapsed:.1f}s"
                 )
-        # Re-broadcast params after loading (ensure all TP + DP replicas are in sync)
+        # Re-broadcast params after loading (ensure all TP + SP + DP replicas are in sync)
         _broadcast_trainable_from_tp_rank0(model.hypernetwork, tp_cfg)
         _broadcast_metalora_from_tp_rank0(model.metalora, tp_cfg)
         for _wt_name in ('w_transform_context', 'w_transform_conversation'):
             _wt_module = getattr(model, _wt_name, None)
             if _wt_module is not None:
                 _broadcast_trainable_from_tp_rank0(_wt_module, tp_cfg)
+        if tp_cfg.get("sequence_parallel_size", 1) > 1:
+            _broadcast_trainable_from_sp_rank0(model.hypernetwork, tp_cfg)
+            _broadcast_metalora_from_sp_rank0(model.metalora, tp_cfg)
+            for _wt_name in ('w_transform_context', 'w_transform_conversation'):
+                _wt_module = getattr(model, _wt_name, None)
+                if _wt_module is not None:
+                    _broadcast_trainable_from_sp_rank0(_wt_module, tp_cfg)
         _broadcast_trainable_from_dp_rank0(model.hypernetwork, tp_cfg)
         _broadcast_metalora_from_dp_rank0(model.metalora, tp_cfg)
         for _wt_name in ('w_transform_context', 'w_transform_conversation'):
@@ -1782,7 +1744,6 @@ def tp_main(cfg: DictConfig):
             logger.info("[SQUAD_QA_GEN] done. Exiting.")
         cleanup_distributed()
         os._exit(0)
-
     # ------------------------------------------------------------------
     # 5.6 Resolve config selections (needed for wandb tags + consistency check)
     # ------------------------------------------------------------------
@@ -1955,7 +1916,6 @@ def tp_main(cfg: DictConfig):
             "[gen_eval] MEMORY_QA_GEN_EVERY set but tensor_parallel_size>1 — "
             "in-loop generation eval is main-rank-only and would deadlock under "
             "TP collectives, so it will be SKIPPED. Use pure DP (tp_size=1) to enable it.")
-
     # Debug schedules (same as PP)
     log_peak_memory_sched = DebugSchedule(
         cfg.get("debug", {}).get("log_peak_memory_steps", -1), "log_peak_memory_steps")
@@ -1994,6 +1954,10 @@ def tp_main(cfg: DictConfig):
     distill_cfg = cfg.training.get("distill", None)
     distill_loss_fn = create_distill_loss_fn(distill_cfg)
     if distill_loss_fn is not None:
+        # Set SP group for SP-aware distillation loss computation
+        _sp_group = tp_cfg.get("sp_process_group")
+        if _sp_group is not None and tp_cfg.get("sequence_parallel_size", 1) > 1:
+            distill_loss_fn.set_sp_group(_sp_group)
         if is_main_process_per_node():
             logger.info(
                 f"  Distillation enabled: mode={distill_cfg.mode}, "
@@ -2060,7 +2024,8 @@ def tp_main(cfg: DictConfig):
     running_reset_ratio = 0.0
     running_mean_update_step = 0.0
     running_repo_reset_count = 0  # Count of repo-change resets
-    _prev_repo = None  # Track previous repo name for repo-change reset
+    # Restore _prev_repo from checkpoint metadata (for repo-change reset continuity)
+    _prev_repo = _resume_metadata.get("prev_repo", None) if (resume_checkpoint_dir is not None and not load_model_only_flag) else None
     accum_loss = 0.0
     # t_start: if resuming with elapsed_time, it was already adjusted in section 5.5
     # Only reset to now if not resuming or loading model-only
@@ -2111,6 +2076,13 @@ def tp_main(cfg: DictConfig):
         )
         # Also check TP-group consistency for replicated params (w_transform, hypernetwork)
         check_tp_param_consistency(
+            model=model,
+            my_device=my_device,
+            tp_cfg=tp_cfg,
+            global_step=0,
+        )
+        # Also check SP-group consistency for replicated params
+        check_sp_param_consistency(
             model=model,
             my_device=my_device,
             tp_cfg=tp_cfg,
@@ -2189,6 +2161,491 @@ def tp_main(cfg: DictConfig):
         cleanup_distributed()
         os._exit(0)
 
+    # ==================================================================
+    # 8c. Evaluation Export LoRA Mode — export per-repo PEFT LoRA adapters
+    # ==================================================================
+    _evaluation_export_lora = os.environ.get("EVALUATION_EXPORT_LORA", "") == "1"
+    if _evaluation_export_lora:
+        _max_traj_str = os.environ.get("EXPORT_LORA_MAX_TRAJ", "")
+        if not _max_traj_str:
+            if is_main_process_per_node():
+                logger.error("EXPORT_LORA_MAX_TRAJ must be set when EVALUATION_EXPORT_LORA=1")
+            _profiler_ctx.__exit__(None, None, None)
+            cleanup_distributed()
+            os._exit(1)
+        _max_traj = int(_max_traj_str)
+
+        if is_main_process_per_node():
+            logger.info("=" * 60)
+            logger.info("  EVALUATION EXPORT LORA MODE (TP)")
+            logger.info(f"  Max trajectories per repo: {_max_traj}")
+            logger.info("=" * 60)
+
+        if val_dataset is None or len(val_dataset) == 0:
+            if is_main_process_per_node():
+                logger.error("  [ExportLoRA] No validation set available. Exiting.")
+            _profiler_ctx.__exit__(None, None, None)
+            cleanup_distributed()
+            os._exit(1)
+
+        from collections import defaultdict
+        from utils.myloradict import detach_loradict, concat_loradict, loradict_to_peft
+
+        # Step 1: Group val_dataset by repo
+        # Validate that dataset has 'repo' field
+        _first_sample = val_dataset[0]
+        _has_repo_field = (
+            "repo" in _first_sample
+            or (isinstance(_first_sample.get("extra_info"), dict) and "repo" in _first_sample["extra_info"])
+        )
+        if not _has_repo_field:
+            if is_main_process_per_node():
+                logger.error(
+                    "  [ExportLoRA] Dataset does not have a 'repo' field. "
+                    "evaluation_export_lora mode requires the dataset to provide "
+                    "a 'repo' field (either as sample['repo'] or sample['extra_info']['repo']). "
+                    "Please use a dataset with repo information (e.g. trajectory_pro_transfer)."
+                )
+            _profiler_ctx.__exit__(None, None, None)
+            cleanup_distributed()
+            os._exit(1)
+
+        repo_to_indices = defaultdict(list)
+        for idx in range(len(val_dataset)):
+            sample = val_dataset[idx]
+            repo = sample.get("repo", sample.get("extra_info", {}).get("repo"))
+            repo_to_indices[repo].append(idx)
+
+        # Step 2: Assign repos to DP ranks (round-robin)
+        all_repos = sorted(repo_to_indices.keys())
+        repos_for_this_rank = [all_repos[i] for i in range(dp_rank, len(all_repos), dp_size)]
+
+        if is_main_process_per_node():
+            logger.info(
+                f"  [ExportLoRA] Total repos: {len(all_repos)}, "
+                f"this DP rank ({dp_rank}/{dp_size}): {len(repos_for_this_rank)} repos"
+            )
+
+        # Step 3: Process each repo
+        model.eval()
+        _dataset_name = cfg.data.get("name", "unknown_dataset")
+        _export_save_base = os.path.join("./save", exp_name, _dataset_name)
+        all_repo_results = {}
+
+        for repo_idx, repo_name in enumerate(repos_for_this_rank):
+            indices = repo_to_indices[repo_name][:_max_traj]
+
+            if is_main_process_per_node():
+                logger.info(
+                    f"  [ExportLoRA] Processing repo {repo_idx+1}/{len(repos_for_this_rank)}: "
+                    f"{repo_name} ({len(indices)} trajectories)"
+                )
+
+            # Reset detach_state for this repo
+            if model.detach_state is not None:
+                model.detach_state.reset()
+                model.detach_state.init_steps()
+
+            repo_loradicts = []
+            repo_losses = []
+            repo_baseline_losses = []
+
+            for traj_idx, sample_idx in enumerate(indices):
+                sample = val_dataset[sample_idx]
+                # Use collator to process single sample into batch format
+                batch_list = collator([sample])
+                if isinstance(batch_list, list):
+                    primary = batch_list[0]
+                else:
+                    primary = batch_list
+
+                # Move tensors to device
+                mb_dev = {}
+                for k, v in primary.items():
+                    if isinstance(v, torch.Tensor):
+                        mb_dev[k] = v.to(my_device, non_blocking=True)
+                    else:
+                        mb_dev[k] = v
+
+                with torch.no_grad(), make_sdpa_ctx():
+                    # Full forward: produces loss AND caches loradicts
+                    result, regu_sq_norm, _ = model(
+                        context_ids=mb_dev["context_ids"],
+                        context_lengths=mb_dev["context_lengths"],
+                        conversation_ids=mb_dev["conversation_ids"],
+                        labels=mb_dev["labels"],
+                        grad_accum_steps=1,
+                    )
+
+                    # Extract loss value
+                    if isinstance(result, tuple):
+                        loss_val = result[0].item()
+                    else:
+                        loss_val = result.item()
+                    repo_losses.append(loss_val)
+
+                    # Get the generated loradict (WITHOUT metalora)
+                    # metalora will be added once at the end
+                    gen_loradict = model.get_last_generated_loradict()
+                    if gen_loradict is not None:
+                        repo_loradicts.append(detach_loradict(gen_loradict))
+
+                    # Baseline forward: raw LLM without any loradict/metalora
+                    baseline_loss = model.compute_loss(
+                        input_ids=mb_dev["conversation_ids"],
+                        labels=mb_dev["labels"],
+                        loradict=None,
+                        nograd_loradict=None,
+                        nograd_wdict=None,
+                    )
+                    baseline_loss_val = baseline_loss.detach().float().item()
+                    repo_baseline_losses.append(baseline_loss_val)
+
+                if is_main_process_per_node():
+                    import math as _math_log
+                    _ppl_val = _math_log.exp(loss_val) if loss_val < 20 else float('inf')
+                    _bl_ppl_val = _math_log.exp(baseline_loss_val) if baseline_loss_val < 20 else float('inf')
+                    logger.info(
+                        f"    [ExportLoRA] Repo {repo_idx+1}/{len(repos_for_this_rank)} "
+                        f"({repo_name}) | Traj {traj_idx+1}/{len(indices)} | "
+                        f"loss={loss_val:.4f} ppl={_ppl_val:.2f} | "
+                        f"baseline_loss={baseline_loss_val:.4f} baseline_ppl={_bl_ppl_val:.2f}"
+                    )
+
+                # Update detach_state (write loradict for next trajectory)
+                model.post_backward_detach_state(grad_accum_steps=1)
+                if model.detach_state is not None:
+                    model.detach_state.update_steps(0)
+                    model.detach_state.set_last_sq_norms([regu_sq_norm])
+                    model.detach_state.maybe_reset_slice(0)
+
+            # Concat all loradicts for this repo, then add metalora once
+            if repo_loradicts:
+                # Build per-layer concat of generated loradicts (without metalora)
+                all_layer_indices = sorted(repo_loradicts[0].keys())
+                metalora = model.get_metalora()
+                merged_loradict = {}
+                for layer_idx in all_layer_indices:
+                    layer_loradicts = [ld[layer_idx] for ld in repo_loradicts if ld.get(layer_idx) is not None]
+                    # Concat all generated loradicts + one metalora
+                    layer_meta = metalora.get(layer_idx, None) if metalora else None
+                    parts_to_concat = layer_loradicts[:]
+                    if layer_meta is not None:
+                        parts_to_concat.append(detach_loradict(layer_meta))
+                    if parts_to_concat:
+                        merged_loradict[layer_idx] = concat_loradict(parts_to_concat)
+                    else:
+                        merged_loradict[layer_idx] = None
+
+                # Convert to PEFT and save
+                # Sanitize repo_name for filesystem
+                safe_repo_name = repo_name.replace("/", "_").replace("\\", "_")
+                save_dir = os.path.join(_export_save_base, safe_repo_name)
+                loradict_to_peft(
+                    merged_loradict,
+                    save_path=save_dir,
+                    base_model_name_or_path=model_path,
+                )
+
+                # Save eval metrics with full statistics
+                import math as _math
+
+                avg_loss = sum(repo_losses) / len(repo_losses) if repo_losses else 0.0
+                avg_baseline_loss = sum(repo_baseline_losses) / len(repo_baseline_losses) if repo_baseline_losses else 0.0
+                avg_ppl = _math.exp(avg_loss) if avg_loss < 20 else float('inf')
+                avg_baseline_ppl = _math.exp(avg_baseline_loss) if avg_baseline_loss < 20 else float('inf')
+
+                # Per-trajectory PPL
+                per_traj_ppl = [_math.exp(l) if l < 20 else float('inf') for l in repo_losses]
+                per_traj_baseline_ppl = [_math.exp(l) if l < 20 else float('inf') for l in repo_baseline_losses]
+
+                # Per-trajectory ratios (model / baseline)
+                per_traj_loss_ratio = []
+                per_traj_ppl_ratio = []
+                for l, bl in zip(repo_losses, repo_baseline_losses):
+                    per_traj_loss_ratio.append(l / bl if bl > 0 else float('inf'))
+                for p, bp in zip(per_traj_ppl, per_traj_baseline_ppl):
+                    per_traj_ppl_ratio.append(p / bp if bp > 0 else float('inf'))
+
+                # Average ratios
+                avg_loss_ratio = sum(per_traj_loss_ratio) / len(per_traj_loss_ratio) if per_traj_loss_ratio else 0.0
+                avg_ppl_ratio = sum(per_traj_ppl_ratio) / len(per_traj_ppl_ratio) if per_traj_ppl_ratio else 0.0
+
+                # Win rate (fraction of trajectories where model loss < baseline loss)
+                win_count = sum(1 for l, bl in zip(repo_losses, repo_baseline_losses) if l < bl)
+                win_rate = win_count / len(repo_losses) if repo_losses else 0.0
+
+                # Trend slope (linear regression slope over trajectory index)
+                def _compute_slope(values):
+                    """Compute slope of linear regression y = a*x + b."""
+                    n = len(values)
+                    if n < 2:
+                        return 0.0
+                    x_mean = (n - 1) / 2.0
+                    y_mean = sum(values) / n
+                    num = sum((i - x_mean) * (v - y_mean) for i, v in enumerate(values))
+                    den = sum((i - x_mean) ** 2 for i in range(n))
+                    return num / den if den > 0 else 0.0
+
+                loss_trend_slope = _compute_slope(repo_losses)
+                ppl_trend_slope = _compute_slope(per_traj_ppl)
+                baseline_loss_trend_slope = _compute_slope(repo_baseline_losses)
+                baseline_ppl_trend_slope = _compute_slope(per_traj_baseline_ppl)
+                loss_ratio_trend_slope = _compute_slope(per_traj_loss_ratio)
+                ppl_ratio_trend_slope = _compute_slope(per_traj_ppl_ratio)
+
+                metrics = {
+                    "repo": repo_name,
+                    "num_trajectories": len(indices),
+                    "avg_loss": avg_loss,
+                    "avg_ppl": avg_ppl,
+                    "avg_baseline_loss": avg_baseline_loss,
+                    "avg_baseline_ppl": avg_baseline_ppl,
+                    "avg_loss_ratio": avg_loss_ratio,
+                    "avg_ppl_ratio": avg_ppl_ratio,
+                    "win_rate": win_rate,
+                    "loss_trend_slope": loss_trend_slope,
+                    "ppl_trend_slope": ppl_trend_slope,
+                    "baseline_loss_trend_slope": baseline_loss_trend_slope,
+                    "baseline_ppl_trend_slope": baseline_ppl_trend_slope,
+                    "loss_ratio_trend_slope": loss_ratio_trend_slope,
+                    "ppl_ratio_trend_slope": ppl_ratio_trend_slope,
+                    "per_trajectory_loss": repo_losses,
+                    "per_trajectory_baseline_loss": repo_baseline_losses,
+                    "per_trajectory_ppl": per_traj_ppl,
+                    "per_trajectory_baseline_ppl": per_traj_baseline_ppl,
+                    "per_trajectory_loss_ratio": per_traj_loss_ratio,
+                    "per_trajectory_ppl_ratio": per_traj_ppl_ratio,
+                }
+                os.makedirs(save_dir, exist_ok=True)
+                with open(os.path.join(save_dir, "eval_metrics.json"), "w") as f:
+                    json.dump(metrics, f, indent=2)
+
+                all_repo_results[repo_name] = metrics
+
+                if is_main_process_per_node():
+                    logger.info(
+                        f"    [ExportLoRA] Saved {repo_name}: "
+                        f"loss={avg_loss:.4f}, ppl={avg_ppl:.2f}, "
+                        f"loss_ratio={avg_loss_ratio:.4f}, win_rate={win_rate:.2f}"
+                    )
+            else:
+                if is_main_process_per_node():
+                    logger.warning(f"    [ExportLoRA] No loradicts collected for {repo_name}")
+
+            # Clear GPU cache between repos
+            if hasattr(model, 'invalidate_input_cache'):
+                model.invalidate_input_cache()
+            torch.cuda.empty_cache()
+
+        # ============================================================
+        # Step 4: Gather all results to rank 0 and generate summary
+        # ============================================================
+        # Use dist.barrier() to ensure all ranks finish processing before gather
+        dist.barrier()
+
+        # Gather all_repo_results from all DP ranks to rank 0
+        import math as _math
+
+        # all_gather_object collects a list of objects from all ranks
+        gathered_results = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered_results, all_repo_results)
+
+        # Only the global rank 0 process generates summary and uploads to wandb
+        if is_main_process():
+            # Merge all gathered results (each rank contributed different repos)
+            merged_repo_results = {}
+            for rank_results in gathered_results:
+                if rank_results:
+                    merged_repo_results.update(rank_results)
+
+            if merged_repo_results:
+                # Compute global metrics
+                all_avg_losses = [m["avg_loss"] for m in merged_repo_results.values()]
+                all_avg_baseline_losses = [m["avg_baseline_loss"] for m in merged_repo_results.values()]
+                all_avg_ppls = [m["avg_ppl"] for m in merged_repo_results.values()]
+                all_avg_baseline_ppls = [m["avg_baseline_ppl"] for m in merged_repo_results.values()]
+                all_loss_ratios = [m["avg_loss_ratio"] for m in merged_repo_results.values()]
+                all_ppl_ratios = [m["avg_ppl_ratio"] for m in merged_repo_results.values()]
+                all_win_rates = [m["win_rate"] for m in merged_repo_results.values()]
+                all_num_traj = [m["num_trajectories"] for m in merged_repo_results.values()]
+
+                global_metrics = {
+                    "num_repos": len(merged_repo_results),
+                    "total_trajectories": sum(all_num_traj),
+                    "avg_loss": sum(all_avg_losses) / len(all_avg_losses),
+                    "avg_baseline_loss": sum(all_avg_baseline_losses) / len(all_avg_baseline_losses),
+                    "avg_ppl": sum(all_avg_ppls) / len(all_avg_ppls),
+                    "avg_baseline_ppl": sum(all_avg_baseline_ppls) / len(all_avg_baseline_ppls),
+                    "avg_loss_ratio": sum(all_loss_ratios) / len(all_loss_ratios),
+                    "avg_ppl_ratio": sum(all_ppl_ratios) / len(all_ppl_ratios),
+                    "avg_win_rate": sum(all_win_rates) / len(all_win_rates),
+                    "avg_loss_trend_slope": sum(m["loss_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_ppl_trend_slope": sum(m["ppl_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_baseline_loss_trend_slope": sum(m["baseline_loss_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_baseline_ppl_trend_slope": sum(m["baseline_ppl_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_loss_ratio_trend_slope": sum(m["loss_ratio_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_ppl_ratio_trend_slope": sum(m["ppl_ratio_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                }
+
+                # Per-repo summary (without per_trajectory arrays for compactness)
+                per_repo_summary = {}
+                for repo_name, m in sorted(merged_repo_results.items()):
+                    per_repo_summary[repo_name] = {
+                        "num_trajectories": m["num_trajectories"],
+                        "avg_loss": m["avg_loss"],
+                        "avg_baseline_loss": m["avg_baseline_loss"],
+                        "avg_ppl": m["avg_ppl"],
+                        "avg_baseline_ppl": m["avg_baseline_ppl"],
+                        "avg_loss_ratio": m["avg_loss_ratio"],
+                        "avg_ppl_ratio": m["avg_ppl_ratio"],
+                        "win_rate": m["win_rate"],
+                        "loss_trend_slope": m["loss_trend_slope"],
+                        "ppl_trend_slope": m["ppl_trend_slope"],
+                        "baseline_loss_trend_slope": m["baseline_loss_trend_slope"],
+                        "baseline_ppl_trend_slope": m["baseline_ppl_trend_slope"],
+                        "loss_ratio_trend_slope": m["loss_ratio_trend_slope"],
+                        "ppl_ratio_trend_slope": m["ppl_ratio_trend_slope"],
+                    }
+
+                summary = {
+                    "experiment": exp_name,
+                    "dataset": _dataset_name,
+                    "max_trajectories_per_repo": _max_traj,
+                    "global_metrics": global_metrics,
+                    "per_repo": per_repo_summary,
+                }
+
+                # Save summary.json
+                os.makedirs(_export_save_base, exist_ok=True)
+                summary_path = os.path.join(_export_save_base, "summary.json")
+                with open(summary_path, "w") as f:
+                    json.dump(summary, f, indent=2)
+                logger.info(f"  [ExportLoRA] Summary saved to {summary_path}")
+                logger.info(
+                    f"  [ExportLoRA] Complete. {global_metrics['num_repos']} repos, "
+                    f"avg_loss={global_metrics['avg_loss']:.4f}, "
+                    f"avg_loss_ratio={global_metrics['avg_loss_ratio']:.4f}, "
+                    f"avg_win_rate={global_metrics['avg_win_rate']:.2f}"
+                )
+
+                # WandB upload
+                if wandb is not None:
+                    _wandb_disabled = (
+                        os.environ.get("WANDB_MODE", "online") in ("disabled", "offline")
+                        or os.environ.get("WANDB_DISABLED", "").lower() in ("1", "true", "yes")
+                    )
+                    if not _wandb_disabled:
+                        try:
+                            # Initialize a new wandb run for this evaluation
+                            # Use same project as training (from cfg or env var)
+                            # Tags include "evaluation_export_lora" for easy filtering
+                            _wandb_cfg = cfg.get("wandb", {})
+                            _wandb_project = os.environ.get("WANDB_PROJECT") or _wandb_cfg.get("project", "SHINE_V2")
+                            _wandb_entity = os.environ.get("WANDB_ENTITY") or _wandb_cfg.get("entity")
+                            _wandb_job_type = exp_name[:64] if len(exp_name) > 64 else exp_name
+                            wandb.init(
+                                project=_wandb_project,
+                                entity=_wandb_entity,
+                                name=f"{exp_name}/{_dataset_name}",
+                                group=_dataset_name,
+                                job_type=_wandb_job_type,
+                                config={
+                                    "run_name": exp_name,
+                                    "dataset_name": _dataset_name,
+                                    "max_traj_per_repo": _max_traj,
+                                    "num_repos": global_metrics["num_repos"],
+                                    "total_trajectories": global_metrics["total_trajectories"],
+                                    "parallel_mode": "tp",
+                                },
+                                tags=["evaluation_export_lora", _dataset_name, exp_name[:64]],
+                                reinit=True,
+                            )
+
+                            # Log global scalar metrics as summary (not step-based)
+                            # to avoid meaningless line charts with step=0
+                            wandb.summary.update({
+                                "export_lora/avg_loss": global_metrics["avg_loss"],
+                                "export_lora/avg_baseline_loss": global_metrics["avg_baseline_loss"],
+                                "export_lora/avg_ppl": global_metrics["avg_ppl"],
+                                "export_lora/avg_baseline_ppl": global_metrics["avg_baseline_ppl"],
+                                "export_lora/avg_loss_ratio": global_metrics["avg_loss_ratio"],
+                                "export_lora/avg_ppl_ratio": global_metrics["avg_ppl_ratio"],
+                                "export_lora/avg_win_rate": global_metrics["avg_win_rate"],
+                                "export_lora/num_repos": global_metrics["num_repos"],
+                                "export_lora/total_trajectories": global_metrics["total_trajectories"],
+                                "export_lora/avg_loss_trend_slope": global_metrics["avg_loss_trend_slope"],
+                                "export_lora/avg_ppl_trend_slope": global_metrics["avg_ppl_trend_slope"],
+                                "export_lora/avg_baseline_loss_trend_slope": global_metrics["avg_baseline_loss_trend_slope"],
+                                "export_lora/avg_baseline_ppl_trend_slope": global_metrics["avg_baseline_ppl_trend_slope"],
+                                "export_lora/avg_loss_ratio_trend_slope": global_metrics["avg_loss_ratio_trend_slope"],
+                                "export_lora/avg_ppl_ratio_trend_slope": global_metrics["avg_ppl_ratio_trend_slope"],
+                            })
+
+                            # Log per-repo table
+                            table = wandb.Table(columns=[
+                                "repo", "num_traj", "avg_loss", "avg_baseline_loss",
+                                "loss_ratio", "ppl_ratio", "win_rate",
+                                "loss_trend_slope", "ppl_trend_slope",
+                                "loss_ratio_trend_slope", "ppl_ratio_trend_slope",
+                            ])
+                            for repo_name, data in sorted(per_repo_summary.items()):
+                                table.add_data(
+                                    repo_name, data["num_trajectories"],
+                                    data["avg_loss"], data["avg_baseline_loss"],
+                                    data["avg_loss_ratio"], data["avg_ppl_ratio"],
+                                    data["win_rate"],
+                                    data["loss_trend_slope"], data["ppl_trend_slope"],
+                                    data["loss_ratio_trend_slope"], data["ppl_ratio_trend_slope"],
+                                )
+                            wandb.log({"export_lora/per_repo_summary": table})
+
+                            # Log per-trajectory detail table
+                            traj_table = wandb.Table(columns=[
+                                "repo", "traj_idx", "loss", "baseline_loss",
+                                "ppl", "baseline_ppl", "loss_ratio", "ppl_ratio",
+                            ])
+                            for repo_name, m in sorted(merged_repo_results.items()):
+                                for i in range(m["num_trajectories"]):
+                                    traj_table.add_data(
+                                        repo_name, i,
+                                        m["per_trajectory_loss"][i],
+                                        m["per_trajectory_baseline_loss"][i],
+                                        m["per_trajectory_ppl"][i],
+                                        m["per_trajectory_baseline_ppl"][i],
+                                        m["per_trajectory_loss_ratio"][i],
+                                        m["per_trajectory_ppl_ratio"][i],
+                                    )
+                            wandb.log({"export_lora/trajectory_details": traj_table})
+
+                            # Save summary.json as artifact
+                            artifact = wandb.Artifact(
+                                f"export_lora_{_dataset_name}",
+                                type="evaluation",
+                            )
+                            artifact.add_file(summary_path)
+                            wandb.log_artifact(artifact)
+
+                            wandb.finish()
+                            logger.info("  [ExportLoRA] WandB upload complete.")
+                        except Exception as e:
+                            logger.warning(f"  [ExportLoRA] WandB upload failed: {e!r}")
+
+        # Final barrier to prevent any rank from exiting early
+        dist.barrier()
+        _profiler_ctx.__exit__(None, None, None)
+        cleanup_distributed()
+        os._exit(0)
+
+    # --- Debug Resume: open JSONL dump file if DEBUG_RESUME env var is set ---
+    _debug_resume_file = None
+    if os.environ.get("DEBUG_RESUME", "") == "1" and is_main_process():
+        _debug_dir = os.path.join(cfg.training.log_dir, run_name)
+        os.makedirs(_debug_dir, exist_ok=True)
+        _debug_path = os.path.join(_debug_dir, "node_0_debug_steps.jsonl")
+        _debug_resume_file = open(_debug_path, "a")  # append mode for resume
+        logger.info(f"  [DEBUG_RESUME] Dumping per-step state to {_debug_path}")
+
     # --- save_best_only: keep ONLY the single best-by-val-ppl model (model-only,
     # overwritten in place at checkpoint/<run>/final/model). Disables interval +
     # end-of-training saves to avoid storage blowup. ---
@@ -2219,7 +2676,6 @@ def tp_main(cfg: DictConfig):
                 logger.info(f"[save_best_only] new best val_ppl={val_ppl:.4f} → overwrote "
                             f"{os.path.join(final_dir, 'model')} (step {step})")
             barrier()
-
     for epoch in range(start_epoch, num_epochs):
         train_loader.set_epoch(epoch) if hasattr(train_loader, "set_epoch") else None
         data_iter = iter(train_loader)
@@ -2257,6 +2713,8 @@ def tp_main(cfg: DictConfig):
 
                 # Extract extra_info (non-tensor metadata, e.g. repo name)
                 _extra_info = mb.get("extra_info", None)
+                _cur_repo = None
+                _repo_reset_triggered = False
 
                 # --- Repo-change reset: if repo changed, reset detach_state before forward ---
                 if _extra_info is not None and model.detach_state is not None:
@@ -2265,6 +2723,7 @@ def tp_main(cfg: DictConfig):
                         model.detach_state.reset()
                         model.detach_state.init_steps()
                         running_repo_reset_count += 1
+                        _repo_reset_triggered = True
                     if _cur_repo is not None:
                         _prev_repo = _cur_repo
 
@@ -2309,8 +2768,11 @@ def tp_main(cfg: DictConfig):
                     distill_batch=_distill_batch,
                     distill_loss_fn=distill_loss_fn,
                     return_per_token_loss=_need_detail,
-                    return_acc=_train_acc_this,
                 )
+
+                # Write loradict into detach_state (must be after backward)
+                model.post_backward_detach_state(grad_accum_steps=grad_accum_steps)
+
                 _accum_regu_sq_norm += _regu_sq_norm_local
                 if _distill_loss_item is not None:
                     _accum_distill_loss += _distill_loss_item
@@ -2434,6 +2896,40 @@ def tp_main(cfg: DictConfig):
                     running_mean_update_step += _mean_update_step
                     _accum_regu_sq_norm = 0.0
 
+                    # --- Debug Resume Dump: write per-step state to JSONL for verification ---
+                    if _debug_resume_file is not None and is_main_process():
+                        import hashlib
+                        _ctx_hash = hashlib.md5(mb_dev["context_ids"].cpu().numpy().tobytes()).hexdigest()
+                        _conv_hash = hashlib.md5(mb_dev["conversation_ids"].cpu().numpy().tobytes()).hexdigest()
+                        _labels_hash = hashlib.md5(mb_dev["labels"].cpu().numpy().tobytes()).hexdigest()
+                        _lr_now = lr_scheduler.get_last_lr()[0] if lr_scheduler else 0.0
+                        _ds_update_steps = list(model.detach_state._update_steps) if model.detach_state is not None else []
+                        _debug_record = {
+                            "step": global_step,
+                            "epoch": epoch,
+                            "loss": float(avg_loss),
+                            "lr": float(_lr_now),
+                            "prev_repo": _prev_repo,
+                            "cur_repo": _cur_repo,
+                            "repo_reset_triggered": _repo_reset_triggered,
+                            "update_steps": _ds_update_steps,
+                            "reset_ratio": float(_reset_ratio),
+                            "mean_update_step": float(_mean_update_step),
+                            "regu_sq_norm": float(_regu_sq_norm_full),
+                            "batch_counter": train_loader._batch_counter,
+                            "context_ids_hash": _ctx_hash,
+                            "conv_ids_hash": _conv_hash,
+                            "labels_hash": _labels_hash,
+                            "context_lengths": mb_dev["context_lengths"].cpu().tolist(),
+                            "skipped": _skipped,
+                            "grad_norm": _grad_norm_metrics.get("grad_norm/total", None) if _grad_norm_metrics else None,
+                            "running_loss": float(running_loss),
+                            "epoch_loss_sum": float(epoch_loss_sum),
+                            "epoch_steps": epoch_steps,
+                        }
+                        _debug_resume_file.write(json.dumps(_debug_record) + "\n")
+                        _debug_resume_file.flush()
+
                     # --- P0 Monitor: Param norm and generated LoRA norm ---
                     # Computed after optimizer step so we see updated weights.
                     # In TP mode all params are replicated, so main GPU can
@@ -2457,12 +2953,10 @@ def tp_main(cfg: DictConfig):
                     # --- Checkpointing (before timing so save overhead is included in step_time, same as PP) ---
                     save_duration = 0.0
                     if save_sched.should_run(global_step) and not save_best_only:
-                        # ZeRO-1 consolidate is a collective op — all ranks must participate
-                        from torch.distributed.optim import ZeroRedundancyOptimizer
-                        if isinstance(optimizer, ZeroRedundancyOptimizer):
-                            optimizer.consolidate_state_dict(to=0)
+                        save_t0 = time.time()
+                        # Rank 0 saves model, scheduler, metadata
                         if is_main_process():
-                            save_duration = _tp_save_checkpoint(
+                            _tp_save_checkpoint(
                                 model=model,
                                 optimizer=optimizer,
                                 lr_scheduler=lr_scheduler,
@@ -2483,25 +2977,52 @@ def tp_main(cfg: DictConfig):
                                 total_conv_valid_tokens=total_conv_valid_tokens,
                                 config_selections=_resolved_configs,
                                 launch_cmd=os.environ.get("LAUNCH_CMD", ""),
+                                prev_repo=_prev_repo,
+                                tp_size=tp_cfg["tensor_parallel_size"],
+                                sp_size=tp_cfg["sequence_parallel_size"],
+                                gpus_per_node=tp_cfg["total_gpus"],
+                                num_nodes=dist.get_world_size() // tp_cfg["total_gpus"],
                             )
+                        barrier()  # Ensure rank 0 finishes saving model/metadata before optimizer shards
+
+                        # All ranks on node 0 save their optimizer shard
+                        # (all nodes have identical shards, so only node 0 needs to save)
+                        _node_rank = dist.get_rank() // tp_cfg["total_gpus"]
+                        if _node_rank == 0:
+                            step_dir = get_step_checkpoint_dir(run_name, global_step)
+                            training_state_dir = os.path.join(step_dir, "training_state")
+                            os.makedirs(training_state_dir, exist_ok=True)
+                            _local_rank = dist.get_rank() % tp_cfg["total_gpus"]
+                            _tp_save_optimizer_state_sharded(
+                                model, optimizer, training_state_dir, _local_rank
+                            )
+
+                        save_duration = time.time() - save_t0
+                        barrier()  # Ensure all ranks finish saving optimizer shards
+
+                        if is_main_process():
                             logger.info(
                                 f"[checkpoint] saved step {global_step} "
                                 f"({save_duration:.1f}s) → {get_step_checkpoint_dir(run_name, global_step)}"
                             )
-                        barrier()  # Ensure rank 0 finishes saving before others continue
 
                         # Save detach_state on ALL ranks (each TP rank has different wdict shard)
+                        # NOTE: Within an SP group, all ranks have the same wdict
+                        # (because memory_states is all_reduced across SP). So only
+                        # sp_rank=0 needs to save to avoid file conflicts.
                         if model.detach_state is not None:
-                            ds_state = model.detach_state.state_dict()
-                            if ds_state:
-                                step_dir = get_step_checkpoint_dir(run_name, global_step)
-                                ds_dir = os.path.join(step_dir, "detach_state")
-                                os.makedirs(ds_dir, exist_ok=True)
-                                ds_path = os.path.join(
-                                    ds_dir,
-                                    f"dp{tp_cfg['data_parallel_rank']}_tp{tp_cfg['tp_rank']}.pt"
-                                )
-                                torch.save(ds_state, ds_path)
+                            _sp_rank_for_save = tp_cfg.get("sp_rank", 0)
+                            if _sp_rank_for_save == 0:
+                                ds_state = model.detach_state.state_dict()
+                                if ds_state:
+                                    step_dir = get_step_checkpoint_dir(run_name, global_step)
+                                    ds_dir = os.path.join(step_dir, "detach_state")
+                                    os.makedirs(ds_dir, exist_ok=True)
+                                    ds_path = os.path.join(
+                                        ds_dir,
+                                        f"dp{tp_cfg['data_parallel_rank']}_tp{tp_cfg['tp_rank']}.pt"
+                                    )
+                                    torch.save(ds_state, ds_path)
                         barrier()  # Ensure all ranks finish saving detach_state
 
                     # --- EMA time-per-step tracking (after save so step_time includes save overhead, same as PP) ---
@@ -2584,7 +3105,6 @@ def tp_main(cfg: DictConfig):
                                                               _tr_t[2].item(), _tr_t[3].item())
                         _train_token_acc = (_tr_ac / _tr_at) if _tr_at > 0 else None
                         _train_answer_acc = (_tr_nc / _tr_nt) if _tr_nt > 0 else None
-
                         # All-reduce detach_state metrics across DP replicas
                         if model.detach_state is not None:
                             _local_regu = running_regu_sq_norm / logging_steps if logging_steps > 0 else 0.0
@@ -2626,6 +3146,9 @@ def tp_main(cfg: DictConfig):
                                     f", distill_loss={_global_avg_distill_loss:.4f}"
                                     f", total_loss={_global_total_loss:.4f}, total_ppl={_global_total_ppl:.2f}"
                                 )
+                            _tr_acc_suffix = ""
+                            if _train_token_acc is not None:
+                                _tr_acc_suffix = f",\ttoken_acc={_train_token_acc:.4f},\tanswer_acc={_train_answer_acc:.4f}"
                             _regu_suffix = ""
                             if model.detach_state is not None:
                                 _regu_suffix = (
@@ -2634,9 +3157,6 @@ def tp_main(cfg: DictConfig):
                                     f",\trepo_reset_ratio={_global_avg_repo_reset:.4f}"
                                     f",\tmean_upd_step={_global_avg_update:.1f}"
                                 )
-                            _tr_acc_suffix = ""
-                            if _train_token_acc is not None:
-                                _tr_acc_suffix = f",\ttoken_acc={_train_token_acc:.4f},\tanswer_acc={_train_answer_acc:.4f}"
                             logger.info(
                                 f"  [Step {global_step}/{max_steps}]\t"
                                 f"epoch={epoch},\tloss={_global_avg_ce_loss:.4f},\tppl={_global_ce_ppl:.2f}{_tr_acc_suffix}{_distill_suffix},\t"
@@ -2661,10 +3181,6 @@ def tp_main(cfg: DictConfig):
                                     "train/total_conv_valid_tokens": total_conv_valid_tokens,
                                     "train/step_time": last_step_duration,
                                 }
-                                if _train_token_acc is not None:
-                                    wandb_metrics["train/token_acc"] = _train_token_acc
-                                if _train_answer_acc is not None:
-                                    wandb_metrics["train/answer_acc"] = _train_answer_acc
                                 # DetachState metrics (regu_sq_norm, reset_ratio, mean_update_step)
                                 if model.detach_state is not None:
                                     wandb_metrics["train/regu_sq_norm"] = _global_avg_regu
@@ -2708,10 +3224,6 @@ def tp_main(cfg: DictConfig):
                         running_reset_ratio = 0.0
                         running_mean_update_step = 0.0
                         running_repo_reset_count = 0
-                        _train_acc_corr = 0
-                        _train_acc_tot = 0
-                        _train_ans_corr = 0
-                        _train_ans_tot = 0
                         step_context_tokens = 0
                         step_conv_total_tokens = 0
                         step_conv_valid_tokens = 0
@@ -2734,6 +3246,13 @@ def tp_main(cfg: DictConfig):
                         )
                         # Also check TP-group consistency for replicated params
                         check_tp_param_consistency(
+                            model=model,
+                            my_device=my_device,
+                            tp_cfg=tp_cfg,
+                            global_step=global_step,
+                        )
+                        # Also check SP-group consistency for replicated params
+                        check_sp_param_consistency(
                             model=model,
                             my_device=my_device,
                             tp_cfg=tp_cfg,
@@ -2861,8 +3380,9 @@ def tp_main(cfg: DictConfig):
     # ==================================================================
     _report_peak_memory("After training")
 
-    # Final evaluation (always run regardless of eval schedule)
-    if val_loader_for_eval is not None:
+    # Final evaluation (only if eval is enabled in config)
+    _eval_enabled = (eval_steps_raw is not None and eval_steps_raw > 0)
+    if _eval_enabled and val_loader_for_eval is not None:
         # Skip if the last training step already triggered an eval
         _already_evaled = eval_sched.should_run(global_step)
         if not _already_evaled:
@@ -2897,7 +3417,9 @@ def tp_main(cfg: DictConfig):
         if is_main_process_per_node():
             logger.info(f"  [Final] save_best_only: keeping best model (val_ppl={best_val_ppl:.4f}) "
                         f"at final/model; skipping last-step final save.")
-    elif is_main_process():
+    elif is_main_process_per_node():
+        logger.info(f"  [Final] Saving final checkpoint for run '{run_name}'...")
+    if not save_best_only and is_main_process():
         final_dir = os.path.join(get_checkpoint_dir(run_name), "final")
         model_dir = os.path.join(final_dir, "model")
         model.save_model(model_dir)

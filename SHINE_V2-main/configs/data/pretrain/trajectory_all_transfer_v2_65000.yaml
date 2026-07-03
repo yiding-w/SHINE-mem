@@ -1,0 +1,59 @@
+# Data configuration for trajectory_all_transfer_v2 dataset
+# Loads trajectories from SHINE_SWE_DISTILLATION_v2 + SHINE_SWE_OPENSOURCE_v2,
+# tokenizes them via chat template, groups by repo, and creates
+# consecutive-pair samples for transfer learning.
+# OPENSOURCE trajectories are filtered by correctness="correct" (only correct ones are used).
+# Supports issue_content_hash-based deduplication via max_same_issue parameter.
+# Supports subset filtering to select specific sub-datasets.
+name: trajectory_all_transfer_v2
+dataset_module: mydatasets.pretrain.trajectory_all_transfer_v2  # Python module path for dynamic import
+
+# Maximum token length for a single trajectory (trajectories longer than this are discarded)
+max_token_length: 65000
+
+# Data source settings (multiple paths)
+data_paths:
+  - "data/SHINE_SWE_DISTILLATION_v2"
+  - "data/SHINE_SWE_OPENSOURCE_v2"
+
+# Tokenization cache settings
+cache_dir: "cache/trajectory_all_transfer_v2_tokens"  # Directory for tokenized cache files
+preprocess_workers: 32                                 # Number of parallel workers for tokenization
+
+# Training settings
+validation_split_num: 512             # Validation split size
+validation_max_traj_per_repo: 128      # Max trajectories per repo allowed in validation set.
+                                      # Repos exceeding this limit are skipped (kept in train set).
+                                      # Set to -1 to disable (no limit).
+shuffle: false                        # MUST be false: repo-contiguous ordering is required
+continuous_repo_num: 10               # Average consecutive samples from the same repo before switching.
+                                      # Long repos are split into chunks of this size, then chunks are
+                                      # globally shuffled. Set to -1 to disable (keep entire repo contiguous).
+
+# Issue deduplication: max number of trajectories with the same issue_content_hash to use.
+# Set to -1 to disable (use all). Changing this does NOT require re-preprocessing.
+max_same_issue: 1 #   1 num_samples_in_dataset: 6509  -1： 27648
+
+# Minimum trajectories per repo: repos with fewer valid trajectories (after all filters
+# including subset, max_token_length, and max_same_issue) are discarded entirely.
+# Set to -1 to disable (keep all repos). Changing this does NOT require re-preprocessing.
+min_traj_per_repo: 2
+
+# Subset filtering: select specific sub-datasets to use.
+# Set to null to use all data. Can be a list of sub-dataset names, e.g.:
+#   subset:
+#     - "distillation"
+#     - "CoderForge-Preview"
+#     - "SWE-smith-trajectories"
+# Valid names for opensource sub-datasets (without .openai suffix):
+#   CoderForge-Preview, Kwai-Klear-SWE-smith-mini-swe-agent-plus-trajectories-66k,
+#   MEnvData-SWE-Trajectory, Nemotron-SFT-SWE-v3, Nemotron-SWE-v1, Open-SWE-Traces,
+#   OpenSWE-Trajectory, Scale-SWE-Distilled-DeepSeek-v3.2,
+#   Scale-SWE-Distilled-DeepSeek-v4-Pro-High-41k, SWE-Factory-Kimi-K2-2.8K,
+#   SWE-Factory-Kimi-K2-RS, SWE-Gym-OpenHands-SFT-Trajectories,
+#   SWE-Hero-openhands-trajectories, SWE-Lego-Real-Data, SWE-Lego-Synthetic-Data,
+#   SWE-rebench-openhands-trajectories, SWE-smith-trajectories,
+#   SWE-Zero-openhands-trajectories
+# Use "distillation" to include all DISTILLATION_v2 data.
+# Changing this does NOT require re-preprocessing.
+subset: null

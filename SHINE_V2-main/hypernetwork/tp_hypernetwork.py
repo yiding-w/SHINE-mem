@@ -76,6 +76,8 @@ class TPHypernetwork(nn.Module):
         memory_method: str = "only_full_1for1",
         dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
+        activation_checkpointing: bool = False,
+        ckpt_skip_stride: int = 0,
     ):
         super().__init__()
         if memory_method not in ("only_full_4for1", "only_full_1for1"):
@@ -84,6 +86,8 @@ class TPHypernetwork(nn.Module):
                 f"Supported: 'only_full_4for1', 'only_full_1for1'."
             )
         self._memory_method = memory_method
+        self._activation_checkpointing = activation_checkpointing
+        self._ckpt_skip_stride = int(ckpt_skip_stride)
         self._num_llm_layers = num_llm_layers
         self._num_full_attn_layers = num_full_attn_layers
         self._num_mem_token = num_mem_token
@@ -133,7 +137,9 @@ class TPHypernetwork(nn.Module):
             logger.info(
                 f"[TPHypernetwork] effective_L={self._effective_L} effective_M={self._effective_M} "
                 f"hidden={hidden_size} num_m2p_layers={len(self.m2p_transformer.layers)} "
-                f"layer_types={self._layer_types}"
+                f"layer_types={self._layer_types} "
+                f"activation_checkpointing={activation_checkpointing} "
+                f"ckpt_skip_stride={ckpt_skip_stride}"
             )
 
     # ------------------------------------------------------------------
@@ -199,14 +205,36 @@ class TPHypernetwork(nn.Module):
         hs = self._initial_reshape(memory_states)
         hs = hs + self.token_pos_emb + self.layer_pos_emb
 
+        s = self._ckpt_skip_stride
         for layer_idx, m2p_layer in enumerate(self.m2p_transformer.layers):
             kind = self._layer_types[layer_idx]
-            if kind == "h":
-                hs = self._h_layer_forward(m2p_layer, hs)
-            elif kind == "v":
-                hs = self._v_layer_forward(m2p_layer, hs)
+            # Determine whether to checkpoint this layer:
+            # - If ckpt_skip_stride > 0, skip (don't checkpoint) layers where idx % s == 0
+            # - If ckpt_skip_stride == 0, checkpoint all layers
+            use_ckpt_this_layer = self._activation_checkpointing and not (s > 0 and layer_idx % s == 0)
+            if use_ckpt_this_layer:
+                # Gradient checkpoint: drop intermediate activations and
+                # recompute them during backward to save memory.
+                from torch.utils.checkpoint import checkpoint
+                if kind == "h":
+                    hs = checkpoint(
+                        self._h_layer_forward, m2p_layer, hs,
+                        use_reentrant=False,
+                    )
+                elif kind == "v":
+                    hs = checkpoint(
+                        self._v_layer_forward, m2p_layer, hs,
+                        use_reentrant=False,
+                    )
+                else:
+                    raise ValueError(f"Unknown m2p layer_type '{kind}' at index {layer_idx}")
             else:
-                raise ValueError(f"Unknown m2p layer_type '{kind}' at index {layer_idx}")
+                if kind == "h":
+                    hs = self._h_layer_forward(m2p_layer, hs)
+                elif kind == "v":
+                    hs = self._v_layer_forward(m2p_layer, hs)
+                else:
+                    raise ValueError(f"Unknown m2p layer_type '{kind}' at index {layer_idx}")
 
         # Final norm (gated or normal) — m2p_transformer.forward handles
         # this for the standalone case; we reimplement here because we

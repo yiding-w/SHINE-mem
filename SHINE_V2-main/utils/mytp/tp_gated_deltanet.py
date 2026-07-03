@@ -66,9 +66,15 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
+from torch.distributed import ProcessGroup
+
+from fla.modules.conv.causal_conv1d import causal_conv1d as fla_causal_conv1d
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 
 from utils.myparallel import is_main_process_per_node
+from utils.mytp.fla_cp import build_sp_cp_context
 from utils.mytp.tp_linear import ColwiseLoraLinear, RowwiseLoraLinear
 
 
@@ -165,6 +171,8 @@ class TPQwen3_5GatedDeltaNet(nn.Module):
         tp_rank: int,
         tp_world: int,
         tp_process_group,
+        sp_group: Optional[ProcessGroup] = None,
+        sp_world: int = 1,
     ):
         # We don't actually want our own nn.Module — we want the parent's
         # forward bound to a parent instance whose internals we replace.
@@ -267,16 +275,150 @@ class TPQwen3_5GatedDeltaNet(nn.Module):
         self.tp_process_group = tp_process_group
         self.layer_idx = layer_idx
 
+        # ---- SP (Sequence Parallelism) support ----
+        self.sp_group = sp_group
+        self.sp_world = sp_world
+        self._use_sp = (sp_group is not None and sp_world > 1)
+
+        # Cache local dims needed by forward_sp
+        self._num_v_local = num_v_local
+        self._num_k_local = num_k_local
+        self._head_k_dim = head_k_dim
+        self._head_v_dim = head_v_dim
+        self._key_dim_local = key_dim_local
+        self._value_dim_local = value_dim_local
+        self._conv_kernel_size = conv_kernel
+
+        # Pre-extract conv1d weight in [D, W] format for FLA's causal_conv1d
+        # (will be populated after weight loading via _prepare_sp_weights)
+        self._conv1d_weight_for_fla: Optional[Tensor] = None
+
+        # cp_context is lazily built on first forward_sp call (needs device)
+        self._cp_context = None
+        self._cp_context_seq_len = None
+
         if is_main_process_per_node():
+            sp_info = f" SP={sp_world}" if self._use_sp else ""
             logger.info(
-                f"[TPQwen3_5GatedDeltaNet] layer {layer_idx}: "
+                f"[TPQwen3_5GatedDeltaNet] layer {layer_idx}:{sp_info} "
                 f"num_v={num_v}→{num_v_local} num_k={num_k}→{num_k_local} "
                 f"key_dim={key_dim_full}→{key_dim_local} value_dim={value_dim_full}→{value_dim_local} "
                 f"conv_dim={inner.conv_dim} (was {2*key_dim_full + value_dim_full})"
             )
 
-    def forward(self, *args, **kwargs):
-        return self._inner(*args, **kwargs)
+    # ------------------------------------------------------------------
+    # SP forward path
+    # ------------------------------------------------------------------
+
+    def _get_cp_context(self, seq_len_local: int, device: torch.device):
+        """Lazily build and cache the FLACPContext."""
+        if self._cp_context is None or self._cp_context_seq_len != seq_len_local:
+            self._cp_context = build_sp_cp_context(
+                seq_len_local=seq_len_local,
+                sp_group=self.sp_group,
+                conv1d_kernel_size=self._conv_kernel_size,
+                device=device,
+            )
+            self._cp_context_seq_len = seq_len_local
+        return self._cp_context
+
+    def _get_conv1d_weight(self) -> Tensor:
+        """Get conv1d weight in [D, W] format for FLA's causal_conv1d."""
+        if self._conv1d_weight_for_fla is None:
+            # conv1d.weight shape: [conv_dim_local, 1, kernel_size]
+            # FLA expects: [D, W] where D=conv_dim_local, W=kernel_size
+            self._conv1d_weight_for_fla = self._inner.conv1d.weight.squeeze(1)
+        return self._conv1d_weight_for_fla
+
+    @torch.compiler.disable
+    def forward_sp(self, hidden_states: Tensor) -> Tensor:
+        """SP-aware forward using FLA's native CP support.
+
+        Uses fla.causal_conv1d (with halo exchange) and
+        chunk_gated_delta_rule (with state merge) — both handle
+        cross-rank communication internally via cp_context.
+
+        Args:
+            hidden_states: [B, S_local, H]
+
+        Returns:
+            output: [B, S_local, H]
+        """
+        batch_size, seq_len, _ = hidden_states.shape
+        inner = self._inner
+
+        # Build/retrieve cp_context
+        cp_context = self._get_cp_context(seq_len, hidden_states.device)
+
+        # 1. Projections (local, no communication — TP all-reduce in backward
+        #    is handled by ColwiseLoraLinear / RowwiseLoraLinear)
+        mixed_qkv = inner.in_proj_qkv(hidden_states)  # [B, S_local, conv_dim_local]
+        z = inner.in_proj_z(hidden_states)              # [B, S_local, value_dim_local]
+        b = inner.in_proj_b(hidden_states)              # [B, S_local, num_v_local]
+        a = inner.in_proj_a(hidden_states)              # [B, S_local, num_v_local]
+
+        # 2. Conv1d with CP halo exchange (FLA handles internally)
+        #    FLA's causal_conv1d expects x: [B, T, D], weight: [D, W]
+        conv_weight = self._get_conv1d_weight()
+        mixed_qkv, _ = fla_causal_conv1d(
+            x=mixed_qkv,
+            weight=conv_weight,
+            bias=inner.conv1d.bias,
+            activation=inner.activation,
+            cp_context=cp_context,
+        )
+
+        # 3. Split Q/K/V, compute g, beta (all local)
+        query, key, value = torch.split(
+            mixed_qkv,
+            [self._key_dim_local, self._key_dim_local, self._value_dim_local],
+            dim=-1,
+        )
+        query = query.reshape(batch_size, seq_len, self._num_k_local, self._head_k_dim)
+        key = key.reshape(batch_size, seq_len, self._num_k_local, self._head_k_dim)
+        value = value.reshape(batch_size, seq_len, self._num_v_local, self._head_v_dim)
+
+        beta = b.sigmoid()
+        # float() to avoid -inf in fp16 for A_log.exp()
+        g = -inner.A_log.float().exp() * F.softplus(a.float() + inner.dt_bias)
+
+        # GQA: repeat k heads to match v heads
+        gqa_factor = self._num_v_local // self._num_k_local
+        if gqa_factor > 1:
+            query = query.repeat_interleave(gqa_factor, dim=2)
+            key = key.repeat_interleave(gqa_factor, dim=2)
+
+        # 4. chunk_gated_delta_rule with CP (FLA handles state merge internally)
+        output, _ = chunk_gated_delta_rule(
+            q=query,
+            k=key,
+            v=value,
+            g=g,
+            beta=beta,
+            initial_state=None,
+            output_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+            cp_context=cp_context,
+        )
+
+        # 5. Norm + out_proj (local)
+        z = z.reshape(batch_size, seq_len, self._num_v_local, self._head_v_dim)
+        output = inner.norm(
+            output.reshape(-1, self._head_v_dim),
+            z.reshape(-1, self._head_v_dim),
+        )
+
+        output = inner.out_proj(output.reshape(batch_size, seq_len, -1))
+        return output
+
+    # ------------------------------------------------------------------
+    # Unified forward: route based on init-time flag (no runtime branch cost)
+    # ------------------------------------------------------------------
+
+    def forward(self, hidden_states: Tensor, **kwargs) -> Tensor:
+        if self._use_sp:
+            return self.forward_sp(hidden_states)
+        return self._inner(hidden_states, **kwargs)
 
 
 # ---------------------------------------------------------------------------

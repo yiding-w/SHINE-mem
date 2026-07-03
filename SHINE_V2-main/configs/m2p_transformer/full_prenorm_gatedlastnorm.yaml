@@ -59,7 +59,7 @@ init_lora_var: 0.0001
 
 # generate_lora_scale: scale applied to hypernetwork-generated LoRA
 #   A = plain_tensor[...] * sqrt(generate_lora_scale),  B = plain_tensor[...] * sqrt(generate_lora_scale)
-generate_lora_scale: 0.000001
+generate_lora_scale: 0.0000001
 
 # device_map:
 #   layer_prefix: "layers"

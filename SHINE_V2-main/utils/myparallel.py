@@ -296,26 +296,44 @@ get_pipeline_info = get_pipeline_config
 def setup_tensor_parallel(
     total_gpus: int,
     tensor_parallel_size: int,
+    sequence_parallel_size: int = 1,
 ) -> Dict:
     """
-    Compute and store tensor-parallel + data-parallel topology.
+    Compute and store tensor-parallel + sequence-parallel + data-parallel topology.
+
+    GPU layout (within a node):
+        - The ``total_gpus`` GPUs are first divided into groups of size
+          ``tp_size * sp_size``. Within each such group:
+            * TP group: ``tp_size`` consecutive GPUs share the same SP rank.
+            * SP group: ``sp_size`` GPUs with the same TP rank across TP groups.
+        - Remaining groups across nodes form the DP dimension.
+
+    Constraint: ``tp_size * sp_size`` must divide ``total_gpus``.
+    Recommendation: ``tp_size * sp_size <= gpus_per_node`` (avoid cross-node P2P).
 
     Args:
         total_gpus: Number of GPUs per node.
         tensor_parallel_size: TP shards per group. Must divide total_gpus.
+        sequence_parallel_size: SP shards per group (default 1 = no SP).
+            Must satisfy ``tp_size * sp_size`` divides ``total_gpus``.
 
     Returns:
         Dict (also stored in module-global _tp_config) with keys:
             tp_rank, tensor_parallel_size, device,
+            sp_rank, sequence_parallel_size, sp_process_group,
             data_parallel_rank, data_parallel_size,
             tp_process_group, dp_process_group, node_process_group,
             total_gpus
     """
     global _tp_config
 
-    if total_gpus % tensor_parallel_size != 0:
+    tp_size = tensor_parallel_size
+    sp_size = sequence_parallel_size
+
+    tp_sp_size = tp_size * sp_size
+    if total_gpus % tp_sp_size != 0:
         raise ValueError(
-            f"tensor_parallel_size ({tensor_parallel_size}) must evenly "
+            f"tp_size * sp_size ({tp_size} * {sp_size} = {tp_sp_size}) must evenly "
             f"divide total_gpus per node ({total_gpus})"
         )
 
@@ -323,41 +341,92 @@ def setup_tensor_parallel(
     global_rank = get_rank()
     world_size = get_world_size()
 
-    tp_rank = local_rank % tensor_parallel_size
-    tp_groups_per_node = total_gpus // tensor_parallel_size
-    tp_group_in_node = local_rank // tensor_parallel_size
+    # Within a TP×SP group of tp_sp_size GPUs:
+    #   rank_in_group = local_rank % tp_sp_size
+    #   tp_rank = rank_in_group % tp_size
+    #   sp_rank = rank_in_group // tp_size
+    tp_rank = local_rank % tp_size
+    sp_rank = (local_rank % tp_sp_size) // tp_size
+
+    tp_sp_groups_per_node = total_gpus // tp_sp_size
+    tp_sp_group_in_node = local_rank // tp_sp_size
 
     num_nodes = world_size // total_gpus if total_gpus > 0 else 1
-    total_tp_groups = tp_groups_per_node * num_nodes
+    total_tp_sp_groups = tp_sp_groups_per_node * num_nodes
 
     node_rank = global_rank // total_gpus
-    data_parallel_rank = node_rank * tp_groups_per_node + tp_group_in_node
-    data_parallel_size = total_tp_groups
+    data_parallel_rank = node_rank * tp_sp_groups_per_node + tp_sp_group_in_node
+    data_parallel_size = total_tp_sp_groups
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
 
+    # --- TP process groups ---
+    # Each TP group: tp_size consecutive ranks within a TP×SP group
+    # that share the same sp_rank.
     tp_process_group = None
-    if _dist_is_active() and tensor_parallel_size > 1:
-        my_tp_group_idx = global_rank // tensor_parallel_size
-        for g_idx in range(total_tp_groups):
-            base = g_idx * tensor_parallel_size
-            ranks_for_tp = list(range(base, base + tensor_parallel_size))
+    if _dist_is_active() and tp_size > 1:
+        # Total number of TP groups = total_tp_sp_groups * sp_size
+        num_tp_groups = (world_size // tp_sp_size) * sp_size
+        for g_idx in range(world_size // tp_size):
+            # Enumerate all TP groups across the entire world
+            # TP group g_idx contains ranks:
+            #   base_of_tp_sp_group + sp_r * tp_size + [0..tp_size-1]
+            tp_sp_group_idx = g_idx // sp_size
+            sp_r = g_idx % sp_size
+            base = tp_sp_group_idx * tp_sp_size + sp_r * tp_size
+            ranks_for_tp = list(range(base, base + tp_size))
             group = dist.new_group(ranks=ranks_for_tp)
-            if g_idx == my_tp_group_idx:
+            if global_rank in ranks_for_tp:
                 tp_process_group = group
 
+    # --- SP process groups ---
+    # Each SP group: sp_size ranks with the same tp_rank across sp positions
+    # within the same TP×SP group.
+    sp_process_group = None
+    if _dist_is_active() and sp_size > 1:
+        for g_idx in range(world_size // tp_sp_size):
+            for tp_r in range(tp_size):
+                base = g_idx * tp_sp_size
+                ranks_for_sp = [base + sp_r * tp_size + tp_r for sp_r in range(sp_size)]
+                group = dist.new_group(ranks=ranks_for_sp)
+                if global_rank in ranks_for_sp:
+                    sp_process_group = group
+
+    # --- DP process groups ---
+    # Each DP group: ranks at the same position within their TP×SP group,
+    # across all TP×SP groups (across nodes).
     dp_process_group = None
     if _dist_is_active() and data_parallel_size > 1:
-        for s in range(tensor_parallel_size):
+        for pos in range(tp_sp_size):
             ranks_for_dp = []
             for n in range(num_nodes):
-                for g in range(tp_groups_per_node):
-                    r = n * total_gpus + g * tensor_parallel_size + s
+                for g in range(tp_sp_groups_per_node):
+                    r = n * total_gpus + g * tp_sp_size + pos
                     ranks_for_dp.append(r)
             group = dist.new_group(ranks=ranks_for_dp)
-            if tp_rank == s:
+            if (local_rank % tp_sp_size) == pos:
                 dp_process_group = group
+
+    # --- DP+SP process groups (for ZeRO-1 sharding across SP+DP ranks) ---
+    # Each DP+SP group: all ranks that share the same tp_rank within their
+    # TP×SP group, across all TP×SP groups (nodes) AND across SP positions.
+    # This allows ZeRO-1 to shard optimizer state across both SP and DP ranks
+    # since they all hold identical parameters.
+    dp_sp_process_group = None
+    if _dist_is_active() and (data_parallel_size * sp_size) > 1:
+        for tp_r in range(tp_size):
+            ranks_for_dp_sp = []
+            for n in range(num_nodes):
+                for g in range(tp_sp_groups_per_node):
+                    # For each TP×SP group, collect all SP ranks with this tp_rank
+                    base = n * total_gpus + g * tp_sp_size
+                    for sp_r in range(sp_size):
+                        r = base + sp_r * tp_size + tp_r
+                        ranks_for_dp_sp.append(r)
+            group = dist.new_group(ranks=ranks_for_dp_sp)
+            if tp_rank == tp_r:
+                dp_sp_process_group = group
 
     node_process_group = None
     if _dist_is_active():
@@ -367,23 +436,28 @@ def setup_tensor_parallel(
             if node_rank == n:
                 node_process_group = grp
 
-    os.environ["TENSOR_PARALLEL_SIZE"] = str(tensor_parallel_size)
+    os.environ["TENSOR_PARALLEL_SIZE"] = str(tp_size)
+    os.environ["SEQUENCE_PARALLEL_SIZE"] = str(sp_size)
 
     _tp_config = {
         "tp_rank": tp_rank,
-        "tensor_parallel_size": tensor_parallel_size,
+        "tensor_parallel_size": tp_size,
+        "sp_rank": sp_rank,
+        "sequence_parallel_size": sp_size,
         "device": device,
         "data_parallel_rank": data_parallel_rank,
         "data_parallel_size": data_parallel_size,
         "tp_process_group": tp_process_group,
+        "sp_process_group": sp_process_group,
         "dp_process_group": dp_process_group,
+        "dp_sp_process_group": dp_sp_process_group,
         "node_process_group": node_process_group,
         "total_gpus": total_gpus,
     }
 
     if is_main_process_per_node():
         logger.info(
-            f"Tensor-parallel topology: TP={tensor_parallel_size} x "
+            f"Tensor-parallel topology: TP={tp_size} x SP={sp_size} x "
             f"DP={data_parallel_size}  "
             f"(world_size={world_size}, gpus_per_node={total_gpus})"
         )

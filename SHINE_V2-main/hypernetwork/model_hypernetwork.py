@@ -2382,6 +2382,7 @@ None).
         distill_micro_batch_size: int = None,
         distill_mode: str = None,
         grad_accum_steps: int = 1,
+        return_loradict: bool = False,
     ) -> tuple:
         """
         Multi micro-batch pipeline forward that reduces bubble time by
@@ -2679,6 +2680,10 @@ None).
             # No detach_state — nothing to write or regularize
             per_mb_sq_norms = [0.0] * num_mb
 
+        if return_loradict:
+            return (all_hidden_states, all_step1_anchors, all_step4_anchors,
+                    all_memory_states, distill_teacher_outputs, distill_student_outputs,
+                    per_mb_sq_norms, all_loradicts)
         return (all_hidden_states, all_step1_anchors, all_step4_anchors,
                 all_memory_states, distill_teacher_outputs, distill_student_outputs,
                 per_mb_sq_norms)

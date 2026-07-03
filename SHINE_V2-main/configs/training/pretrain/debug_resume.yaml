@@ -1,0 +1,55 @@
+max_steps: 20
+warmup_steps: 1
+gradient_clipping: 1.0
+
+pp_batchsize:
+  local_batch_size: 2
+  local_micro_batch_size: 1
+  gradient_accumulation_steps: 1
+
+tp_batchsize:
+  batch_size: 1
+  gradient_accumulation_steps: 1
+
+# Evaluation — disabled for debug
+eval_steps: -1
+
+evaluation_pp_batchsize:
+  local_batch_size: -1
+  local_micro_batch_size: 1
+evaluation_tp_batchsize:
+  batch_size: 1
+
+# Acceleration knobs — PP mode
+pp_knobs:
+  activation_checkpointing: true
+
+# Acceleration knobs — TP mode — keep LLM checkpointing to avoid OOM
+tp_knobs:
+  activation_checkpointing_llm: true
+  activation_checkpointing_m2p: false
+  ckpt_skip_stride_llm: 0
+  ckpt_skip_stride_m2p: 0
+  compile_hypernetwork: true
+  zero1: true
+  cpu_offload: false
+
+# Checkpointing
+save_steps: 10
+forever_save_steps: -1
+save_total_limit: 2
+resume_from: latest
+
+# Logging
+logging_steps: 1
+log_dir: ./logs
+
+# Distillation — disabled
+distill:
+  enabled: false
+  mode: logits
+  loss_type: kl_div
+  coefficient: 1.0
+  temperature: 1.0
+  distill_local_batch_size: 16
+  distill_micro_batch_size: 1

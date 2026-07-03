@@ -172,14 +172,15 @@ class FullTPDetachState(BaseDetachState):
             self._zero_wdict(self._wdict)
 
     def state_dict(self) -> Dict:
-        """Serialize wdict + frozen config for checkpointing."""
+        """Serialize wdict + frozen config + update_steps for checkpointing."""
         return {
             "frozen_cfg": self._frozen_cfg,
             "wdict": self._wdict,
+            "update_steps": list(self._update_steps),
         }
 
     def load_state_dict(self, state: Dict) -> None:
-        """Restore wdict from checkpoint, with strict config validation."""
+        """Restore wdict + update_steps from checkpoint, with strict config validation."""
         saved_cfg = state.get("frozen_cfg", {})
         self._validate_frozen_cfg(saved_cfg)
         self._wdict = state.get("wdict", None)
@@ -188,6 +189,12 @@ class FullTPDetachState(BaseDetachState):
             self._ensure_no_grad(self._wdict)
         if "wdict_shapes" in saved_cfg and "wdict_shapes" not in self._frozen_cfg:
             self._frozen_cfg["wdict_shapes"] = saved_cfg["wdict_shapes"]
+        # Restore per-sample update step counters
+        self._update_steps = list(state["update_steps"])
+        # Pad or truncate to match current local_batch_size
+        while len(self._update_steps) < self._local_batch_size:
+            self._update_steps.append(0)
+        self._update_steps = self._update_steps[:self._local_batch_size]
 
     # ------------------------------------------------------------------
     # Frozen config validation
@@ -301,13 +308,18 @@ class FullTPDetachState(BaseDetachState):
         precomputed = self._detach_wdict(new_wdict)
 
         # Compute loss if regu_c > 0
+        # NOTE: Do NOT divide by grad_accum_steps here. The caller (_train_step)
+        # already divides the entire backward_loss (CE + regu) by grad_accum_steps.
+        # Dividing here would double-scale the regu gradient.
+        # Only divide by num_mb to average across micro-batches within a single
+        # forward call (always 1 in TP mode).
         unscaled_sq_norm = None
         regu_loss_tensor = None
         if regu_c > 0:
             sq_norm = self._compute_sq_norm(new_wdict)
             if sq_norm is not None:
                 unscaled_sq_norm = sq_norm.detach().item()
-                regu_loss_tensor = regu_c * sq_norm / (num_mb * grad_accum_steps)
+                regu_loss_tensor = regu_c * sq_norm / num_mb
 
         return unscaled_sq_norm, regu_loss_tensor, precomputed
 
@@ -346,22 +358,22 @@ class FullTPDetachState(BaseDetachState):
             self._update_steps.append(0)
 
         reset_threshold = self._cfg.get("reset_threshold", None)
-        if reset_threshold is None or self._wdict is None:
+        if reset_threshold is None:
             return False
 
-        # reset_threshold <= 0: always reset every step
+        # Determine whether this sample should be reset
+        should_reset = False
         if reset_threshold <= 0:
-            self._zero_wdict_slice(self._wdict, sample_idx, sample_idx + 1)
-            self._update_steps[sample_idx] = 0
-            return True
+            # Always reset every step
+            should_reset = True
+        elif self._last_sq_norms is not None and sample_idx < len(self._last_sq_norms):
+            should_reset = self._last_sq_norms[sample_idx] > reset_threshold
 
-        # reset_threshold > 0: reset only when sq_norm exceeds threshold
-        if self._last_sq_norms is None or sample_idx >= len(self._last_sq_norms):
-            return False
-
-        sq_norm = self._last_sq_norms[sample_idx]
-        if sq_norm > reset_threshold:
-            self._zero_wdict_slice(self._wdict, sample_idx, sample_idx + 1)
+        if should_reset:
+            # Zero out wdict slice if it exists
+            if self._wdict is not None:
+                self._zero_wdict_slice(self._wdict, sample_idx, sample_idx + 1)
+            # Always reset counter (even when _wdict is None)
             self._update_steps[sample_idx] = 0
             return True
         else:

@@ -566,3 +566,348 @@ def merge_loradicts_into_wdict_concat(
 
     # Add the new wdict to the existing one
     return add_wdict([wdict, new_wdict])
+
+
+# ===========================================================================
+# loradict → PEFT LoRA adapter conversion
+#
+# Converts the internal loradict format to HuggingFace PEFT LoRA adapter
+# format (adapter_model.safetensors + adapter_config.json).
+# ===========================================================================
+
+# Mapping from loradict keys to PEFT module names (Qwen3.5/3.6)
+# loradict structure per layer:
+#   {"attention": {"q_query": leaf, "q_gate": leaf, "k": leaf, "v": leaf, "o": leaf},
+#    "mlp": {"gate": leaf, "up": leaf, "down": leaf}}
+# PEFT module names:
+#   model.layers.{idx}.self_attn.{q_proj,k_proj,v_proj,o_proj}
+#   model.layers.{idx}.mlp.{gate_proj,up_proj,down_proj}
+
+_ATTENTION_KEY_TO_PEFT = {
+    "k": "self_attn.k_proj",
+    "v": "self_attn.v_proj",
+    "o": "self_attn.o_proj",
+}
+
+_MLP_KEY_TO_PEFT = {
+    "gate": "mlp.gate_proj",
+    "up": "mlp.up_proj",
+    "down": "mlp.down_proj",
+}
+
+
+def _leaf_to_peft_tensors(leaf: dict) -> tuple:
+    """Convert a loradict leaf to PEFT lora_A and lora_B weight tensors.
+
+    Input leaf: {"A": [Lb, in, r], "B": [Lb, r, out], "C": ... (ignored)}
+    Output: (lora_A_weight: [r, in], lora_B_weight: [out, r])
+
+    Note: PEFT convention is lora_A.weight=[r, in], lora_B.weight=[out, r].
+    The bias C is ignored in standard PEFT format.
+    """
+    A = leaf["A"]  # [Lb, in, r]
+    B = leaf["B"]  # [Lb, r, out]
+    # Squeeze batch dim (Lb should be 1 after concat across trajectories)
+    # If Lb > 1, take the first element (shouldn't happen in export_lora mode)
+    a = A[0]  # [in, r]
+    b = B[0]  # [r, out]
+    lora_A_weight = a.T.contiguous()  # [r, in]
+    lora_B_weight = b.T.contiguous()  # [out, r]
+    return lora_A_weight, lora_B_weight
+
+
+def _merge_q_query_q_gate_to_q_proj(q_query_leaf: Optional[dict],
+                                     q_gate_leaf: Optional[dict]) -> tuple:
+    """Merge q_query and q_gate loradict leaves into a single q_proj LoRA.
+
+    q_query: A1=[Lb, in, r1], B1=[Lb, r1, query_dim]
+    q_gate:  A2=[Lb, in, r2], B2=[Lb, r2, gate_dim]
+
+    Merged q_proj LoRA (rank = r1 + r2):
+        A_merged = cat([A1, A2], dim=2)  → [Lb, in, r1+r2]
+        B_merged = block_diag(B1, B2)    → [Lb, r1+r2, query_dim+gate_dim]
+
+    PEFT format:
+        lora_A.weight = A_merged[0].T  → [r1+r2, in]
+        lora_B.weight = B_merged[0].T  → [query_dim+gate_dim, r1+r2]
+    """
+    if q_query_leaf is None and q_gate_leaf is None:
+        return None, None
+
+    if q_query_leaf is not None and q_gate_leaf is not None:
+        A1 = q_query_leaf["A"][0]  # [in, r1]
+        B1 = q_query_leaf["B"][0]  # [r1, query_dim]
+        A2 = q_gate_leaf["A"][0]   # [in, r2]
+        B2 = q_gate_leaf["B"][0]   # [r2, gate_dim]
+
+        r1 = A1.shape[1]
+        r2 = A2.shape[1]
+        query_dim = B1.shape[1]
+        gate_dim = B2.shape[1]
+
+        # A_merged: [in, r1+r2]
+        A_merged = torch.cat([A1, A2], dim=1)
+
+        # B_merged: block diagonal [r1+r2, query_dim+gate_dim]
+        B_merged = torch.zeros(r1 + r2, query_dim + gate_dim,
+                               device=B1.device, dtype=B1.dtype)
+        B_merged[:r1, :query_dim] = B1
+        B_merged[r1:, query_dim:] = B2
+
+        lora_A_weight = A_merged.T.contiguous()  # [r1+r2, in]
+        lora_B_weight = B_merged.T.contiguous()  # [query_dim+gate_dim, r1+r2]
+        return lora_A_weight, lora_B_weight
+
+    # Only one of them is non-None
+    leaf = q_query_leaf if q_query_leaf is not None else q_gate_leaf
+    return _leaf_to_peft_tensors(leaf)
+
+
+def loradict_to_peft(
+    loradict: Dict[int, dict],
+    save_path: str,
+    base_model_name_or_path: str = "",
+    total_num_layers: Optional[int] = None,
+):
+    """Convert a full loradict (all layers) to PEFT LoRA adapter format and save.
+
+    Args:
+        loradict: Dict mapping layer_idx to per-layer loradict.
+            Each per-layer loradict has structure:
+            {"attention": {"q_query": leaf, "q_gate": leaf, "k": leaf, "v": leaf, "o": leaf},
+             "mlp": {"gate": leaf, "up": leaf, "down": leaf}}
+            where leaf = {"A": [Lb, in, r], "B": [Lb, r, out], "C": ...}
+        save_path: Directory to save the PEFT adapter files.
+        base_model_name_or_path: Base model identifier for adapter_config.json.
+        total_num_layers: Total number of layers in the model (for adapter_config).
+            If None, inferred from max(loradict.keys()) + 1.
+
+    Saves:
+        {save_path}/adapter_model.safetensors
+        {save_path}/adapter_config.json
+    """
+    import os
+    import json
+
+    os.makedirs(save_path, exist_ok=True)
+
+    state_dict = {}
+    target_modules = set()
+    max_rank = 0
+
+    if total_num_layers is None:
+        total_num_layers = max(loradict.keys()) + 1 if loradict else 0
+
+    for layer_idx, layer_dict in sorted(loradict.items()):
+        if layer_dict is None:
+            continue
+
+        attn_dict = layer_dict.get("attention", None)
+        mlp_dict = layer_dict.get("mlp", None)
+
+        # Process attention components
+        if attn_dict is not None:
+            # Special handling for q_query + q_gate → q_proj
+            q_query_leaf = attn_dict.get("q_query", None)
+            q_gate_leaf = attn_dict.get("q_gate", None)
+            if q_query_leaf is not None or q_gate_leaf is not None:
+                lora_A, lora_B = _merge_q_query_q_gate_to_q_proj(q_query_leaf, q_gate_leaf)
+                if lora_A is not None:
+                    prefix = f"base_model.model.model.layers.{layer_idx}.self_attn.q_proj"
+                    state_dict[f"{prefix}.lora_A.weight"] = lora_A.cpu()
+                    state_dict[f"{prefix}.lora_B.weight"] = lora_B.cpu()
+                    target_modules.add("q_proj")
+                    max_rank = max(max_rank, lora_A.shape[0])
+
+            # Process k, v, o
+            for key, peft_name in _ATTENTION_KEY_TO_PEFT.items():
+                leaf = attn_dict.get(key, None)
+                if leaf is not None:
+                    lora_A, lora_B = _leaf_to_peft_tensors(leaf)
+                    prefix = f"base_model.model.model.layers.{layer_idx}.{peft_name}"
+                    state_dict[f"{prefix}.lora_A.weight"] = lora_A.cpu()
+                    state_dict[f"{prefix}.lora_B.weight"] = lora_B.cpu()
+                    target_modules.add(peft_name.split(".")[-1])
+                    max_rank = max(max_rank, lora_A.shape[0])
+
+        # Process MLP components
+        if mlp_dict is not None:
+            for key, peft_name in _MLP_KEY_TO_PEFT.items():
+                leaf = mlp_dict.get(key, None)
+                if leaf is not None:
+                    lora_A, lora_B = _leaf_to_peft_tensors(leaf)
+                    prefix = f"base_model.model.model.layers.{layer_idx}.{peft_name}"
+                    state_dict[f"{prefix}.lora_A.weight"] = lora_A.cpu()
+                    state_dict[f"{prefix}.lora_B.weight"] = lora_B.cpu()
+                    target_modules.add(peft_name.split(".")[-1])
+                    max_rank = max(max_rank, lora_A.shape[0])
+
+    # Save state_dict using safetensors
+    try:
+        from safetensors.torch import save_file
+        save_file(state_dict, os.path.join(save_path, "adapter_model.safetensors"))
+    except ImportError:
+        # Fallback to torch.save if safetensors not available
+        torch.save(state_dict, os.path.join(save_path, "adapter_model.bin"))
+
+    # Save adapter_config.json
+    adapter_config = {
+        "auto_mapping": None,
+        "base_model_name_or_path": base_model_name_or_path,
+        "bias": "none",
+        "fan_in_fan_out": False,
+        "inference_mode": True,
+        "init_lora_weights": True,
+        "lora_alpha": max_rank,  # alpha = rank → scaling = 1.0
+        "lora_dropout": 0.0,
+        "modules_to_save": None,
+        "peft_type": "LORA",
+        "r": max_rank,
+        "revision": None,
+        "target_modules": sorted(list(target_modules)),
+        "task_type": "CAUSAL_LM",
+    }
+    with open(os.path.join(save_path, "adapter_config.json"), "w") as f:
+        json.dump(adapter_config, f, indent=2)
+
+    return save_path
+
+
+# ===========================================================================
+# Serialization helpers for PP mode loradict transfer across stages
+# ===========================================================================
+
+def serialize_layer_loradict(layer_dict: dict, dtype=torch.bfloat16):
+    """Serialize a single layer's loradict into flat tensors for pipeline transfer.
+
+    Args:
+        layer_dict: A per-layer loradict (e.g. {"attention": {...}, "mlp": {...}})
+        dtype: Target dtype for serialized data.
+
+    Returns:
+        (flat_data, shapes_buf, n_tensors):
+            flat_data: 1D tensor containing all leaf tensor data concatenated.
+            shapes_buf: 1D long tensor encoding the shape of each tensor.
+            n_tensors: int, number of tensors serialized.
+    """
+    tensors = collect_loradict_tensors(layer_dict)
+    if not tensors:
+        return None, None, 0
+
+    flat_list = [t.to(dtype).contiguous().view(-1) for t in tensors]
+    flat_data = torch.cat(flat_list)
+
+    shapes = []
+    for t in tensors:
+        shapes.append(len(t.shape))
+        shapes.extend(t.shape)
+    shapes_buf = torch.tensor(shapes, dtype=torch.long, device=flat_data.device)
+
+    return flat_data, shapes_buf, len(tensors)
+
+
+def deserialize_layer_loradict(
+    flat_data: Tensor,
+    shapes_buf: Tensor,
+    n_tensors: int,
+    reference_structure: Optional[dict] = None,
+) -> dict:
+    """Deserialize flat tensors back into a per-layer loradict structure.
+
+    This reconstructs the nested dict structure by assuming the standard
+    loradict layout: {"attention": {"q_query": {"A":, "B":, "C":}, ...}, "mlp": {...}}
+
+    Args:
+        flat_data: 1D tensor containing all leaf tensor data concatenated.
+        shapes_buf: 1D long tensor encoding shapes (ndim, d0, d1, ..., ndim, d0, ...).
+        n_tensors: Number of tensors to reconstruct.
+        reference_structure: Optional reference loradict to copy structure from.
+
+    Returns:
+        Reconstructed per-layer loradict.
+    """
+    # Reconstruct individual tensors from flat_data + shapes
+    tensors = []
+    shapes_list = shapes_buf.cpu().tolist()
+    data_offset = 0
+    shape_offset = 0
+
+    for _ in range(n_tensors):
+        ndim = int(shapes_list[shape_offset])
+        shape_offset += 1
+        shape = tuple(int(shapes_list[shape_offset + d]) for d in range(ndim))
+        shape_offset += ndim
+        numel = 1
+        for s in shape:
+            numel *= s
+        tensor = flat_data[data_offset:data_offset + numel].reshape(shape)
+        tensors.append(tensor)
+        data_offset += numel
+
+    # Rebuild the nested loradict structure
+    # Standard structure: {"attention": {"q_query": {"A","B","C"}, "q_gate": {"A","B","C"},
+    #                                     "k": {"A","B","C"}, "v": {"A","B","C"}, "o": {"A","B","C"}},
+    #                      "mlp": {"gate": {"A","B","C"}, "up": {"A","B","C"}, "down": {"A","B","C"}}}
+    # Each leaf has 2 or 3 tensors (A, B, and optionally C if not None)
+    # We use the reference_structure to determine which leaves have C=None
+
+    if reference_structure is not None:
+        return _rebuild_from_reference(tensors, reference_structure)
+
+    # Without reference, assume standard Qwen3.5 structure with no bias (C=None)
+    # Order: attention(q_query.A, q_query.B, q_gate.A, q_gate.B, k.A, k.B, v.A, v.B, o.A, o.B),
+    #         mlp(gate.A, gate.B, up.A, up.B, down.A, down.B)
+    # Total: 16 tensors (8 attention + 6 mlp, no C)
+    # But if some leaves are None (e.g. linear_attention layers), n_tensors could be 0
+    if n_tensors == 0:
+        return {"attention": None, "mlp": None}
+
+    # Assume 2 tensors per leaf (A, B), no C
+    idx = 0
+    attn_keys = ["q_query", "q_gate", "k", "v", "o"]
+    mlp_keys = ["gate", "up", "down"]
+
+    attention = {}
+    for key in attn_keys:
+        if idx + 1 < n_tensors:
+            attention[key] = {"A": tensors[idx], "B": tensors[idx + 1], "C": None}
+            idx += 2
+        else:
+            attention[key] = None
+
+    mlp = {}
+    for key in mlp_keys:
+        if idx + 1 < n_tensors:
+            mlp[key] = {"A": tensors[idx], "B": tensors[idx + 1], "C": None}
+            idx += 2
+        else:
+            mlp[key] = None
+
+    return {"attention": attention, "mlp": mlp}
+
+
+def _rebuild_from_reference(tensors: list, reference: dict, tensor_idx: list = None) -> dict:
+    """Rebuild a loradict from flat tensor list using a reference structure."""
+    if tensor_idx is None:
+        tensor_idx = [0]
+
+    if _is_loradict_leaf(reference):
+        A = tensors[tensor_idx[0]]
+        tensor_idx[0] += 1
+        B = tensors[tensor_idx[0]]
+        tensor_idx[0] += 1
+        C = None
+        if reference.get("C", None) is not None:
+            C = tensors[tensor_idx[0]]
+            tensor_idx[0] += 1
+        return {"A": A, "B": B, "C": C}
+
+    result = {}
+    for key, value in reference.items():
+        if value is None:
+            result[key] = None
+        elif isinstance(value, dict):
+            result[key] = _rebuild_from_reference(tensors, value, tensor_idx)
+        else:
+            result[key] = value
+    return result

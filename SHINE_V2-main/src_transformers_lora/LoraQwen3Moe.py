@@ -1651,6 +1651,8 @@ class LoraQwen3MoeModel(LoraQwen3MoePreTrainedModel):
         nograd_wdict: Optional[dict] = None,
         use_mem_token: bool = False,
         context_lengths: torch.LongTensor | None = None,
+        mem_write_offsets: Optional[torch.LongTensor] = None,
+        mem_write_counts: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> MoeModelOutputWithPast:
         r"""
@@ -1670,6 +1672,10 @@ class LoraQwen3MoeModel(LoraQwen3MoePreTrainedModel):
             (B,) number of valid tokens per sample.  Required when ``use_mem_token=True``
             under Scheme B.  Mem-token embeddings are placed at positions
             ``[context_lengths[i], context_lengths[i] + num_mem_token)`` for each sample.
+        mem_write_offsets (`torch.LongTensor`, *optional*):
+            (B,) SP only. Offset within memory_states M dimension to start writing.
+        mem_write_counts (`torch.LongTensor`, *optional*):
+            (B,) SP only. Number of mem_tokens on this rank for each sample.
         """
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -1690,7 +1696,15 @@ class LoraQwen3MoeModel(LoraQwen3MoePreTrainedModel):
                 mem = self.mem_tokens.unsqueeze(0).expand(inputs_embeds.shape[0], -1, -1)
                 for i in range(inputs_embeds.shape[0]):
                     start = context_lengths[i].item()
-                    inputs_embeds[i, start:start + self.num_mem_token] = mem[i]
+                    if mem_write_counts is not None:
+                        # SP partial write: only overwrite the portion on this rank
+                        count = mem_write_counts[i].item()
+                        if count > 0:
+                            offset = mem_write_offsets[i].item()
+                            inputs_embeds[i, start:start + count] = mem[i, offset:offset + count]
+                    else:
+                        # Non-SP or full write
+                        inputs_embeds[i, start:start + self.num_mem_token] = mem[i]
 
         if position_ids is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -1718,9 +1732,9 @@ class LoraQwen3MoeModel(LoraQwen3MoePreTrainedModel):
             raise TypeError(f"nograd_wdict must be a dict, got {type(nograd_wdict)}")
 
         if self.has_mem_token and use_mem_token:
-            memory_states = torch.zeros(
+            memory_states = hidden_states.new_zeros(
                 (hidden_states.shape[0], self.config.num_hidden_layers, self.num_mem_token, self.config.hidden_size)
-            ).to(self.device)
+            )
 
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             hidden_states = decoder_layer(
@@ -1740,7 +1754,20 @@ class LoraQwen3MoeModel(LoraQwen3MoePreTrainedModel):
                 # Scheme B: extract mem_token hidden states from per-sample positions
                 for b in range(hidden_states.shape[0]):
                     start = context_lengths[b].item()
-                    memory_states[b, i, :, :] = hidden_states[b, start:start + self.num_mem_token].to(self.device)
+                    if mem_write_counts is not None:
+                        # SP partial write: only extract count tokens, write at offset
+                        count = mem_write_counts[b].item()
+                        if count > 0:
+                            offset = mem_write_offsets[b].item()
+                            memory_states[b, i, offset:offset + count, :] = (
+                                hidden_states[b, start:start + count].to(self.device)
+                            )
+                    else:
+                        # Non-SP or full write: extract all num_mem_token tokens
+                        if start + self.num_mem_token <= hidden_states.shape[1]:
+                            memory_states[b, i, :, :] = (
+                                hidden_states[b, start:start + self.num_mem_token].to(self.device)
+                            )
 
         if self.has_mem_token and use_mem_token:
             # Scheme B: strip everything after valid tokens (mem_tokens + padding)

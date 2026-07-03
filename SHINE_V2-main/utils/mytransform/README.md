@@ -327,23 +327,23 @@ W̃_k = decompress(W_k, Z'[:, 1, :])
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `cross_projection_attn` | bool | `false` | 是否启用 cross-projection attention |
-| `cross_attn_num_heads` | int | `4` | attention 的 head 数量（需整除 k²） |
+| `blocks` | list | `[mlp]` | 处理块列表，可包含 "mlp" 和 "attn" |
+| `attn_num_heads` | int | `4` | attn 块的 head 数量（需整除 k²） |
 
-**参数增量：** 每层增加一个 CrossProjectionAttn 模块：4 个 Linear(k², k²) ≈ 4 × 256² = 262K 参数/层。64 层共约 16.8M 参数（相比总 360M 约 +4.7%）。
+**参数增量：** 每层每个 attn 块增加一个 CrossProjectionAttn 模块：4 个 Linear(k², k²) ≈ 4 × 256² = 262K 参数/层。64 层共约 16.8M 参数（相比总 360M 约 +4.7%）。每个额外的 mlp 块增加约 0.5M 参数/投影。
 
 ---
 
-### 完整公式（全部开启时）
+### 完整公式（blocks: [mlp, attn] 时）
 
 ```
---- Per projection (Phase 1: compress_and_mlp) ---
+--- Per projection (Phase 1: compress + pre-attn MLP blocks) ---
 Compress:  z = L_enc^T W R_enc                       [B, k, k]
 Stats:     s = sign(stats(W)) * log1p(|stats(W)|)    [B, d_stats]
 FiLM:      (γ, β) = FiLM_Net(s)                     [B, k²] × [B, k²]
-MLP:       z̃ = z + MLP(γ ⊙ flatten(z) + β)          [B, k, k]
+MLP_0:     z̃ = z + MLP_0(γ ⊙ flatten(z) + β)        [B, k, k]
 
---- Cross-Projection Attention (all projections together) ---
+--- Cross-phase (attn and post-attn blocks) ---
 Z = stack(z̃_q, z̃_k, z̃_v, ...)                      [B, num_projs, k²]
 Z' = Z + MHA(Z, Z, Z)                               [B, num_projs, k²]
 z̃'_q, z̃'_k, ... = unstack(Z')                      [B, k, k] each
@@ -351,6 +351,12 @@ z̃'_q, z̃'_k, ... = unstack(Z')                      [B, k, k] each
 --- Per projection (Phase 2: decompress) ---
 Decompress:ΔW = L_dec @ z̃' @ R_dec^T                 [B, d_in, d_out]
 Output:    W̃ = W + ΔW
+```
+
+对于更复杂的 blocks 配置（如 `[mlp, attn, mlp, attn]`）：
+```
+Compress → FiLM → MLP_0 → Attn_0 → MLP_1 → Attn_1 → Decompress
+           ↑ Phase 1 ↑   ↑────── Cross-phase ──────↑   ↑ Phase 2 ↑
 ```
 
 ---
@@ -382,8 +388,26 @@ w_transform_context:
   asymmetric: true
   conditioning: film
   cond_stats: [mean, std, norm, max, min]
-  cross_projection_attn: true
-  cross_attn_num_heads: 4
+  blocks: [mlp, attn]
+  attn_num_heads: 4
+
+w_transform_conversation:
+  method: identity
+```
+
+### Phase A 使用更深的网络（MLP-Attn-MLP）
+
+```yaml
+w_transform_context:
+  method: compressed_mlp
+  k: 16
+  mlp_ratio: 4
+  activation: gelu
+  asymmetric: true
+  conditioning: film
+  cond_stats: [mean, std, norm, max, min]
+  blocks: [mlp, attn, mlp]
+  attn_num_heads: 4
 
 w_transform_conversation:
   method: identity

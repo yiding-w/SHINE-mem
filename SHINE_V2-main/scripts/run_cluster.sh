@@ -36,6 +36,9 @@
 #   --tokenizer <name>          e.g. origin
 #   --detach_state <name>       e.g. origin, full
 #   --force_overwrite           Force resume even if config selections differ from checkpoint
+#   --evaluation_baseline       Run base LLM evaluation (no hypernetwork) on val set, then exit
+#   --evaluation_export_lora    Run val set by repo, export per-repo PEFT LoRA adapters, then exit
+#   --export_lora_max_traj <N>  Max trajectories per repo (required for --evaluation_export_lora)
 
 # Check training status
 ./scripts/launch_cluster.sh status --nodes all
@@ -48,6 +51,31 @@
 
 # Stop training on all nodes
 ./scripts/launch_cluster.sh stop --nodes all
+
+# ============================================================
+# Evaluation modes (special one-shot runs, then exit)
+# ============================================================
+
+# Evaluation Baseline: run base LLM evaluation (no hypernetwork/LoRA) on val set, then exit
+./scripts/launch_cluster.sh start --nodes all --mode pretrain --name "<experiment_name>" --parallel tp --tp_size 4 \
+    --evaluation_baseline \
+    --data pretrain/trajectory_all_transfer --detach_state full --model Qwen3_6-27B
+
+# Evaluation Export LoRA: run val set grouped by repo, export per-repo PEFT LoRA adapters, then exit
+# --export_lora_max_traj <N> is REQUIRED (max trajectories per repo)
+# Output: ./save/<experiment_name>/<repo_name>/adapter_model.safetensors + adapter_config.json
+./scripts/launch_cluster.sh start --nodes all --mode pretrain --name "<experiment_name>" --parallel tp --tp_size 4 \
+    --evaluation_export_lora --export_lora_max_traj 50 \
+    --data pretrain/trajectory_all_transfer --detach_state full --model Qwen3_6-27B
+
+# PP mode also supported for both evaluation modes:
+./scripts/launch_cluster.sh start --nodes all --mode pretrain --name "<experiment_name>" \
+    --evaluation_baseline \
+    --data pretrain/trajectory_all_transfer --detach_state full --model Qwen3_6-27B
+
+./scripts/launch_cluster.sh start --nodes all --mode pretrain --name "<experiment_name>" \
+    --evaluation_export_lora --export_lora_max_traj 50 \
+    --data pretrain/trajectory_all_transfer --detach_state full --model Qwen3_6-27B
 
 # ============================================================
 # Multi-node TP (Tensor Parallel) training

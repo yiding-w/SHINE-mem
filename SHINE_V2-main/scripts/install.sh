@@ -8,6 +8,8 @@ pip install --upgrade tilelang
 
 pip install liger-kernel
 
+pip install ring-flash-attn 
+
 yum install -y libibverbs libibverbs-devel rdma-core
 # or
 # apt-get install -y libibverbs-dev rdma-core 

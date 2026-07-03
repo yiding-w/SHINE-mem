@@ -758,6 +758,111 @@ def check_tp_param_consistency(
                 _tpc_logger.warning(f"    ... and {len(mismatches) - 10} more mismatches")
 
 
+def check_sp_param_consistency(
+    model,
+    my_device: torch.device,
+    tp_cfg: dict,
+    global_step: int,
+):
+    """
+    [DEBUG] Check that replicated parameters are identical across all SP ranks.
+
+    When SP > 1, all SP ranks within a group must hold bit-identical trainable
+    parameters (hypernetwork, metalora, w_transform). This function verifies
+    that by computing fingerprints and all_gathering across the SP group.
+
+    This function is a collective operation: ALL ranks in the SP group must
+    call it simultaneously (otherwise it will deadlock).
+    """
+    from utils.myparallel import is_main_process_per_node
+
+    sp_group = tp_cfg.get("sp_process_group")
+    sp_size = tp_cfg.get("sequence_parallel_size", 1)
+    if sp_group is None or sp_size <= 1:
+        return
+    sp_rank = tp_cfg.get("sp_rank", 0)
+
+    # Collect all replicated tensors that must be identical across SP ranks
+    named_tensors = []
+
+    # Hypernetwork parameters (replicated across SP)
+    for name, param in model.hypernetwork.named_parameters():
+        if param.requires_grad and param.device == my_device:
+            named_tensors.append((f"hypernetwork.{name}", param.data))
+
+    # Metalora tensors (replicated across SP)
+    if hasattr(model, 'metalora') and model.metalora is not None:
+        from utils.myloradict import collect_loradict_tensors
+        for i, t in enumerate(collect_loradict_tensors(model.metalora)):
+            if t.requires_grad and t.device == my_device:
+                named_tensors.append((f"metalora.tensor_{i}", t.data))
+
+    # W-transform parameters (replicated across SP)
+    for wt_name in ('w_transform_context', 'w_transform_conversation'):
+        wt_module = getattr(model, wt_name, None)
+        if wt_module is not None:
+            for name, param in wt_module.named_parameters():
+                if param.requires_grad and param.device == my_device:
+                    named_tensors.append((f"{wt_name}.{name}", param.data))
+
+    # For each tensor, compute (sum, l2_norm) as fingerprint
+    # Then all_gather across SP group and compare
+    mismatches = []
+    num_params = len(named_tensors)
+    for name, tensor in named_tensors:
+        t_float = tensor.float()
+        local_sum = t_float.sum()
+        local_norm = t_float.norm()
+
+        # Gather fingerprints from all SP ranks
+        local_fp = torch.tensor([local_sum.item(), local_norm.item()],
+                                dtype=torch.float64, device=my_device)
+        gathered = [torch.zeros(2, dtype=torch.float64, device=my_device)
+                    for _ in range(sp_size)]
+        dist.all_gather(gathered, local_fp, group=sp_group)
+
+        # Compare: all should be identical
+        ref_sum, ref_norm = gathered[0][0].item(), gathered[0][1].item()
+        for r in range(1, sp_size):
+            r_sum, r_norm = gathered[r][0].item(), gathered[r][1].item()
+            sum_diff = abs(r_sum - ref_sum) / (abs(ref_sum) + 1e-12)
+            norm_diff = abs(r_norm - ref_norm) / (abs(ref_norm) + 1e-12)
+            if sum_diff > 1e-5 or norm_diff > 1e-5:
+                mismatches.append({
+                    "name": name,
+                    "sp_rank_0": (ref_sum, ref_norm),
+                    "sp_rank": r,
+                    "values": (r_sum, r_norm),
+                    "sum_diff": sum_diff,
+                    "norm_diff": norm_diff,
+                })
+
+    # --- Report (only sp_rank 0 prints) ---
+    _spc_logger = logging.getLogger("debug.sp_consistency")
+    if sp_rank == 0:
+        if not mismatches:
+            _spc_logger.info(
+                f"  [DEBUG] SP param consistency check PASSED at step {global_step} "
+                f"({num_params} replicated params, {sp_size} SP ranks)"
+            )
+        else:
+            _spc_logger.warning(
+                f"\n{'!'*70}\n"
+                f"  [DEBUG] SP PARAMETER MISMATCH DETECTED at step {global_step}!\n"
+                f"  {len(mismatches)}/{num_params} params differ across {sp_size} SP ranks:\n"
+                f"{'!'*70}"
+            )
+            for m in mismatches[:10]:
+                _spc_logger.warning(
+                    f"    {m['name']}: "
+                    f"sp_rank_0=(sum={m['sp_rank_0'][0]:.8e}, norm={m['sp_rank_0'][1]:.8e}), "
+                    f"sp_rank_{m['sp_rank']}=(sum={m['values'][0]:.8e}, norm={m['values'][1]:.8e}), "
+                    f"sum_rel_diff={m['sum_diff']:.2e}, norm_rel_diff={m['norm_diff']:.2e}"
+                )
+            if len(mismatches) > 10:
+                _spc_logger.warning(f"    ... and {len(mismatches) - 10} more mismatches")
+
+
 # ---------------------------------------------------------------------------
 # P0 Monitor: Gradient Norm Computation
 # ---------------------------------------------------------------------------

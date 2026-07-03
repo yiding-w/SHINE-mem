@@ -69,6 +69,8 @@ def load_pretrained_llm_for_tp(
     dtype: torch.dtype = torch.bfloat16,
     freeze: bool = True,
     num_mem_token: Optional[int] = None,
+    sp_group=None,
+    sp_world: int = 1,
 ) -> nn.Module:
     """Load a pretrained LLM in TP form on the current rank.
 
@@ -81,6 +83,8 @@ def load_pretrained_llm_for_tp(
         freeze: Set requires_grad=False on every LLM param.
         num_mem_token: If provided, set ``text_config.num_mem_token`` before
             loading so the model allocates ``mem_tokens`` of the right size.
+        sp_group: Sequence parallel process group (None if sp_world=1).
+        sp_world: Sequence parallel group size (default 1 = no SP).
 
     Returns:
         The loaded model with full_attention decoder layers replaced by
@@ -183,6 +187,7 @@ def load_pretrained_llm_for_tp(
         tp_layer = TPLoraQwen3_5DecoderLayer(
             text_config, i,
             tp_rank=tp_rank, tp_world=tp_world, tp_process_group=tp_process_group,
+            sp_group=sp_group, sp_world=sp_world,
         ).to(device=device, dtype=dtype)
         load_decoder_layer_weights_from_full(tp_layer, full_layer)
         text_model.layers[i] = tp_layer
@@ -195,6 +200,21 @@ def load_pretrained_llm_for_tp(
     # ----------------------------------------------------------------
     # embed_tokens / norm / rotary_emb / mem_tokens / lm_head are already on
     # the local GPU from the device_map=device load — nothing further to do.
+
+    # ----------------------------------------------------------------
+    # 3.5 Enable SP on full_attention layers (ring attention)
+    # ----------------------------------------------------------------
+    if sp_group is not None and sp_world > 1:
+        sp_mode = os.environ.get("SP_ATTN_MODE", "alltoall_zigzag")
+        for i in range(num_layers):
+            layer = text_model.layers[i]
+            if layer.layer_type == "full_attention":
+                layer.self_attn.enable_sp(sp_group, sp_world, sp_mode=sp_mode)
+        if is_main_process_per_node():
+            logger.info(
+                f"[tp_load_model] SP enabled on full_attention layers: "
+                f"sp_world={sp_world}, mode={sp_mode}"
+            )
 
     # ----------------------------------------------------------------
     # 4. Force GC of any leftover CPU tensors
@@ -214,9 +234,13 @@ def load_pretrained_llm_for_tp(
     cpu_model.tp_rank = tp_rank
     cpu_model.tp_world = tp_world
     cpu_model.tp_process_group = tp_process_group
+    cpu_model.sp_group = sp_group
+    cpu_model.sp_world = sp_world
     text_model.tp_rank = tp_rank
     text_model.tp_world = tp_world
     text_model.tp_process_group = tp_process_group
+    text_model.sp_group = sp_group
+    text_model.sp_world = sp_world
 
     if is_main_process_per_node():
         free, total = torch.cuda.mem_get_info(device)

@@ -1,0 +1,22 @@
+# Data configuration for trajectory_pro_transfer dataset
+# Loads trajectories from SHINE_SWE_Pro, tokenizes them via chat template,
+# groups by repo, and creates consecutive-pair samples for transfer learning.
+# Only trajectories with correctness="correct" are used.
+name: trajectory_pro_transfer
+dataset_module: mydatasets.pretrain.trajectory_pro_transfer  # Python module path for dynamic import
+
+# Maximum token length for a single trajectory (trajectories longer than this are discarded)
+max_token_length: 65536
+
+# Data source settings
+data_path: "data/SHINE_SWE_Pro"   # Path to the dataset directory (contains arrow shards)
+
+# Tokenization cache settings
+cache_dir: "cache/trajectory_pro_transfer_tokens"  # Directory for tokenized cache files
+preprocess_workers: 32                             # Number of parallel workers for tokenization
+
+# Training settings
+validation_split_num: "all"            # "all" means ALL data goes to validation, train set is empty
+shuffle: false                        # MUST be false: repo-contiguous ordering is required
+max_traj_per_repo: 10                  # Max trajectories per repo (among correct & length-valid ones).
+                                      # Set to -1 to use all available trajectories.

@@ -1384,6 +1384,13 @@ def main(cfg: DictConfig):
     # ==================================================================
     # 2. Pipeline parallelism
     # ==================================================================
+    _sp_size_cfg = int(cfg.parallel.get("sequence_parallel_size", 1))
+    if _sp_size_cfg > 1:
+        raise ValueError(
+            f"Sequence parallelism (sequence_parallel_size={_sp_size_cfg}) is not supported "
+            f"with pipeline parallelism. PP + SP is not yet implemented. "
+            f"Use parallel.mode=tp with sequence_parallel_size > 1."
+        )
     pipeline_config = setup_pipeline_parallel(
         total_gpus=cfg.parallel.total_gpus,
         pipeline_parallel_size=cfg.parallel.pipeline_parallel_size,
@@ -2152,6 +2159,13 @@ def main(cfg: DictConfig):
     start_epoch = 0               # Epoch to start from (may be overridden by resume)
 
     # --- [INIT] Resume from checkpoint if available ---
+    # In evaluation modes, we only need model weights — skip optimizer/scheduler loading
+    _eval_baseline_env = os.environ.get("EVALUATION_BASELINE", "") == "1"
+    _eval_export_env = os.environ.get("EVALUATION_EXPORT_LORA", "") == "1"
+    if (_eval_baseline_env or _eval_export_env) and not load_model_only_flag:
+        load_model_only_flag = True
+        if is_main_process_per_node():
+            logger.info("  [Resume] Evaluation mode detected — loading model-only (skipping optimizer/scheduler).")
     if resume_checkpoint_dir is not None:
         if load_model_only_flag:
             # Load only model weights from a prior stage's final checkpoint
@@ -2203,6 +2217,10 @@ def main(cfg: DictConfig):
             dl_state = resume_meta.get("dataloader_state", None)
             if dl_state is not None:
                 train_loader.load_state_dict(dl_state)
+            # Restore per-mb previous repo names for repo-change reset continuity
+            _saved_prev_repo = resume_meta.get("prev_repo_per_mb", None)
+            if _saved_prev_repo is not None:
+                model._prev_repo_per_mb = list(_saved_prev_repo)
             barrier()
             if is_main_process_per_node():
                 logger.info(
@@ -2308,6 +2326,668 @@ def main(cfg: DictConfig):
         cleanup_distributed()
         os._exit(0)
 
+    # ==================================================================
+    # 8c. Evaluation Export LoRA Mode — export per-repo PEFT LoRA adapters
+    # ==================================================================
+    _evaluation_export_lora = os.environ.get("EVALUATION_EXPORT_LORA", "") == "1"
+    if _evaluation_export_lora:
+        _max_traj_str = os.environ.get("EXPORT_LORA_MAX_TRAJ", "")
+        if not _max_traj_str:
+            if is_main_process_per_node():
+                logger.error("EXPORT_LORA_MAX_TRAJ must be set when EVALUATION_EXPORT_LORA=1")
+            cleanup_distributed()
+            os._exit(1)
+        _max_traj = int(_max_traj_str)
+
+        my_stage = parallel_cfg["stage"]
+        total_stages = parallel_cfg["total_stages"]
+        embed_stage = model._embed_stage
+        norm_stage = model._norm_stage
+        _dp_rank = parallel_cfg["data_parallel_rank"]
+        _dp_size = parallel_cfg["data_parallel_size"]
+
+        if is_main_process_per_node():
+            logger.info("=" * 60)
+            logger.info("  EVALUATION EXPORT LORA MODE (PP)")
+            logger.info(f"  Max trajectories per repo: {_max_traj}")
+            logger.info(f"  Stage: {my_stage}/{total_stages}, DP: {_dp_rank}/{_dp_size}")
+            logger.info("=" * 60)
+
+        if val_dataset is None or len(val_dataset) == 0:
+            if is_main_process_per_node():
+                logger.error("  [ExportLoRA] No validation set available. Exiting.")
+            cleanup_distributed()
+            os._exit(1)
+
+        from collections import defaultdict
+        from utils.myloradict import detach_loradict, concat_loradict, loradict_to_peft
+        from utils.myloradict import collect_loradict_tensors, deserialize_layer_loradict
+        from utils.myparallel import pipeline_send, pipeline_recv
+
+        # Step 1: Group val_dataset by repo (all stages do this independently)
+        # Validate that dataset has 'repo' field
+        _first_sample = val_dataset[0]
+        _has_repo_field = (
+            "repo" in _first_sample
+            or (isinstance(_first_sample.get("extra_info"), dict) and "repo" in _first_sample["extra_info"])
+        )
+        if not _has_repo_field:
+            if is_main_process_per_node():
+                logger.error(
+                    "  [ExportLoRA] Dataset does not have a 'repo' field. "
+                    "evaluation_export_lora mode requires the dataset to provide "
+                    "a 'repo' field (either as sample['repo'] or sample['extra_info']['repo']). "
+                    "Please use a dataset with repo information (e.g. trajectory_pro_transfer)."
+                )
+            cleanup_distributed()
+            os._exit(1)
+
+        repo_to_indices = defaultdict(list)
+        for idx in range(len(val_dataset)):
+            sample = val_dataset[idx]
+            repo = sample.get("repo", sample.get("extra_info", {}).get("repo"))
+            repo_to_indices[repo].append(idx)
+
+        # Step 2: Assign repos to DP ranks (round-robin)
+        all_repos = sorted(repo_to_indices.keys())
+        repos_for_this_rank = [all_repos[i] for i in range(_dp_rank, len(all_repos), _dp_size)]
+
+        if is_main_process_per_node():
+            logger.info(
+                f"  [ExportLoRA] Total repos: {len(all_repos)}, "
+                f"this DP rank ({_dp_rank}/{_dp_size}): {len(repos_for_this_rank)} repos"
+            )
+
+        # Step 3: Process each repo
+        model.eval()
+        _dataset_name = cfg.data.get("name", "unknown_dataset")
+        _export_save_base = os.path.join("./save", exp_name, _dataset_name)
+        all_repo_results = {}
+
+        for repo_idx, repo_name in enumerate(repos_for_this_rank):
+            indices = repo_to_indices[repo_name][:_max_traj]
+
+            if is_main_process_per_node():
+                logger.info(
+                    f"  [ExportLoRA] Processing repo {repo_idx+1}/{len(repos_for_this_rank)}: "
+                    f"{repo_name} ({len(indices)} trajectories)"
+                )
+
+            # Reset detach_state for this repo (all stages)
+            if model.detach_state is not None:
+                model.detach_state.reset()
+                model.detach_state.init_steps()
+
+            stage_loradicts = []  # Each stage collects its own layers' loradicts
+            repo_losses = []
+            repo_baseline_losses = []
+
+            for traj_idx, sample_idx in enumerate(indices):
+                sample = val_dataset[sample_idx]
+                # Use collator to process single sample into batch format
+                batch_list = collator([sample])
+                if isinstance(batch_list, list):
+                    primary = batch_list[0]
+                else:
+                    primary = batch_list
+
+                # Prepare data for pipeline forward (only embed_stage has real data)
+                context_ids = primary["context_ids"].to(my_device, non_blocking=True)
+                context_lengths = primary["context_lengths"].to(my_device, non_blocking=True)
+                conversation_ids = primary["conversation_ids"].to(my_device, non_blocking=True)
+                labels = primary["labels"].to(my_device, non_blocking=True)
+
+                with torch.no_grad(), make_sdpa_ctx():
+                    # All stages participate in pipeline forward
+                    fwd_result = model.pipeline_forward_train_multi_mb(
+                        context_ids_list=[context_ids],
+                        context_lengths_list=[context_lengths],
+                        conversation_ids_list=[conversation_ids],
+                        micro_batch_size=1,
+                        batch_id=f"export_{repo_name}_{traj_idx}",
+                        return_loradict=True,
+                    )
+                    all_hidden_states = fwd_result[0]
+                    _eval_sq_norms = fwd_result[6]
+                    per_stage_loradicts = fwd_result[7]  # list of loradicts (one per mb)
+
+                    # Compute loss on norm_stage
+                    if my_stage == norm_stage:
+                        hidden_states = all_hidden_states[0]
+                        # Transfer labels from embed_stage if needed
+                        if embed_stage != norm_stage:
+                            recv_labels = torch.empty(
+                                (1, hidden_states.size(1) if hidden_states is not None else conv_seq_len),
+                                dtype=torch.long, device=my_device,
+                            )
+                            pipeline_recv(recv_labels, src_stage=embed_stage, tag=9998)
+                            eval_labels = recv_labels
+                        else:
+                            eval_labels = labels
+
+                        if hidden_states is not None:
+                            shift_hs = hidden_states[:, :-1, :].contiguous()
+                            shift_labels = eval_labels[:, 1:].contiguous()
+                            B_sz, S_minus_1, H = shift_hs.shape
+                            flat_hs = shift_hs.reshape(B_sz * S_minus_1, H)
+                            flat_labels = shift_labels.reshape(B_sz * S_minus_1)
+
+                            use_flce = os.environ.get("SHINE_FLCE", "1") not in ("0", "", "false")
+                            if use_flce:
+                                from utils.liger_patch import fused_lm_head_loss
+                                loss = fused_lm_head_loss(
+                                    flat_hs, model.llm.lm_head.weight, flat_labels,
+                                    ignore_index=-100, reduction="mean",
+                                )
+                            else:
+                                chunk = max(1, 1024 // max(1, B_sz))
+                                total_loss_val = torch.zeros((), device=flat_hs.device, dtype=torch.float32)
+                                total_count = torch.zeros((), device=flat_hs.device, dtype=torch.long)
+                                for i in range(0, flat_hs.shape[0], chunk):
+                                    j = min(i + chunk, flat_hs.shape[0])
+                                    chunk_logits = model.llm.lm_head(flat_hs[i:j])
+                                    chunk_loss = torch.nn.functional.cross_entropy(
+                                        chunk_logits, flat_labels[i:j], ignore_index=-100, reduction="sum",
+                                    )
+                                    total_loss_val = total_loss_val + chunk_loss.float()
+                                    total_count = total_count + (flat_labels[i:j] != -100).sum()
+                                loss = (total_loss_val / total_count.clamp(min=1)).to(flat_hs.dtype)
+                            loss_val = loss.item()
+                        else:
+                            loss_val = 0.0
+                    elif my_stage == embed_stage and embed_stage != norm_stage:
+                        # Send labels to norm_stage
+                        pipeline_send(labels.contiguous(), dst_stage=norm_stage, tag=9998)
+                        loss_val = 0.0
+                    else:
+                        loss_val = 0.0
+
+                    # Transfer loss from norm_stage to stage 0
+                    if norm_stage != 0:
+                        if my_stage == norm_stage:
+                            loss_tensor = torch.tensor([loss_val], dtype=torch.float32, device=my_device)
+                            pipeline_send(loss_tensor, dst_stage=0, tag=9999)
+                        elif my_stage == 0:
+                            loss_tensor = torch.empty(1, dtype=torch.float32, device=my_device)
+                            pipeline_recv(loss_tensor, src_stage=norm_stage, tag=9999)
+                            loss_val = loss_tensor[0].item()
+
+                    if my_stage == 0:
+                        repo_losses.append(loss_val)
+
+                    # Collect this stage's loradict (detached)
+                    if per_stage_loradicts and per_stage_loradicts[0] is not None:
+                        stage_loradicts.append(detach_loradict(per_stage_loradicts[0]))
+
+                    # --- Baseline forward: raw LLM without any loradict ---
+                    baseline_hidden, _ = model.llm_forward_no_grad(
+                        input_ids=conversation_ids,
+                        attention_mask=None,
+                        loradict=None,
+                        use_mem_token=False,
+                        batch_id=f"export_baseline_{repo_name}_{traj_idx}",
+                    )
+
+                    # Compute baseline loss on norm_stage
+                    baseline_loss_val = 0.0
+                    if my_stage == norm_stage:
+                        # Transfer labels from embed_stage if needed
+                        if embed_stage != norm_stage:
+                            bl_recv_labels = torch.empty(
+                                (1, baseline_hidden.size(1) if baseline_hidden is not None else conv_seq_len),
+                                dtype=torch.long, device=my_device,
+                            )
+                            pipeline_recv(bl_recv_labels, src_stage=embed_stage, tag=9996)
+                            bl_labels = bl_recv_labels
+                        else:
+                            bl_labels = labels
+
+                        if baseline_hidden is not None:
+                            bl_shift_hs = baseline_hidden[:, :-1, :].contiguous()
+                            bl_shift_labels = bl_labels[:, 1:].contiguous()
+                            bl_B, bl_S, bl_H = bl_shift_hs.shape
+                            bl_flat_hs = bl_shift_hs.reshape(bl_B * bl_S, bl_H)
+                            bl_flat_labels = bl_shift_labels.reshape(bl_B * bl_S)
+
+                            use_flce = os.environ.get("SHINE_FLCE", "1") not in ("0", "", "false")
+                            if use_flce:
+                                from utils.liger_patch import fused_lm_head_loss
+                                bl_loss = fused_lm_head_loss(
+                                    bl_flat_hs, model.llm.lm_head.weight, bl_flat_labels,
+                                    ignore_index=-100, reduction="mean",
+                                )
+                            else:
+                                bl_total_loss = torch.zeros((), device=bl_flat_hs.device, dtype=torch.float32)
+                                bl_total_count = torch.zeros((), device=bl_flat_hs.device, dtype=torch.long)
+                                chunk = max(1, 1024 // max(1, bl_B))
+                                for i in range(0, bl_flat_hs.shape[0], chunk):
+                                    j = min(i + chunk, bl_flat_hs.shape[0])
+                                    chunk_logits = model.llm.lm_head(bl_flat_hs[i:j])
+                                    chunk_loss = torch.nn.functional.cross_entropy(
+                                        chunk_logits, bl_flat_labels[i:j], ignore_index=-100, reduction="sum",
+                                    )
+                                    bl_total_loss = bl_total_loss + chunk_loss.float()
+                                    bl_total_count = bl_total_count + (bl_flat_labels[i:j] != -100).sum()
+                                bl_loss = (bl_total_loss / bl_total_count.clamp(min=1)).to(bl_flat_hs.dtype)
+                            baseline_loss_val = bl_loss.item()
+                    elif my_stage == embed_stage and embed_stage != norm_stage:
+                        # Send labels to norm_stage for baseline loss computation
+                        pipeline_send(labels.contiguous(), dst_stage=norm_stage, tag=9996)
+
+                    # Transfer baseline loss from norm_stage to stage 0
+                    if norm_stage != 0:
+                        if my_stage == norm_stage:
+                            bl_loss_tensor = torch.tensor([baseline_loss_val], dtype=torch.float32, device=my_device)
+                            pipeline_send(bl_loss_tensor, dst_stage=0, tag=9997)
+                        elif my_stage == 0:
+                            bl_loss_tensor = torch.empty(1, dtype=torch.float32, device=my_device)
+                            pipeline_recv(bl_loss_tensor, src_stage=norm_stage, tag=9997)
+                            baseline_loss_val = bl_loss_tensor[0].item()
+
+                    if my_stage == 0:
+                        repo_baseline_losses.append(baseline_loss_val)
+
+                if is_main_process_per_node():
+                    import math as _math_log
+                    _ppl_val = _math_log.exp(loss_val) if loss_val < 20 else float('inf')
+                    _bl_ppl_val = _math_log.exp(baseline_loss_val) if baseline_loss_val < 20 else float('inf')
+                    logger.info(
+                        f"    [ExportLoRA] Repo {repo_idx+1}/{len(repos_for_this_rank)} "
+                        f"({repo_name}) | Traj {traj_idx+1}/{len(indices)} | "
+                        f"loss={loss_val:.4f} ppl={_ppl_val:.2f} | "
+                        f"baseline_loss={baseline_loss_val:.4f} baseline_ppl={_bl_ppl_val:.2f}"
+                    )
+
+                # Update detach_state
+                if model.detach_state is not None:
+                    regu_sq = _eval_sq_norms[0] if _eval_sq_norms else 0.0
+                    model.detach_state.update_steps(0)
+                    model.detach_state.set_last_sq_norms([regu_sq])
+                    model.detach_state.maybe_reset_slice(0)
+
+            # After all trajectories for this repo: gather loradicts to stage 0
+            if stage_loradicts:
+                # Each stage concats its own layers
+                all_layer_indices = sorted(stage_loradicts[0].keys()) if stage_loradicts[0] else []
+                merged_local = {}
+                for layer_idx in all_layer_indices:
+                    layer_loradicts = [ld[layer_idx] for ld in stage_loradicts if ld.get(layer_idx) is not None]
+                    if layer_loradicts:
+                        merged_local[layer_idx] = concat_loradict(layer_loradicts)
+                    else:
+                        merged_local[layer_idx] = None
+
+                # Gather all stages' loradicts to stage 0
+                # Each stage serializes its merged_local tensors and sends to stage 0
+                if my_stage == 0:
+                    full_loradict = dict(merged_local)
+
+                    # Receive from other stages
+                    for src_stage in range(1, total_stages):
+                        # Receive number of layers from this stage
+                        n_layers_t = torch.empty(1, dtype=torch.long, device=my_device)
+                        pipeline_recv(n_layers_t, src_stage=src_stage, tag=8000)
+                        n_layers = n_layers_t.item()
+
+                        for _ in range(n_layers):
+                            # Receive layer_idx
+                            layer_idx_t = torch.empty(1, dtype=torch.long, device=my_device)
+                            pipeline_recv(layer_idx_t, src_stage=src_stage, tag=8001)
+                            layer_idx = layer_idx_t.item()
+
+                            # Receive serialized loradict for this layer
+                            # Format: num_tensors, then for each: shape_len, shape, data
+                            n_tensors_t = torch.empty(1, dtype=torch.long, device=my_device)
+                            pipeline_recv(n_tensors_t, src_stage=src_stage, tag=8002)
+                            n_tensors = n_tensors_t.item()
+
+                            if n_tensors > 0:
+                                # Receive flattened data size
+                                total_size_t = torch.empty(1, dtype=torch.long, device=my_device)
+                                pipeline_recv(total_size_t, src_stage=src_stage, tag=8003)
+                                total_size = total_size_t.item()
+
+                                # Receive shapes info
+                                shapes_size_t = torch.empty(1, dtype=torch.long, device=my_device)
+                                pipeline_recv(shapes_size_t, src_stage=src_stage, tag=8004)
+                                shapes_buf = torch.empty(shapes_size_t.item(), dtype=torch.long, device=my_device)
+                                pipeline_recv(shapes_buf, src_stage=src_stage, tag=8005)
+
+                                # Receive flattened data
+                                flat_data = torch.empty(total_size, dtype=torch.bfloat16, device=my_device)
+                                pipeline_recv(flat_data, src_stage=src_stage, tag=8006)
+
+                                # Reconstruct loradict for this layer
+                                full_loradict[layer_idx] = deserialize_layer_loradict(
+                                    flat_data, shapes_buf, n_tensors
+                                )
+                else:
+                    # Send this stage's merged_local to stage 0
+                    n_layers = len([k for k, v in merged_local.items() if v is not None])
+                    n_layers_t = torch.tensor([n_layers], dtype=torch.long, device=my_device)
+                    pipeline_send(n_layers_t, dst_stage=0, tag=8000)
+
+                    for layer_idx, layer_dict in sorted(merged_local.items()):
+                        if layer_dict is None:
+                            continue
+                        # Send layer_idx
+                        layer_idx_t = torch.tensor([layer_idx], dtype=torch.long, device=my_device)
+                        pipeline_send(layer_idx_t, dst_stage=0, tag=8001)
+
+                        # Serialize and send loradict tensors
+                        tensors = collect_loradict_tensors(layer_dict)
+                        n_tensors_t = torch.tensor([len(tensors)], dtype=torch.long, device=my_device)
+                        pipeline_send(n_tensors_t, dst_stage=0, tag=8002)
+
+                        if tensors:
+                            # Flatten all tensors
+                            flat_list = [t.to(torch.bfloat16).contiguous().view(-1) for t in tensors]
+                            flat_data = torch.cat(flat_list)
+                            total_size_t = torch.tensor([flat_data.numel()], dtype=torch.long, device=my_device)
+                            pipeline_send(total_size_t, dst_stage=0, tag=8003)
+
+                            # Send shapes
+                            shapes = []
+                            for t in tensors:
+                                shapes.append(len(t.shape))
+                                shapes.extend(t.shape)
+                            shapes_buf = torch.tensor(shapes, dtype=torch.long, device=my_device)
+                            shapes_size_t = torch.tensor([shapes_buf.numel()], dtype=torch.long, device=my_device)
+                            pipeline_send(shapes_size_t, dst_stage=0, tag=8004)
+                            pipeline_send(shapes_buf, dst_stage=0, tag=8005)
+
+                            # Send data
+                            pipeline_send(flat_data, dst_stage=0, tag=8006)
+
+                # Stage 0: convert to PEFT and save
+                if my_stage == 0 and full_loradict:
+                    safe_repo_name = repo_name.replace("/", "_").replace("\\", "_")
+                    save_dir = os.path.join(_export_save_base, safe_repo_name)
+                    loradict_to_peft(
+                        full_loradict,
+                        save_path=save_dir,
+                        base_model_name_or_path=_model_path,
+                    )
+
+                    # Save eval metrics with full statistics
+                    import json
+                    avg_loss = sum(repo_losses) / len(repo_losses) if repo_losses else 0.0
+                    avg_baseline_loss = sum(repo_baseline_losses) / len(repo_baseline_losses) if repo_baseline_losses else 0.0
+                    avg_ppl = math.exp(avg_loss) if avg_loss < 20 else float('inf')
+                    avg_baseline_ppl = math.exp(avg_baseline_loss) if avg_baseline_loss < 20 else float('inf')
+
+                    # Per-trajectory PPL
+                    per_traj_ppl = [math.exp(l) if l < 20 else float('inf') for l in repo_losses]
+                    per_traj_baseline_ppl = [math.exp(l) if l < 20 else float('inf') for l in repo_baseline_losses]
+
+                    # Per-trajectory ratios (model / baseline)
+                    per_traj_loss_ratio = []
+                    per_traj_ppl_ratio = []
+                    for l, bl in zip(repo_losses, repo_baseline_losses):
+                        per_traj_loss_ratio.append(l / bl if bl > 0 else float('inf'))
+                    for p, bp in zip(per_traj_ppl, per_traj_baseline_ppl):
+                        per_traj_ppl_ratio.append(p / bp if bp > 0 else float('inf'))
+
+                    # Average ratios
+                    avg_loss_ratio = sum(per_traj_loss_ratio) / len(per_traj_loss_ratio) if per_traj_loss_ratio else 0.0
+                    avg_ppl_ratio = sum(per_traj_ppl_ratio) / len(per_traj_ppl_ratio) if per_traj_ppl_ratio else 0.0
+
+                    # Win rate (fraction of trajectories where model loss < baseline loss)
+                    win_count = sum(1 for l, bl in zip(repo_losses, repo_baseline_losses) if l < bl)
+                    win_rate = win_count / len(repo_losses) if repo_losses else 0.0
+
+                    # Trend slope (linear regression slope over trajectory index)
+                    def _compute_slope(values):
+                        n = len(values)
+                        if n < 2:
+                            return 0.0
+                        x_mean = (n - 1) / 2.0
+                        y_mean = sum(values) / n
+                        num = sum((i - x_mean) * (v - y_mean) for i, v in enumerate(values))
+                        den = sum((i - x_mean) ** 2 for i in range(n))
+                        return num / den if den > 0 else 0.0
+
+                    loss_trend_slope = _compute_slope(repo_losses)
+                    ppl_trend_slope = _compute_slope(per_traj_ppl)
+                    baseline_loss_trend_slope = _compute_slope(repo_baseline_losses)
+                    baseline_ppl_trend_slope = _compute_slope(per_traj_baseline_ppl)
+                    loss_ratio_trend_slope = _compute_slope(per_traj_loss_ratio)
+                    ppl_ratio_trend_slope = _compute_slope(per_traj_ppl_ratio)
+
+                    metrics = {
+                        "repo": repo_name,
+                        "num_trajectories": len(indices),
+                        "avg_loss": avg_loss,
+                        "avg_ppl": avg_ppl,
+                        "avg_baseline_loss": avg_baseline_loss,
+                        "avg_baseline_ppl": avg_baseline_ppl,
+                        "avg_loss_ratio": avg_loss_ratio,
+                        "avg_ppl_ratio": avg_ppl_ratio,
+                        "win_rate": win_rate,
+                        "loss_trend_slope": loss_trend_slope,
+                        "ppl_trend_slope": ppl_trend_slope,
+                        "baseline_loss_trend_slope": baseline_loss_trend_slope,
+                        "baseline_ppl_trend_slope": baseline_ppl_trend_slope,
+                        "loss_ratio_trend_slope": loss_ratio_trend_slope,
+                        "ppl_ratio_trend_slope": ppl_ratio_trend_slope,
+                        "per_trajectory_loss": repo_losses,
+                        "per_trajectory_baseline_loss": repo_baseline_losses,
+                        "per_trajectory_ppl": per_traj_ppl,
+                        "per_trajectory_baseline_ppl": per_traj_baseline_ppl,
+                        "per_trajectory_loss_ratio": per_traj_loss_ratio,
+                        "per_trajectory_ppl_ratio": per_traj_ppl_ratio,
+                    }
+                    os.makedirs(save_dir, exist_ok=True)
+                    with open(os.path.join(save_dir, "eval_metrics.json"), "w") as f:
+                        json.dump(metrics, f, indent=2)
+
+                    all_repo_results[repo_name] = metrics
+
+                    if is_main_process_per_node():
+                        logger.info(
+                            f"    [ExportLoRA] Saved {repo_name}: "
+                            f"loss={avg_loss:.4f}, ppl={avg_ppl:.2f}, "
+                            f"loss_ratio={avg_loss_ratio:.4f}, win_rate={win_rate:.2f}"
+                        )
+
+            # Clear GPU cache between repos
+            if hasattr(model, 'invalidate_input_cache'):
+                model.invalidate_input_cache()
+            torch.cuda.empty_cache()
+
+        # ============================================================
+        # Step 4: Gather results and generate summary (PP mode)
+        # ============================================================
+        dist.barrier()
+
+        # In PP mode, only stage 0 has all_repo_results populated
+        # Gather from all DP ranks (stage 0 processes)
+        import json
+
+        gathered_results = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered_results, all_repo_results)
+
+        if is_main_process():
+            # Merge all gathered results
+            merged_repo_results = {}
+            for rank_results in gathered_results:
+                if rank_results:
+                    merged_repo_results.update(rank_results)
+
+            if merged_repo_results:
+                # Compute global metrics
+                all_avg_losses = [m["avg_loss"] for m in merged_repo_results.values()]
+                all_avg_baseline_losses = [m["avg_baseline_loss"] for m in merged_repo_results.values()]
+                all_avg_ppls = [m["avg_ppl"] for m in merged_repo_results.values()]
+                all_avg_baseline_ppls = [m["avg_baseline_ppl"] for m in merged_repo_results.values()]
+                all_loss_ratios = [m["avg_loss_ratio"] for m in merged_repo_results.values()]
+                all_ppl_ratios = [m["avg_ppl_ratio"] for m in merged_repo_results.values()]
+                all_win_rates = [m["win_rate"] for m in merged_repo_results.values()]
+                all_num_traj = [m["num_trajectories"] for m in merged_repo_results.values()]
+
+                global_metrics = {
+                    "num_repos": len(merged_repo_results),
+                    "total_trajectories": sum(all_num_traj),
+                    "avg_loss": sum(all_avg_losses) / len(all_avg_losses),
+                    "avg_baseline_loss": sum(all_avg_baseline_losses) / len(all_avg_baseline_losses),
+                    "avg_ppl": sum(all_avg_ppls) / len(all_avg_ppls),
+                    "avg_baseline_ppl": sum(all_avg_baseline_ppls) / len(all_avg_baseline_ppls),
+                    "avg_loss_ratio": sum(all_loss_ratios) / len(all_loss_ratios),
+                    "avg_ppl_ratio": sum(all_ppl_ratios) / len(all_ppl_ratios),
+                    "avg_win_rate": sum(all_win_rates) / len(all_win_rates),
+                    "avg_loss_trend_slope": sum(m["loss_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_ppl_trend_slope": sum(m["ppl_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_baseline_loss_trend_slope": sum(m["baseline_loss_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_baseline_ppl_trend_slope": sum(m["baseline_ppl_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_loss_ratio_trend_slope": sum(m["loss_ratio_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                    "avg_ppl_ratio_trend_slope": sum(m["ppl_ratio_trend_slope"] for m in merged_repo_results.values()) / len(merged_repo_results),
+                }
+
+                per_repo_summary = {}
+                for rn, m in sorted(merged_repo_results.items()):
+                    per_repo_summary[rn] = {
+                        "num_trajectories": m["num_trajectories"],
+                        "avg_loss": m["avg_loss"],
+                        "avg_baseline_loss": m["avg_baseline_loss"],
+                        "avg_ppl": m["avg_ppl"],
+                        "avg_baseline_ppl": m["avg_baseline_ppl"],
+                        "avg_loss_ratio": m["avg_loss_ratio"],
+                        "avg_ppl_ratio": m["avg_ppl_ratio"],
+                        "win_rate": m["win_rate"],
+                        "loss_trend_slope": m["loss_trend_slope"],
+                        "ppl_trend_slope": m["ppl_trend_slope"],
+                        "baseline_loss_trend_slope": m["baseline_loss_trend_slope"],
+                        "baseline_ppl_trend_slope": m["baseline_ppl_trend_slope"],
+                        "loss_ratio_trend_slope": m["loss_ratio_trend_slope"],
+                        "ppl_ratio_trend_slope": m["ppl_ratio_trend_slope"],
+                    }
+
+                summary = {
+                    "experiment": exp_name,
+                    "dataset": _dataset_name,
+                    "max_trajectories_per_repo": _max_traj,
+                    "global_metrics": global_metrics,
+                    "per_repo": per_repo_summary,
+                }
+
+                os.makedirs(_export_save_base, exist_ok=True)
+                summary_path = os.path.join(_export_save_base, "summary.json")
+                with open(summary_path, "w") as f:
+                    json.dump(summary, f, indent=2)
+                logger.info(f"  [ExportLoRA] Summary saved to {summary_path}")
+                logger.info(
+                    f"  [ExportLoRA] Complete. {global_metrics['num_repos']} repos, "
+                    f"avg_loss={global_metrics['avg_loss']:.4f}, "
+                    f"avg_loss_ratio={global_metrics['avg_loss_ratio']:.4f}, "
+                    f"avg_win_rate={global_metrics['avg_win_rate']:.2f}"
+                )
+
+                # WandB upload
+                try:
+                    import wandb
+                    _wandb_disabled = (
+                        os.environ.get("WANDB_MODE", "online") in ("disabled", "offline")
+                        or os.environ.get("WANDB_DISABLED", "").lower() in ("1", "true", "yes")
+                    )
+                    if not _wandb_disabled:
+                        # Initialize a new wandb run for this evaluation
+                        # Use same project as training (from cfg or env var)
+                        # Tags include "evaluation_export_lora" for easy filtering
+                        _wandb_cfg = cfg.get("wandb", {})
+                        _wandb_project = os.environ.get("WANDB_PROJECT") or _wandb_cfg.get("project", "SHINE_V2")
+                        _wandb_entity = os.environ.get("WANDB_ENTITY") or _wandb_cfg.get("entity")
+                        _wandb_job_type = exp_name[:64] if len(exp_name) > 64 else exp_name
+                        wandb.init(
+                            project=_wandb_project,
+                            entity=_wandb_entity,
+                            name=f"{exp_name}/{_dataset_name}",
+                            group=_dataset_name,
+                            job_type=_wandb_job_type,
+                            config={
+                                "run_name": exp_name,
+                                "dataset_name": _dataset_name,
+                                "max_traj_per_repo": _max_traj,
+                                "num_repos": global_metrics["num_repos"],
+                                "total_trajectories": global_metrics["total_trajectories"],
+                                "parallel_mode": "pp",
+                            },
+                            tags=["evaluation_export_lora", _dataset_name, exp_name[:64]],
+                            reinit=True,
+                        )
+
+                        # Log global scalar metrics as summary (not step-based)
+                        # to avoid meaningless line charts with step=0
+                        wandb.summary.update({
+                            "export_lora/avg_loss": global_metrics["avg_loss"],
+                            "export_lora/avg_baseline_loss": global_metrics["avg_baseline_loss"],
+                            "export_lora/avg_ppl": global_metrics["avg_ppl"],
+                            "export_lora/avg_baseline_ppl": global_metrics["avg_baseline_ppl"],
+                            "export_lora/avg_loss_ratio": global_metrics["avg_loss_ratio"],
+                            "export_lora/avg_ppl_ratio": global_metrics["avg_ppl_ratio"],
+                            "export_lora/avg_win_rate": global_metrics["avg_win_rate"],
+                            "export_lora/num_repos": global_metrics["num_repos"],
+                            "export_lora/total_trajectories": global_metrics["total_trajectories"],
+                            "export_lora/avg_loss_trend_slope": global_metrics["avg_loss_trend_slope"],
+                            "export_lora/avg_ppl_trend_slope": global_metrics["avg_ppl_trend_slope"],
+                            "export_lora/avg_baseline_loss_trend_slope": global_metrics["avg_baseline_loss_trend_slope"],
+                            "export_lora/avg_baseline_ppl_trend_slope": global_metrics["avg_baseline_ppl_trend_slope"],
+                            "export_lora/avg_loss_ratio_trend_slope": global_metrics["avg_loss_ratio_trend_slope"],
+                            "export_lora/avg_ppl_ratio_trend_slope": global_metrics["avg_ppl_ratio_trend_slope"],
+                        })
+
+                        # Log per-repo table
+                        table = wandb.Table(columns=[
+                            "repo", "num_traj", "avg_loss", "avg_baseline_loss",
+                            "loss_ratio", "ppl_ratio", "win_rate",
+                            "loss_trend_slope", "ppl_trend_slope",
+                            "loss_ratio_trend_slope", "ppl_ratio_trend_slope",
+                        ])
+                        for repo_name, data in sorted(per_repo_summary.items()):
+                            table.add_data(
+                                repo_name, data["num_trajectories"],
+                                data["avg_loss"], data["avg_baseline_loss"],
+                                data["avg_loss_ratio"], data["avg_ppl_ratio"],
+                                data["win_rate"],
+                                data["loss_trend_slope"], data["ppl_trend_slope"],
+                                data["loss_ratio_trend_slope"], data["ppl_ratio_trend_slope"],
+                            )
+                        wandb.log({"export_lora/per_repo_summary": table})
+
+                        # Log per-trajectory detail table
+                        traj_table = wandb.Table(columns=[
+                            "repo", "traj_idx", "loss", "baseline_loss",
+                            "ppl", "baseline_ppl", "loss_ratio", "ppl_ratio",
+                        ])
+                        for repo_name, m in sorted(merged_repo_results.items()):
+                            for i in range(m["num_trajectories"]):
+                                traj_table.add_data(
+                                    repo_name, i,
+                                    m["per_trajectory_loss"][i],
+                                    m["per_trajectory_baseline_loss"][i],
+                                    m["per_trajectory_ppl"][i],
+                                    m["per_trajectory_baseline_ppl"][i],
+                                    m["per_trajectory_loss_ratio"][i],
+                                    m["per_trajectory_ppl_ratio"][i],
+                                )
+                        wandb.log({"export_lora/trajectory_details": traj_table})
+
+                        # Save summary.json as artifact
+                        artifact = wandb.Artifact(
+                            f"export_lora_{_dataset_name}",
+                            type="evaluation",
+                        )
+                        artifact.add_file(summary_path)
+                        wandb.log_artifact(artifact)
+
+                        wandb.finish()
+                        logger.info("  [ExportLoRA] WandB upload complete.")
+                except Exception as e:
+                    logger.warning(f"  [ExportLoRA] WandB upload failed: {e!r}")
+
+        dist.barrier()
+        cleanup_distributed()
+        os._exit(0)
+
     for epoch in range(start_epoch, num_epochs):
         train_loader.set_epoch(epoch)
         data_iter = iter(train_loader)
@@ -2317,15 +2997,11 @@ def main(cfg: DictConfig):
         if epoch == start_epoch and resume_checkpoint_dir is not None:
             epoch_loss_sum = epoch_loss_sum_resume
             epoch_steps = epoch_steps_resume
-            # Skip batches already processed in this epoch
-            _batches_to_skip = epoch_steps_resume * grad_accum_steps
-            if _batches_to_skip > 0 and is_main_process_per_node():
-                logger.info(f"  [Resume] Skipping {_batches_to_skip} batches in epoch {epoch}...")
-            for _skip_i in range(_batches_to_skip):
-                try:
-                    next(data_iter)
-                except StopIteration:
-                    break
+            # Batch skipping is handled by PipelineDataLoader.__iter__()
+            # which fast-forwards past already-processed batches using the
+            # batch_counter saved in the dataloader state_dict.
+            if train_loader._batch_counter > 0 and is_main_process_per_node():
+                logger.info(f"  [Resume] DataLoader fast-forwarded {train_loader._batch_counter} batches in epoch {epoch}")
         else:
             epoch_loss_sum = 0.0  # cumulative loss for this epoch
             epoch_steps = 0       # number of optimizer steps in this epoch
@@ -2460,8 +3136,9 @@ def main(cfg: DictConfig):
     # ==================================================================
     # 9. Finish — save final checkpoint and cleanup
     # ==================================================================
-    # Final evaluation (always run regardless of eval schedule)
-    if val_loader is not None:
+    # Final evaluation (only if eval is enabled in config)
+    _eval_enabled = (cfg.training.get("eval_steps", -1) > 0)
+    if _eval_enabled and val_loader is not None:
         # Skip if the last training step already triggered an eval
         _already_evaled = eval_sched.should_run(global_step)
         if not _already_evaled:

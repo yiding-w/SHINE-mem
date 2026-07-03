@@ -230,6 +230,19 @@ cmd_to_name() {
 # Subcommand: init
 # =============================================================================
 cmd_init() {
+    local force=false
+    if [[ "${1:-}" == "--force" ]]; then
+        force=true
+    fi
+
+    if [[ "$force" == false && -d "$PENDING_DIR" && -d "$RUNNING_DIR" && -d "$DONE_DIR" && -d "$FAILED_DIR" ]]; then
+        echo "Queue already initialized at: $QUEUE_DIR"
+        echo "  (use './scripts/run_batch.sh init --force' to destroy and reinitialize)"
+        return 0
+    fi
+
+    # Clean slate: remove everything and recreate
+    rm -rf "$QUEUE_DIR"
     ensure_queue_dirs
     echo "Queue directories initialized at: $QUEUE_DIR"
     echo "  pending/  — add jobs here"
@@ -642,9 +655,28 @@ cmd_status() {
         echo ""
     fi
     
-    # Show related processes
+    # Show related processes (concise summary)
     echo "  Related processes:"
-    ps -ef | grep -E "trajectory_all_transfer|meta_train\.py|launch_cluster.*start" | grep -v grep | awk '{printf "    PID %-8s %s\n", $2, substr($0, index($0,$8))}' | head -20
+    local launch_pid=$(ps -ef | grep "[l]aunch_cluster\.sh start" | awk 'NR==1{print $2}')
+    local train_count=$(ps -ef | grep "[m]eta_train\.py" | wc -l)
+    local torchrun_pid=$(ps -ef | grep "[t]orchrun.*meta_train" | awk 'NR==1{print $2}')
+    local train_cmd=$(ps -ef | grep "[t]orchrun.*meta_train" | head -1 | sed 's/^.*meta_train.py/meta_train.py/')
+
+    if [[ -n "$launch_pid" ]]; then
+        echo "    launch_cluster PID: $launch_pid"
+    fi
+    if [[ -n "$torchrun_pid" ]]; then
+        echo "    torchrun PID: $torchrun_pid"
+        if [[ -n "$train_cmd" ]]; then
+            echo "    training args: $train_cmd"
+        fi
+    fi
+    if (( train_count > 0 )); then
+        echo "    meta_train.py workers: $train_count processes"
+    fi
+    if [[ -z "$launch_pid" && -z "$torchrun_pid" && "$train_count" -eq 0 ]]; then
+        echo "    (none)"
+    fi
     echo ""
 }
 
@@ -741,10 +773,10 @@ cmd_stop() {
 cmd_start() {
     ensure_queue_dirs
     
-    # Check if already running
-    if [[ -f "$BATCH_PID_FILE" ]]; then
+    # Check if already running (skip if we are the nohup-relaunched instance)
+    if [[ "${_RUN_BATCH_NOHUP:-}" != "1" ]] && [[ -f "$BATCH_PID_FILE" ]]; then
         local existing_pid=$(cat "$BATCH_PID_FILE")
-        if kill -0 "$existing_pid" 2>/dev/null; then
+        if [[ "$existing_pid" != "$$" ]] && kill -0 "$existing_pid" 2>/dev/null; then
             echo "Error: Batch runner is already running (PID $existing_pid)."
             echo "Use './scripts/run_batch.sh stop' to stop it first."
             exit 1
@@ -1250,7 +1282,7 @@ shift
 
 case "$SUBCOMMAND" in
     init)
-        cmd_init
+        cmd_init "$@"
         ;;
     start)
         cmd_start "$@"

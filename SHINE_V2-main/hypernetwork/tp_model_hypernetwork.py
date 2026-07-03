@@ -34,14 +34,60 @@ from typing import Optional, Dict
 import torch
 import torch._dynamo
 import torch.nn as nn
+import torch.distributed as dist
 
 from utils.myparallel import is_main_process_per_node
 from utils.mytp.tp_load_model import load_pretrained_llm_for_tp
+from utils.mytp.sp_utils import (
+    sp_pad_to_divisible,
+    sp_split_sequence,
+    sp_make_position_ids,
+)
 from hypernetwork.tp_hypernetwork import TPHypernetwork
 from utils.myloradict import concat_loradict, collect_loradict_tensors
 
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SP (Sequence Parallelism) helpers
+# ---------------------------------------------------------------------------
+
+class _SPAllReduceSum(torch.autograd.Function):
+    """All-reduce SUM across the SP group in forward; identity in backward.
+
+    In SP mode, each SP rank computes memory_states from its own chunk of
+    the context sequence. Only the SP rank that holds the mem_tokens will
+    have non-zero memory_states. The all-reduce SUM in forward broadcasts
+    the non-zero memory_states to all SP ranks so they can all generate
+    the same loradict.
+
+    Backward is identity (no communication) because:
+    - All SP ranks receive the same grad w.r.t. memory_states_allreduced
+      (since they all ran the same hypernetwork + same loradict).
+    - The grad should flow back to the SP rank that produced the non-zero
+      memory_states (the one with mem_tokens). Since the other SP rank's
+      memory_states was zero, its grad contribution is also zero — so
+      identity backward is correct.
+    """
+
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, group) -> torch.Tensor:
+        ctx.group = group
+        out = tensor.clone()
+        dist.all_reduce(out, op=dist.ReduceOp.SUM, group=group)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        # Identity: no communication needed in backward.
+        return grad_output, None
+
+
+def _sp_allreduce_sum(tensor: torch.Tensor, group) -> torch.Tensor:
+    """Functional wrapper for _SPAllReduceSum."""
+    return _SPAllReduceSum.apply(tensor, group)
 
 
 __all__ = ["TPModelHypernetwork"]
@@ -57,18 +103,34 @@ class TPModelHypernetwork(nn.Module):
         tp_rank: int,
         tp_world: int,
         tp_process_group,
+        sp_group=None,
+        sp_world: int = 1,
         dtype: torch.dtype = torch.bfloat16,
-        activation_checkpointing: bool = True,
-        ckpt_skip_stride: int = 0,
+        activation_checkpointing_llm: bool = True,
+        activation_checkpointing_m2p: bool = True,
+        ckpt_skip_stride_llm: int = 0,
+        ckpt_skip_stride_m2p: int = 0,
+        cpu_offload: bool = False,
         compile_hypernetwork: bool = True,
     ):
         super().__init__()
         self._tp_rank = tp_rank
         self._tp_world = tp_world
         self._tp_group = tp_process_group
+        self._sp_group = sp_group
+        self._sp_world = sp_world
+        self._sp_rank = dist.get_rank(sp_group) if (sp_group is not None and sp_world > 1) else 0
         self._dtype = dtype
-        self._activation_checkpointing = activation_checkpointing
-        self._ckpt_skip_stride = int(ckpt_skip_stride)
+        self._activation_checkpointing_llm = activation_checkpointing_llm
+        self._activation_checkpointing_m2p = activation_checkpointing_m2p
+        self._ckpt_skip_stride_llm = int(ckpt_skip_stride_llm)
+        self._ckpt_skip_stride_m2p = int(ckpt_skip_stride_m2p)
+        self._cpu_offload = cpu_offload
+        # Global offload context (shared across all layers for cross-layer prefetch)
+        self._offload_ctx = None
+        if cpu_offload:
+            from utils.activation_offload import PrefetchOffloadContext
+            self._offload_ctx = PrefetchOffloadContext(prefetch_ahead=1)
 
         # ----------------------------------------------------------------
         # 0. Compute num_mem_token from lora_ranks and the LLM config so
@@ -135,19 +197,55 @@ class TPModelHypernetwork(nn.Module):
         self.llm = load_pretrained_llm_for_tp(
             model_cfg=model_cfg,
             tp_rank=tp_rank, tp_world=tp_world, tp_process_group=tp_process_group,
+            sp_group=sp_group, sp_world=sp_world,
             dtype=dtype,
             freeze=True,
             num_mem_token=num_mem_token_for_load,
         )
 
         # ----------------------------------------------------------------
-        # 1.5 Make mem_tokens requires_grad=True (same as PP).
-        #     We don't train it now but keep it saveable/loadable for
-        #     future use. PP does the same: requires_grad=True but not
-        #     included in optimizer param groups.
+        # 1.5 Keep mem_tokens frozen (requires_grad=False).
+        #     We don't train mem_tokens. Keeping it frozen ensures that
+        #     inputs_embeds does NOT require grad from the embedding layer,
+        #     so backward stops at the first full_attention layer (layer 3)
+        #     in both TP and SP modes. In SP mode this is critical: if only
+        #     one SP rank had requires_grad=True on inputs_embeds (because
+        #     mem_tokens landed on that rank), the asymmetric backward would
+        #     deadlock FLA's CP communication (all_gather in conv1d_halo).
         # ----------------------------------------------------------------
         if hasattr(self.llm.model, "mem_tokens") and self.llm.model.mem_tokens is not None:
-            self.llm.model.mem_tokens.requires_grad_(True)
+            self.llm.model.mem_tokens.requires_grad_(False)
+
+        # ----------------------------------------------------------------
+        # 1.6 Hidden-dim Sequence Parallelism.
+        #     When TP > 1, scatter the inter-layer residual stream along
+        #     the hidden dim: [B, S, H] → [B, S, H/TP].
+        #     Each layer's checkpoint wrapper AllGathers before the real forward.
+        #     This reduces activation memory by (1 - 1/TP) and also reduces
+        #     CPU-offload traffic when offload is enabled.
+        #     Controlled by env var SHINE_HIDDEN_SP (default: "1" = enabled
+        #     when tp_world > 1).
+        # ----------------------------------------------------------------
+        _hidden_sp_env = os.environ.get("SHINE_HIDDEN_SP", "1")
+        self._hidden_sp_enabled = (
+            tp_world > 1
+            and _hidden_sp_env not in ("0", "", "false", "False")
+        )
+        if self._hidden_sp_enabled:
+            # Store config on the text model so LoraQwen3_5TextModel.forward
+            # can scatter/gather hidden_states around the layer loop.
+            self.llm.model._hidden_sp_config = {
+                "tp_rank": tp_rank,
+                "tp_world": tp_world,
+                "tp_group": tp_process_group,
+            }
+            if is_main_process_per_node():
+                logger.info(
+                    f"[TPModelHypernetwork] Hidden-dim SP ENABLED "
+                    f"(tp_world={tp_world}). Inter-layer activations scattered "
+                    f"along hidden dim: [B, S, H] → [B, S, H/{tp_world}]. "
+                    f"Activation memory reduced by {(1 - 1/tp_world)*100:.0f}%."
+                )
 
         # ----------------------------------------------------------------
         # 2. Wire lora_method onto every LoraLinear / LoraHelper /
@@ -215,6 +313,8 @@ class TPModelHypernetwork(nn.Module):
             memory_method=self._memory_method,
             dtype=dtype,
             device=self._device,
+            activation_checkpointing=activation_checkpointing_m2p,
+            ckpt_skip_stride=ckpt_skip_stride_m2p,
         )
 
         # Optional: torch.compile the replicated hypernetwork. The TP
@@ -227,11 +327,22 @@ class TPModelHypernetwork(nn.Module):
         _env = os.environ.get("SHINE_COMPILE_HN")
         _do_compile = compile_hypernetwork if _env is None else (_env not in ("0", "", "false"))
         if _do_compile:
-            self.hypernetwork = torch.compile(self.hypernetwork)
+            # Compile each m2p_transformer layer individually instead of
+            # the entire hypernetwork. Benefits:
+            # 1. Works cleanly with gradient checkpoint (no unexpected
+            #    graph breaks from dynamo encountering checkpoint ops).
+            # 2. All layers share the same structure so PyTorch reuses
+            #    the compiled cache — only one actual compilation.
+            # 3. Faster first-compilation and easier debugging.
+            n_hn_compiled = 0
+            for layer in self.hypernetwork.m2p_transformer.layers:
+                layer.forward = torch.compile(layer.forward, dynamic=False)
+                n_hn_compiled += 1
             if is_main_process_per_node():
                 logger.info(
-                    "[TPModelHypernetwork] torch.compile enabled on hypernetwork "
-                    "(+5% step, -8 GB peak vs eager; ~3 min extra warmup)"
+                    f"[TPModelHypernetwork] torch.compile enabled on "
+                    f"{n_hn_compiled} m2p_transformer layers (per-layer, dynamic=False; "
+                    f"compatible with activation_checkpointing)"
                 )
 
         # torch.compile all LLM decoder layers (same as PP). With SDPA
@@ -342,11 +453,13 @@ class TPModelHypernetwork(nn.Module):
         if is_main_process_per_node():
             logger.info(
                 f"[TPModelHypernetwork] tp_rank={tp_rank}/{tp_world} "
+                f"sp_world={sp_world} "
                 f"hidden={self._hidden_size} num_layers={self._num_llm_layers} "
                 f"num_full_attn={self._num_full_attn_layers} "
                 f"num_mem={self._num_mem_token} vocab={self._vocab_size} "
                 f"lora_method={lora_method} memory_method={self._memory_method} "
-                f"activation_checkpointing={activation_checkpointing}"
+                f"activation_checkpointing_llm={activation_checkpointing_llm} "
+                f"activation_checkpointing_m2p={activation_checkpointing_m2p}"
             )
 
         # ----------------------------------------------------------------
@@ -358,7 +471,7 @@ class TPModelHypernetwork(nn.Module):
         #    Also wraps layers with w_transform injection (even if
         #    checkpointing is disabled, w_transform still needs wrapping).
         # ----------------------------------------------------------------
-        self._wrap_layers_with_checkpoint(use_checkpoint=activation_checkpointing)
+        self._wrap_layers_with_checkpoint(use_checkpoint=activation_checkpointing_llm)
 
         # ----------------------------------------------------------------
         # 7. Initialize W-Transform modules if configured.
@@ -464,6 +577,14 @@ class TPModelHypernetwork(nn.Module):
                         "@torch.compiler.disable)"
                     )
 
+    def _get_offload_context(self):
+        """Return the global offload context if cpu_offload is enabled,
+        otherwise return a no-op context manager."""
+        if self._offload_ctx is not None:
+            return self._offload_ctx
+        from contextlib import nullcontext
+        return nullcontext()
+
     def _wrap_layers_with_checkpoint(self, use_checkpoint: bool = True) -> None:
         """Wrap decoder layers' forward in ``torch.utils.checkpoint`` so
         activations are recomputed during backward instead of held in memory.
@@ -479,6 +600,12 @@ class TPModelHypernetwork(nn.Module):
         s=4 → 16 layers kept (≈ 25% recompute saved), spread so the peak
         activation memory stays bounded.
 
+        Hidden-dim SP: When ``_hidden_sp_enabled`` is True, the input
+        hidden_states arrives as [B, S, H/TP] (scattered along hidden dim).
+        Inside the checkpoint boundary we AllGather to [B, S, H] before
+        calling the real layer forward. This way checkpoint saves the small
+        [B, S, H/TP] tensor, reducing CPU-offload traffic by (1 - 1/TP).
+
         Also injects w_transform: if self._active_w_transform is set,
         the wrapper applies it to nograd_wdict before calling the layer.
 
@@ -487,15 +614,19 @@ class TPModelHypernetwork(nn.Module):
                 If False, only wrap for w_transform injection (no recompute).
         """
         from torch.utils.checkpoint import checkpoint
-        s = self._ckpt_skip_stride if use_checkpoint else 0
+        from utils.mytp.tp_linear import gather_hidden_forward
+        s = self._ckpt_skip_stride_llm if use_checkpoint else 0
         n_skipped = 0
         n_checkpointed = 0
         model_ref = self  # Capture reference for closure
+        tp_group = self._tp_group
+        tp_world = self._tp_world
+        tp_rank = self._tp_rank
         for idx, layer in enumerate(self.llm.model.layers):
             orig_forward = layer.forward
             if use_checkpoint and s > 0 and idx % s == 0:
                 n_skipped += 1
-                # Un-checkpointed layer: still needs w_transform injection
+                # Un-checkpointed layer: still needs w_transform injection + hidden SP gather
                 def make_no_ckpt(fn, layer_idx):
                     def wrapped(*args, **kwargs):
                         w_transform = model_ref._active_w_transform
@@ -504,6 +635,9 @@ class TPModelHypernetwork(nn.Module):
                             kwargs['nograd_wdict'] = w_transform(
                                 kwargs['nograd_wdict'], layer_idx
                             )
+                        # Hidden-dim SP: AllGather before layer forward
+                        if model_ref._hidden_sp_enabled:
+                            args = (gather_hidden_forward(args[0], tp_group, tp_world, tp_rank),) + args[1:]
                         return fn(*args, **kwargs)
                     return wrapped
                 layer.forward = make_no_ckpt(orig_forward, idx)
@@ -517,6 +651,10 @@ class TPModelHypernetwork(nn.Module):
                         # transform that was active during the original forward.
                         w_transform = model_ref._active_w_transform
                         def fwd(*a):
+                            # Hidden-dim SP: AllGather [B,S,H/TP] → [B,S,H]
+                            # inside checkpoint boundary so the saved tensor is small.
+                            if model_ref._hidden_sp_enabled:
+                                a = (gather_hidden_forward(a[0], tp_group, tp_world, tp_rank),) + a[1:]
                             if w_transform is not None and 'nograd_wdict' in kwargs and kwargs['nograd_wdict'] is not None:
                                 transformed_kwargs = dict(kwargs)
                                 transformed_kwargs['nograd_wdict'] = w_transform(
@@ -524,11 +662,13 @@ class TPModelHypernetwork(nn.Module):
                                 )
                                 return fn(*a, **transformed_kwargs)
                             return fn(*a, **kwargs)
+                        # No per-layer offload context — the global
+                        # self._offload_ctx wraps the entire LLM forward.
                         return checkpoint(fwd, *args, use_reentrant=False)
                     return wrapped
                 layer.forward = make(orig_forward, idx)
             else:
-                # No checkpoint, just w_transform injection
+                # No checkpoint, just w_transform injection + hidden SP gather
                 def make_no_ckpt2(fn, layer_idx):
                     def wrapped(*args, **kwargs):
                         w_transform = model_ref._active_w_transform
@@ -537,6 +677,9 @@ class TPModelHypernetwork(nn.Module):
                             kwargs['nograd_wdict'] = w_transform(
                                 kwargs['nograd_wdict'], layer_idx
                             )
+                        # Hidden-dim SP: AllGather before layer forward
+                        if model_ref._hidden_sp_enabled:
+                            args = (gather_hidden_forward(args[0], tp_group, tp_world, tp_rank),) + args[1:]
                         return fn(*args, **kwargs)
                     return wrapped
                 layer.forward = make_no_ckpt2(orig_forward, idx)
@@ -546,7 +689,8 @@ class TPModelHypernetwork(nn.Module):
                 logger.info(
                     f"[TPModelHypernetwork] activation checkpointing: "
                     f"{n_checkpointed}/{total} layers checkpointed "
-                    f"(ckpt_skip_stride={s}, {n_skipped} kept for less recompute)"
+                    f"(ckpt_skip_stride={s}, {n_skipped} kept for less recompute"
+                    f", cpu_offload={'ON (global cross-layer prefetch)' if self._cpu_offload else 'OFF'})"
                 )
             else:
                 logger.info(
@@ -576,6 +720,10 @@ class TPModelHypernetwork(nn.Module):
         For only_full_4for1: returns ``(B, L, M, H)`` unfiltered (the
             hypernetwork's ``_initial_reshape`` will reduce L by 4).
 
+        SP mode: splits input_ids into local chunks before LLM forward.
+        Each SP rank only processes S_local = S_full / sp_world tokens.
+        mem_write_offsets/counts handle mem_tokens that span SP boundaries.
+
         Args:
             nograd_loradict: Optional detached loradict from detach_state.
                 Passed as nograd_loradict to the LLM forward (no gradient).
@@ -585,30 +733,100 @@ class TPModelHypernetwork(nn.Module):
         # PP does not pass attention_mask (uses None → flash attention with
         # is_causal=True). To match PP behaviour, we also pass None here.
         # Padding tokens are handled at loss computation time via ignore_index=-100.
-        out = self.llm.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            loradict=self.metalora,
-            nograd_loradict=nograd_loradict,
-            nograd_wdict=nograd_wdict,
-            use_mem_token=True,
-            context_lengths=context_lengths,
-            use_cache=False,
-        )
-        mem = out.memory_states  # (B, L, M, H)
+
+        if self._sp_group is not None and self._sp_world > 1:
+            # --- SP mode: split sequence and compute local mem_write info ---
+            # Pad input_ids to be divisible by 2*sp_world (zigzag requirement)
+            input_ids, _S_orig = sp_pad_to_divisible(input_ids, self._sp_world, pad_value=0)
+            B, S_full = input_ids.shape
+            S_local = S_full // self._sp_world
+            local_ids = sp_split_sequence(input_ids, self._sp_rank, self._sp_world)
+            position_ids = sp_make_position_ids(
+                S_local, self._sp_rank, self._sp_world, B, input_ids.device,
+            )
+
+            # Compute local context_lengths and mem_write_offsets/counts.
+            # mem_tokens are placed at positions [context_length, context_length + M).
+            # Under SP, these positions may fall on one rank or span two ranks.
+            M = self._num_mem_token
+            local_context_lengths = torch.zeros(B, dtype=torch.long, device=input_ids.device)
+            mem_write_offsets = torch.zeros(B, dtype=torch.long, device=input_ids.device)
+            mem_write_counts = torch.zeros(B, dtype=torch.long, device=input_ids.device)
+
+            chunk_start = self._sp_rank * S_local
+            chunk_end = chunk_start + S_local
+
+            for i in range(B):
+                ctx_len = context_lengths[i].item()
+                mem_start = ctx_len  # global start of mem_tokens
+                mem_end = ctx_len + M  # global end of mem_tokens
+
+                # local_context_lengths: how many context tokens are on this rank
+                # (clamped to [0, S_local])
+                local_ctx = max(0, min(ctx_len, chunk_end) - chunk_start)
+                local_context_lengths[i] = local_ctx
+
+                # How many mem_tokens fall on this rank?
+                local_mem_start = max(mem_start, chunk_start)
+                local_mem_end = min(mem_end, chunk_end)
+                count = max(0, local_mem_end - local_mem_start)
+                mem_write_counts[i] = count
+
+                # Offset within the M-dim memory_states to write
+                # (how many mem_tokens are on earlier ranks)
+                offset = max(0, local_mem_start - mem_start)
+                mem_write_offsets[i] = offset
+
+            with self._get_offload_context():
+                out = self.llm.model(
+                    input_ids=local_ids,
+                    attention_mask=None,  # flash attention with is_causal=True
+                    position_ids=position_ids,
+                    loradict=self.metalora,
+                    nograd_loradict=nograd_loradict,
+                    nograd_wdict=nograd_wdict,
+                    use_mem_token=True,
+                    context_lengths=local_context_lengths,
+                    mem_write_offsets=mem_write_offsets,
+                    mem_write_counts=mem_write_counts,
+                    sp_group=self._sp_group,
+                    sp_rank=self._sp_rank,
+                    sp_world=self._sp_world,
+                    use_cache=False,
+                )
+        else:
+            # --- Non-SP mode: original path ---
+            with self._get_offload_context():
+                out = self.llm.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    loradict=self.metalora,
+                    nograd_loradict=nograd_loradict,
+                    nograd_wdict=nograd_wdict,
+                    use_mem_token=True,
+                    context_lengths=context_lengths,
+                    use_cache=False,
+                )
+
+        mem = out.memory_states  # (B, FA_L, M, H) — already only full_attention layers
         if mem is None:
             raise RuntimeError(
                 "compute_memory_states: text_model did not return memory_states. "
                 "Check that the model config has num_mem_token > 0 and that "
                 "context_lengths is correct."
             )
+        # LLM forward now only collects full_attention layers, so no fa_idx
+        # filtering is needed. Validate shape as a sanity check.
         if self._memory_method == "only_full_1for1":
-            fa_idx = torch.tensor(self._full_attn_layer_indices, device=mem.device)
-            mem = mem[:, fa_idx, :, :]
-        # LoraQwen3_5TextModel.forward builds memory_states via torch.zeros
-        # (defaults to fp32) then writes per-layer slices. Cast back to the
-        # hypernetwork's dtype so the m2p_transformer (bf16) doesn't barf
-        # on dtype-mismatched inputs.
+            expected_layers = self._num_full_attn_layers
+            if mem.shape[1] != expected_layers:
+                raise RuntimeError(
+                    f"compute_memory_states: expected {expected_layers} full_attn layers "
+                    f"in memory_states dim=1, got {mem.shape[1]}. "
+                    f"Ensure LLM forward only collects full_attention layers."
+                )
+        # Ensure memory_states matches the hypernetwork's dtype.
+        # (Normally already bf16 since new_zeros inherits from hidden_states.)
         if mem.dtype != self._dtype:
             mem = mem.to(self._dtype)
         return mem
@@ -661,17 +879,20 @@ class TPModelHypernetwork(nn.Module):
         return_per_token_loss: bool = False,
         nograd_loradict: Optional[Dict] = None,
         nograd_wdict: Optional[Dict] = None,
-        return_acc: bool = False,
     ):
         """Step 4 — run the LLM with the generated loradict, then compute
         causal-LM CE loss against shifted labels.
+
+        SP mode: splits input_ids into local chunks, derives shift_labels
+        directly from the full labels tensor (no communication needed), and
+        computes loss as local_sum / global_valid_count.
 
         Args:
             return_per_token_loss: If False (default), returns a scalar mean
                 loss — identical to the previous behaviour, zero extra cost.
                 If True, returns a tuple (scalar_loss, per_token_loss) where
-                per_token_loss is a float32 tensor of shape (B, S-1) with the
-                per-position CE loss (0.0 at ignored positions). This path
+                per_token_loss is a float32 tensor of shape (B, S_local-1) with
+                the per-position CE loss (0.0 at ignored positions). This path
                 skips the Liger FLCE kernel and materialises the full logits,
                 so it is slower and should only be used for debugging.
             nograd_loradict: Optional detached loradict from detach_state.
@@ -679,58 +900,111 @@ class TPModelHypernetwork(nn.Module):
             nograd_wdict: Optional detached wdict from detach_state.
                 Passed as nograd_wdict to the LLM forward (no gradient).
         """
-        out = self.llm.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            loradict=loradict,
-            nograd_loradict=nograd_loradict,
-            nograd_wdict=nograd_wdict,
-            use_cache=False,
-        )
+        if self._sp_group is not None and self._sp_world > 1:
+            # --- SP mode: split sequence and handle boundary labels ---
+            # Global valid count from ORIGINAL labels (before padding)
+            global_valid_count = (labels[:, 1:] != -100).sum().float().clamp(min=1)
+            # Pad input_ids and labels to be divisible by 2*sp_world (zigzag requirement)
+            input_ids, _S_orig = sp_pad_to_divisible(input_ids, self._sp_world, pad_value=0)
+            labels, _ = sp_pad_to_divisible(labels, self._sp_world, pad_value=-100)
+            B, S_full = input_ids.shape
+            S_local = S_full // self._sp_world
+            local_ids = sp_split_sequence(input_ids, self._sp_rank, self._sp_world)
+            position_ids = sp_make_position_ids(
+                S_local, self._sp_rank, self._sp_world, B, input_ids.device,
+            )
+
+            # Boundary labels: each GPU has full labels, so just slice
+            # shift_labels for rank k = labels[:, k*S_local+1 : (k+1)*S_local+1]
+            start = self._sp_rank * S_local + 1
+            end = start + S_local
+            if end <= S_full:
+                shift_labels = labels[:, start:end].contiguous()
+            else:
+                # Last rank: last position has no next token, use -100
+                shift_labels = torch.cat([
+                    labels[:, start:S_full],
+                    torch.full((B, end - S_full), -100, dtype=labels.dtype, device=labels.device),
+                ], dim=1).contiguous()
+
+            with self._get_offload_context():
+                out = self.llm.model(
+                    input_ids=local_ids,
+                    attention_mask=None,  # flash attention with is_causal=True
+                    position_ids=position_ids,
+                    loradict=loradict,
+                    nograd_loradict=nograd_loradict,
+                    nograd_wdict=nograd_wdict,
+                    use_cache=False,
+                )
+            last_hs = out.last_hidden_state  # [B, S_local, H]
+            # Use all S_local positions (not :-1) because shift_labels already
+            # has the correct shifted labels for all S_local positions
+            shift_hs = last_hs.contiguous()
+            B_local, S_local_actual, H = shift_hs.shape
+            flat_hs = shift_hs.reshape(B_local * S_local_actual, H)
+            flat_labels = shift_labels.reshape(B_local * S_local_actual)
+
+            # per-token loss path (debug only)
+            if return_per_token_loss:
+                chunk = max(1, 1024 // max(1, B_local))
+                per_token_flat = torch.zeros(B_local * S_local_actual, device=flat_hs.device, dtype=torch.float32)
+                total_loss = torch.zeros((), device=flat_hs.device, dtype=torch.float32)
+                for i in range(0, flat_hs.shape[0], chunk):
+                    j = min(i + chunk, flat_hs.shape[0])
+                    chunk_logits = self.llm.lm_head(flat_hs[i:j])
+                    chunk_loss_none = nn.functional.cross_entropy(
+                        chunk_logits, flat_labels[i:j], ignore_index=-100, reduction="none",
+                    ).float()
+                    per_token_flat[i:j] = chunk_loss_none
+                    valid = (flat_labels[i:j] != -100)
+                    total_loss = total_loss + chunk_loss_none[valid].sum()
+                # No communication needed: use pre-computed global_valid_count
+                scalar_loss = (total_loss / global_valid_count).to(last_hs.dtype)
+                per_token_loss = per_token_flat.view(B_local, S_local_actual)
+                return scalar_loss, per_token_loss
+
+            # Normal training path: use reduction="sum" / global_valid_count
+            if os.environ.get("SHINE_FLCE", "1") not in ("0", "", "false"):
+                from utils.liger_patch import fused_lm_head_loss
+                local_loss_sum = fused_lm_head_loss(
+                    flat_hs, self.llm.lm_head.weight, flat_labels,
+                    ignore_index=-100, reduction="sum",
+                )
+                loss = local_loss_sum / global_valid_count
+                return loss.to(last_hs.dtype)
+
+            # Chunked-CE fallback
+            chunk = max(1, 1024 // max(1, B_local))
+            total_loss = torch.zeros((), device=flat_hs.device, dtype=torch.float32)
+            for i in range(0, flat_hs.shape[0], chunk):
+                j = min(i + chunk, flat_hs.shape[0])
+                chunk_hs = flat_hs[i:j]
+                chunk_labels = flat_labels[i:j]
+                chunk_logits = self.llm.lm_head(chunk_hs)
+                chunk_loss = nn.functional.cross_entropy(
+                    chunk_logits, chunk_labels, ignore_index=-100, reduction="sum",
+                )
+                total_loss = total_loss + chunk_loss.float()
+            loss = total_loss / global_valid_count
+            return loss.to(last_hs.dtype)
+
+        # --- Non-SP mode: original path ---
+        with self._get_offload_context():
+            out = self.llm.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                loradict=loradict,
+                nograd_loradict=nograd_loradict,
+                nograd_wdict=nograd_wdict,
+                use_cache=False,
+            )
         last_hs = out.last_hidden_state
         shift_hs = last_hs[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
         B, S_minus_1, H = shift_hs.shape
         flat_hs = shift_hs.reshape(B * S_minus_1, H)
         flat_labels = shift_labels.reshape(B * S_minus_1)
-
-        # ------------------------------------------------------------------
-        # Optional teacher-forced answer-token accuracy (eval only). Runs
-        # lm_head ONLY on answer positions (labels != -100), so it is cheap
-        # and low-memory. Stored on self as a side channel -> the compute_loss
-        # return signature is unchanged (zero cost when return_acc=False).
-        # NOTE: lm_head produces FULL-vocab logits on every (TP) rank (the
-        # CE paths below rely on this too), so argmax is globally correct.
-        # ------------------------------------------------------------------
-        if return_acc:
-            # no_grad: argmax accuracy must not extend the autograd graph (this
-            # path also runs during training when train-acc logging is on).
-            with torch.no_grad():
-                keep = flat_labels != -100                      # (N,) answer-token mask
-                keep_idx = keep.nonzero(as_tuple=True)[0]
-                corr = torch.zeros_like(flat_labels, dtype=torch.bool)
-                n_corr = 0
-                for i in range(0, keep_idx.numel(), 1024):
-                    idx = keep_idx[i:i + 1024]
-                    pred = self.llm.lm_head(flat_hs[idx]).argmax(dim=-1)
-                    c = pred == flat_labels[idx]
-                    corr[idx] = c
-                    n_corr += int(c.sum().item())
-                # (1) token-level accuracy (lenient: per answer-token, incl. scaffolding)
-                self._last_eval_acc_correct = n_corr
-                self._last_eval_acc_total = int(keep_idx.numel())
-                # (2) answer-level exact match (strict: a contiguous run of answer
-                #     tokens counts only if EVERY token is argmax-correct -> getting
-                #     just the easy scaffolding right scores 0). The -100 question
-                #     tokens split the sequence into one run per answer.
-                prev = torch.zeros_like(keep)
-                prev[1:] = keep[:-1]
-                run_id = torch.cumsum((keep & ~prev).long(), dim=0)   # 1..R at keep positions
-                num_runs = int(run_id[keep].amax().item()) if keep.any() else 0
-                wrong = keep & ~corr
-                num_bad = int(torch.unique(run_id[wrong]).numel()) if wrong.any() else 0
-                self._last_eval_ans_correct = num_runs - num_bad
-                self._last_eval_ans_total = num_runs
 
         # ------------------------------------------------------------------
         # per-token loss path (debug only): materialise full logits, use
@@ -804,22 +1078,41 @@ class TPModelHypernetwork(nn.Module):
         (no lora applied), producing reference outputs that the student
         (lora-augmented) should match.
 
+        SP mode: splits input_ids into local chunks before LLM forward.
+
         Args:
             input_ids: (B, S) distillation conversation token ids.
-            mode: "logits" — return lm_head(hidden_states) as (B, S, V).
-                  "hidden_states" — return raw hidden states as (B, S, H).
+            mode: "logits" — return lm_head(hidden_states) as (B, S_local, V).
+                  "hidden_states" — return raw hidden states as (B, S_local, H).
             attention_mask: Optional attention mask.
 
         Returns:
             Detached teacher output tensor (no grad).
         """
         with torch.no_grad():
-            out = self.llm.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                loradict=None,
-                use_cache=False,
-            )
+            if self._sp_group is not None and self._sp_world > 1:
+                # Pad input_ids to be divisible by 2*sp_world (zigzag requirement)
+                input_ids, _S_orig = sp_pad_to_divisible(input_ids, self._sp_world, pad_value=0)
+                B, S_full = input_ids.shape
+                S_local = S_full // self._sp_world
+                local_ids = sp_split_sequence(input_ids, self._sp_rank, self._sp_world)
+                position_ids = sp_make_position_ids(
+                    S_local, self._sp_rank, self._sp_world, B, input_ids.device,
+                )
+                out = self.llm.model(
+                    input_ids=local_ids,
+                    attention_mask=None,
+                    position_ids=position_ids,
+                    loradict=None,
+                    use_cache=False,
+                )
+            else:
+                out = self.llm.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    loradict=None,
+                    use_cache=False,
+                )
             hidden = out.last_hidden_state
             if mode == "logits":
                 return self.llm.lm_head(hidden).detach()
@@ -841,11 +1134,13 @@ class TPModelHypernetwork(nn.Module):
         generated by the hypernetwork, so gradients flow back through
         loradict → hypernetwork → metalora.
 
+        SP mode: splits input_ids into local chunks before LLM forward.
+
         Args:
             input_ids: (B, S) distillation conversation token ids.
             loradict: The generated loradict (same as used in compute_loss).
-            mode: "logits" — return lm_head(hidden_states) as (B, S, V).
-                  "hidden_states" — return raw hidden states as (B, S, H).
+            mode: "logits" — return lm_head(hidden_states) as (B, S_local, V).
+                  "hidden_states" — return raw hidden states as (B, S_local, H).
             attention_mask: Optional attention mask.
             nograd_loradict: Optional detached loradict from detach_state.
             nograd_wdict: Optional detached wdict from detach_state.
@@ -853,20 +1148,40 @@ class TPModelHypernetwork(nn.Module):
         Returns:
             Student output tensor (with grad attached).
         """
-        out = self.llm.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            loradict=loradict,
-            nograd_loradict=nograd_loradict,
-            nograd_wdict=nograd_wdict,
-            use_cache=False,
-        )
+        if self._sp_group is not None and self._sp_world > 1:
+            # Pad input_ids to be divisible by 2*sp_world (zigzag requirement)
+            input_ids, _S_orig = sp_pad_to_divisible(input_ids, self._sp_world, pad_value=0)
+            B, S_full = input_ids.shape
+            S_local = S_full // self._sp_world
+            local_ids = sp_split_sequence(input_ids, self._sp_rank, self._sp_world)
+            position_ids = sp_make_position_ids(
+                S_local, self._sp_rank, self._sp_world, B, input_ids.device,
+            )
+            with self._get_offload_context():
+                out = self.llm.model(
+                    input_ids=local_ids,
+                    attention_mask=None,
+                    position_ids=position_ids,
+                    loradict=loradict,
+                    nograd_loradict=nograd_loradict,
+                    nograd_wdict=nograd_wdict,
+                    use_cache=False,
+                )
+        else:
+            with self._get_offload_context():
+                out = self.llm.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    loradict=loradict,
+                    nograd_loradict=nograd_loradict,
+                    nograd_wdict=nograd_wdict,
+                    use_cache=False,
+                )
         hidden = out.last_hidden_state
         if mode == "logits":
             return self.llm.lm_head(hidden)
         else:
             return hidden
-
     # ------------------------------------------------------------------
     # Deferred DetachState initialization
     # ------------------------------------------------------------------
@@ -957,6 +1272,10 @@ class TPModelHypernetwork(nn.Module):
         # Step 0: read detach_state (reset is now done at end of previous step)
         ds_nograd_loradict, ds_nograd_wdict = self._read_detach_state()
 
+        # Reset offload context for this new forward pass (before any LLM call)
+        if self._offload_ctx is not None:
+            self._offload_ctx.reset_for_new_step()
+
         # Step 1: context_ids + metalora + nograd → LLM → memory_states
         # w_transform_context decides what happens to wdict (identity/zero/compressed_mlp)
         torch.cuda.nvtx.range_push("Step1_Context_Forward")
@@ -968,6 +1287,11 @@ class TPModelHypernetwork(nn.Module):
         )
         self._active_w_transform = None
         torch.cuda.nvtx.range_pop()  # Step1_Context_Forward
+
+        # NOTE: _sp_allreduce_sum is no longer needed here. The new
+        # _SPMemTokenExchange does per-layer all_reduce inside the LLM
+        # forward, so memory_states is already identical on all SP ranks.
+
         # Step 2: memory_states → hypernetwork → loradict
         torch.cuda.nvtx.range_push("Step2_Hypernetwork")
         loradict = self.generate_loradict(memory_states)
@@ -986,7 +1310,6 @@ class TPModelHypernetwork(nn.Module):
             return_per_token_loss=return_per_token_loss,
             nograd_loradict=ds_nograd_loradict,
             nograd_wdict=ds_nograd_wdict,
-            return_acc=return_acc,
         )
         self._active_w_transform = None
         torch.cuda.nvtx.range_pop()  # Step4_Conversation_Forward
@@ -1006,6 +1329,7 @@ class TPModelHypernetwork(nn.Module):
                 nograd_wdict=ds_nograd_wdict,
             )
             self._active_w_transform = None
+            # Pass full distill_labels — _forward_sp handles shift internally
             distill_loss = distill_loss_fn(
                 teacher_output, student_output, distill_labels,
             )

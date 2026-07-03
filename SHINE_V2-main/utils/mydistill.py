@@ -322,6 +322,11 @@ class DistillLossWrapper(nn.Module):
 
     No if/else branching needed — the mode and loss type are baked in
     at initialization time.
+
+    SP support: call set_sp_group(group) to enable SP-aware loss computation.
+    When SP is enabled, the wrapper handles:
+      1. Boundary label exchange (last position's shifted label from next rank)
+      2. Global mean loss across SP ranks (sum / global_count)
     """
 
     def __init__(self, loss_fn: nn.Module, coefficient: float, mode: str):
@@ -329,6 +334,11 @@ class DistillLossWrapper(nn.Module):
         self.loss_fn = loss_fn
         self.coefficient = coefficient
         self.mode = mode  # "logits" or "hidden_states"
+        self._sp_group = None  # Set via set_sp_group() when SP is enabled
+
+    def set_sp_group(self, sp_group) -> None:
+        """Set the SP process group for SP-aware distillation loss."""
+        self._sp_group = sp_group
 
     def forward(
         self,
@@ -349,8 +359,137 @@ class DistillLossWrapper(nn.Module):
         Returns:
             Scalar loss tensor (already multiplied by coefficient).
         """
-        raw_loss = self.loss_fn(teacher_output, student_output, labels)
+        if self._sp_group is not None:
+            raw_loss = self._forward_sp(teacher_output, student_output, labels)
+        else:
+            raw_loss = self.loss_fn(teacher_output, student_output, labels)
         return self.coefficient * raw_loss
+
+    def _forward_sp(
+        self,
+        teacher_output: torch.Tensor,
+        student_output: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """SP-aware distillation loss computation.
+
+        labels is the FULL (unsplit) labels tensor [B, S_full].
+        teacher_output / student_output are already local [B, S_local, V/H].
+        We derive shift_labels and global_valid_count from full labels
+        without any communication.
+        """
+        import torch.distributed as dist
+
+        ignore_index = getattr(self.loss_fn, 'ignore_index', -100)
+
+        sp_rank = dist.get_rank(self._sp_group)
+        sp_world = dist.get_world_size(self._sp_group)
+        B = teacher_output.shape[0]
+        S_local = teacher_output.shape[1]
+
+        # Derive shift_labels from full labels (no communication needed)
+        # For position i in local chunk, the shifted label is labels[:, global_i + 1]
+        start = sp_rank * S_local + 1
+        end = start + S_local
+        S_full = labels.shape[1]
+        if end <= S_full:
+            shift_labels = labels[:, start:end].contiguous()
+        else:
+            # Last rank: last position has no next token, use ignore_index
+            shift_labels = torch.cat([
+                labels[:, start:S_full],
+                torch.full((B, end - S_full), ignore_index, dtype=labels.dtype, device=labels.device),
+            ], dim=1).contiguous()
+
+        # Global valid count from full labels (no communication needed)
+        global_valid_count = (labels[:, 1:] != ignore_index).sum().float().clamp(min=1)
+
+        # Use ALL positions of teacher/student output (not :-1)
+        # because we now have S_local shifted labels for S_local positions
+        teacher_out = teacher_output  # [B, S_local, V/H]
+        student_out = student_output  # [B, S_local, V/H]
+
+        # Compute per-token loss based on loss function type
+        mask = (shift_labels != ignore_index).float() if labels is not None else None
+        temperature = getattr(self.loss_fn, 'temperature', 1.0)
+        T = temperature
+
+        if isinstance(self.loss_fn, (KLDivLogitsLoss, ReverseKLLogitsLoss, JSDLogitsLoss)):
+            # Logits mode: compute KL/JSD per token
+            per_token_loss = self._compute_logits_loss_per_token(
+                teacher_out, student_out, T
+            )
+        else:
+            # Hidden states mode: compute MSE/cosine/smooth_l1 per token
+            per_token_loss = self._compute_hidden_loss_per_token(
+                teacher_out, student_out
+            )
+
+        # Apply mask and compute loss with global_valid_count (no communication)
+        if mask is not None:
+            per_token_loss = per_token_loss * mask
+            local_sum = per_token_loss.sum()
+        else:
+            local_sum = per_token_loss.sum()
+
+        # local_sum / global_count — same semantics as before but no all_reduce
+        loss = local_sum / global_valid_count
+
+        # Scale by T^2 for logits-mode losses (Hinton et al.)
+        if isinstance(self.loss_fn, (KLDivLogitsLoss, ReverseKLLogitsLoss, JSDLogitsLoss)):
+            loss = loss * (T * T)
+
+        return loss
+
+    def _compute_logits_loss_per_token(
+        self, teacher_out: torch.Tensor, student_out: torch.Tensor, T: float
+    ) -> torch.Tensor:
+        """Compute per-token logits distillation loss (no reduction)."""
+        teacher_logits = teacher_out / T
+        student_logits = student_out / T
+
+        if isinstance(self.loss_fn, KLDivLogitsLoss):
+            teacher_probs = F.softmax(teacher_logits, dim=-1)
+            student_log_probs = F.log_softmax(student_logits, dim=-1)
+            per_token = F.kl_div(
+                student_log_probs, teacher_probs, reduction='none'
+            ).sum(dim=-1)
+        elif isinstance(self.loss_fn, ReverseKLLogitsLoss):
+            teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
+            student_probs = F.softmax(student_logits, dim=-1)
+            student_log_probs = F.log_softmax(student_logits, dim=-1)
+            per_token = (student_probs * (student_log_probs - teacher_log_probs)).sum(dim=-1)
+        elif isinstance(self.loss_fn, JSDLogitsLoss):
+            teacher_probs = F.softmax(teacher_logits, dim=-1)
+            student_probs = F.softmax(student_logits, dim=-1)
+            M = 0.5 * (teacher_probs + student_probs)
+            M_log = M.log()
+            kl_teacher_m = (teacher_probs * (teacher_probs.log() - M_log)).sum(dim=-1)
+            kl_student_m = (student_probs * (student_probs.log() - M_log)).sum(dim=-1)
+            per_token = 0.5 * (kl_teacher_m + kl_student_m)
+        else:
+            raise RuntimeError(f"Unknown logits loss type: {type(self.loss_fn)}")
+
+        return per_token  # (B, S_local)
+
+    def _compute_hidden_loss_per_token(
+        self, teacher_out: torch.Tensor, student_out: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute per-token hidden states distillation loss (no reduction)."""
+        if isinstance(self.loss_fn, MSEHiddenLoss):
+            per_token = ((student_out - teacher_out) ** 2).mean(dim=-1)
+        elif isinstance(self.loss_fn, CosineHiddenLoss):
+            cos_sim = F.cosine_similarity(student_out, teacher_out, dim=-1)
+            per_token = 1.0 - cos_sim
+        elif isinstance(self.loss_fn, SmoothL1HiddenLoss):
+            beta = getattr(self.loss_fn, 'beta', 1.0)
+            per_token = F.smooth_l1_loss(
+                student_out, teacher_out, reduction='none', beta=beta
+            ).mean(dim=-1)
+        else:
+            raise RuntimeError(f"Unknown hidden loss type: {type(self.loss_fn)}")
+
+        return per_token  # (B, S_local)
 
 
 # ---------------------------------------------------------------------------

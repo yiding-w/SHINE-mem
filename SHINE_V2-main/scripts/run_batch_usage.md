@@ -5,8 +5,11 @@
 ## 快速开始
 
 ```bash
-# 1. 初始化队列目录
+# 1. 初始化队列目录（首次使用）
 ./scripts/run_batch.sh init
+
+# 1b. 如果需要彻底重置（清空所有队列并重新初始化）
+./scripts/run_batch.sh init --force
 
 # 2. 导入任务（从命令列表文件）
 ./scripts/run_batch.sh import ./scripts/run_command_list.sh
@@ -38,7 +41,7 @@ logs/.batch_queue/
 
 | 命令 | 说明 |
 |------|------|
-| `init` | 初始化队列目录 |
+| `init [--force]` | 初始化队列目录（已初始化则跳过，`--force` 强制重新初始化） |
 | `start [options]` | 启动批量运行 |
 | `stop` | 停止运行，把正在跑的任务放回 pending 队首 |
 | `status` | 查看当前运行状态（PID、耗时、队列计数等） |
@@ -136,6 +139,25 @@ logs/.batch_queue/
 
 ---
 
+## 彻底重置
+
+`init` 命令的行为：
+- **首次执行**：创建队列目录结构（干净状态）
+- **已初始化时**：提示已初始化，什么都不做
+- **`--force` 选项**：销毁整个队列目录并重新创建（清空所有 pending/running/done/failed）
+
+```bash
+# 彻底重置（先停止运行中的进程）
+./scripts/run_batch.sh stop
+./scripts/run_batch.sh init --force
+
+# 然后重新导入任务
+./scripts/run_batch.sh import ./scripts/run_command_list.sh
+./scripts/run_batch.sh start --nodes all
+```
+
+---
+
 ## 监控日志
 
 ```bash
@@ -166,9 +188,13 @@ tail -f logs/batch_run_*.log
 ## 典型工作流示例
 
 ```bash
-# 初始化 + 导入
+# 初始化 + 导入（首次）
 ./scripts/run_batch.sh init
 ./scripts/run_batch.sh import ./scripts/run_command_list.sh
+
+# 或者彻底重置后重新导入
+# ./scripts/run_batch.sh init --force
+# ./scripts/run_batch.sh import ./scripts/run_command_list.sh
 
 # 手动再加几个任务
 ./scripts/run_batch.sh add 'python mydatasets/pretrain/trajectory_all_transfer.py --preprocess --model_path ./models/Qwen3.6-27B/'

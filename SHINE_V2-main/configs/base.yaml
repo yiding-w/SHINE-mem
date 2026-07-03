@@ -31,5 +31,7 @@ parallel:
   pipeline_parallel_size: 8  # Pipeline stages per node (PP path)
   tensor_parallel_size: 2    # TP shards per node (TP path; ignored when mode=pp).
                              # TP=2 DP=4 measured fastest on 27B / 8xA800: ~6x PP.
+  sequence_parallel_size: 1  # SP shards per TP group (SP path; 1 = disabled).
+                             # Constraint: tp_size * sp_size <= gpus_per_node.
   data_parallel_size: -1     # Computed at runtime by meta_train.py (world_size / total_gpus)
   total_gpus: 8              # GPUs per node

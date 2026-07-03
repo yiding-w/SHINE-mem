@@ -72,7 +72,8 @@ def _load_mlp_weights_into_tp(tp_mlp: nn.Module, full_mlp: nn.Module) -> None:
 
 
 class TPLoraQwen3_5DecoderLayer(LoraQwen3_5DecoderLayer):
-    def __init__(self, config, layer_idx: int, tp_rank: int, tp_world: int, tp_process_group):
+    def __init__(self, config, layer_idx: int, tp_rank: int, tp_world: int, tp_process_group,
+                 sp_group=None, sp_world: int = 1):
         super().__init__(config, layer_idx)
 
         if self.layer_type == "full_attention":
@@ -92,6 +93,7 @@ class TPLoraQwen3_5DecoderLayer(LoraQwen3_5DecoderLayer):
             self.linear_attn = TPQwen3_5GatedDeltaNet(
                 config, layer_idx,
                 tp_rank=tp_rank, tp_world=tp_world, tp_process_group=tp_process_group,
+                sp_group=sp_group, sp_world=sp_world,
             )
             self.mlp = _replace_mlp_with_tp(
                 self.mlp, tp_rank, tp_world, tp_process_group,
@@ -100,6 +102,8 @@ class TPLoraQwen3_5DecoderLayer(LoraQwen3_5DecoderLayer):
         self.tp_rank = tp_rank
         self.tp_world = tp_world
         self.tp_process_group = tp_process_group
+        self.sp_group = sp_group
+        self.sp_world = sp_world
 
 
 def load_decoder_layer_weights_from_full(

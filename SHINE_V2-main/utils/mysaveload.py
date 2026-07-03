@@ -300,6 +300,7 @@ def save_checkpoint(
             "elapsed_time": elapsed_time,
             "config_selections": config_selections,
             "launch_cmd": launch_cmd,
+            "prev_repo_per_mb": getattr(model, '_prev_repo_per_mb', None),
         }
         # Save dataloader state for perfect resume reproducibility
         if train_loader is not None and hasattr(train_loader, "state_dict"):

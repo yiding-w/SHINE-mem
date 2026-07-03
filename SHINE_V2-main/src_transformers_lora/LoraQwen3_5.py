@@ -14,8 +14,106 @@ from utils.myparallel import is_main_process_per_node
 
 logger = logging.getLogger(__name__)
 
-# transformers 5.x build skew: inject DynamicCache into qwen3_5 namespace
-# if missing — see src_transformers/Qwen3_5.py for the same patch.
+
+class _SPMemTokenExchange(torch.autograd.Function):
+    """SP-safe mem_token exchange with exact gradient support.
+
+    In SP mode, mem_tokens may reside on only one SP rank. This function
+    ensures ALL SP ranks obtain the complete mem_tokens (B, M, H) via P2P
+    communication, with correct gradients flowing back in backward.
+
+    This replaces the old _ExtractMemTokensFn which used an inexact
+    grad_output.sum().expand() approximation. The new approach:
+    1. Each rank extracts its local portion of mem_tokens from hidden_states.
+    2. Ranks exchange their portions via all_gather so every rank has the
+       full (B, M, H) mem_tokens.
+    3. Backward: grad is scattered back to the originating rank via
+       reduce_scatter, then placed at the correct hidden_states positions.
+
+    This guarantees:
+    - Exact gradients (matching pure TP mode).
+    - Symmetric communication in both forward and backward across all SP
+      ranks, preventing NCCL deadlock from asymmetric activation checkpoint
+      recompute.
+    """
+
+    @staticmethod
+    def forward(ctx, hidden_states, mem_write_offsets, mem_write_counts,
+                context_lengths, num_mem_token, sp_group, sp_rank, sp_world):
+        # hidden_states: (B, S_local, H)
+        # mem_write_offsets: (B,) - offset within M-dim to write
+        # mem_write_counts: (B,) - how many tokens to extract per sample
+        # context_lengths: (B,) - start position of mem_tokens in S-dim (local)
+        # num_mem_token: int - total M dimension size
+        # sp_group: process group for SP communication
+        # sp_rank: this rank's position in SP group
+        # sp_world: total SP ranks
+        import torch.distributed as dist
+
+        B, S, H = hidden_states.shape
+        M = num_mem_token
+
+        # Save info for backward
+        ctx.save_for_backward(mem_write_offsets, mem_write_counts, context_lengths)
+        ctx.B = B
+        ctx.S = S
+        ctx.H = H
+        ctx.M = M
+        ctx.sp_group = sp_group
+        ctx.sp_rank = sp_rank
+        ctx.sp_world = sp_world
+
+        # Step 1: Extract local portion of mem_tokens into a partial buffer.
+        # Each rank builds its own (B, M, H) with only its portion filled in.
+        local_mem = hidden_states.new_zeros(B, M, H)
+        for b in range(B):
+            count = mem_write_counts[b].item()
+            if count > 0:
+                start = context_lengths[b].item()
+                offset = mem_write_offsets[b].item()
+                local_mem[b, offset:offset + count, :] = (
+                    hidden_states[b, start:start + count]
+                )
+
+        # Step 2: All-reduce SUM across SP group to combine partial buffers.
+        # Since each rank fills non-overlapping portions (or zeros), SUM gives
+        # the complete (B, M, H) on every rank.
+        full_mem = local_mem.clone()
+        dist.all_reduce(full_mem, op=dist.ReduceOp.SUM, group=sp_group)
+
+        return full_mem
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # grad_output: (B, M, H) - same on all SP ranks (since they all
+        # received the same full_mem and ran the same downstream computation).
+        import torch.distributed as dist
+
+        mem_write_offsets, mem_write_counts, context_lengths = ctx.saved_tensors
+        B, S, H = ctx.B, ctx.S, ctx.H
+        M = ctx.M
+        sp_group = ctx.sp_group
+
+        # Backward of all_reduce SUM is identity (each rank's grad passes
+        # through unchanged). Then we scatter grad back to hidden_states
+        # positions on this rank.
+        # Since forward did: full_mem = all_reduce_sum(local_mem), and
+        # local_mem[b, offset:offset+count] = hidden_states[b, start:start+count],
+        # the grad w.r.t. hidden_states is:
+        #   grad_hidden[b, start:start+count] = grad_output[b, offset:offset+count]
+        # (only for positions that this rank contributed)
+
+        grad_hidden = grad_output.new_zeros(B, S, H)
+        for b in range(B):
+            count = mem_write_counts[b].item()
+            if count > 0:
+                start = context_lengths[b].item()
+                offset = mem_write_offsets[b].item()
+                grad_hidden[b, start:start + count, :] = (
+                    grad_output[b, offset:offset + count, :]
+                )
+
+        return grad_hidden, None, None, None, None, None, None, None
 import transformers.models.qwen3_5.modeling_qwen3_5 as _qwen3_5_mod
 if not hasattr(_qwen3_5_mod, "DynamicCache"):
     from transformers.cache_utils import DynamicCache as _DynamicCache
@@ -800,6 +898,11 @@ class LoraQwen3_5TextModel(LoraQwen3_5PreTrainedModel):
         nograd_wdict: Optional[dict] = None,
         use_mem_token: bool = False,
         context_lengths: torch.LongTensor | None = None,
+        mem_write_offsets: Optional[torch.LongTensor] = None,
+        mem_write_counts: Optional[torch.LongTensor] = None,
+        sp_group=None,
+        sp_rank: int = 0,
+        sp_world: int = 1,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         r"""
@@ -818,6 +921,12 @@ class LoraQwen3_5TextModel(LoraQwen3_5PreTrainedModel):
         context_lengths (`torch.LongTensor`, *optional*):
             (B,) number of valid tokens per sample.  Required when ``use_mem_token=True``
             under Scheme B.
+        mem_write_offsets (`torch.LongTensor`, *optional*):
+            (B,) SP only. Offset within memory_states M dimension to start writing.
+            When mem_tokens span SP boundaries, each rank writes a partial slice.
+        mem_write_counts (`torch.LongTensor`, *optional*):
+            (B,) SP only. Number of mem_tokens on this rank for each sample.
+            If None, defaults to num_mem_token (full write).
         """
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -833,7 +942,17 @@ class LoraQwen3_5TextModel(LoraQwen3_5PreTrainedModel):
                 mem = self.mem_tokens.unsqueeze(0).expand(inputs_embeds.shape[0], -1, -1)
                 for i in range(inputs_embeds.shape[0]):
                     start = context_lengths[i].item()
-                    inputs_embeds[i, start:start + self.num_mem_token] = mem[i]
+                    if mem_write_counts is not None:
+                        # SP partial write: only overwrite the portion on this rank
+                        count = mem_write_counts[i].item()
+                        if count > 0:
+                            offset = mem_write_offsets[i].item()
+                            inputs_embeds[i, start:start + count] = mem[i, offset:offset + count]
+                    else:
+                        # Non-SP or full write
+                        inputs_embeds[i, start:start + self.num_mem_token] = mem[i]
+
+
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
@@ -876,9 +995,37 @@ class LoraQwen3_5TextModel(LoraQwen3_5PreTrainedModel):
             raise TypeError(f"nograd_wdict must be a dict, got {type(nograd_wdict)}")
 
         if self.has_mem_token and use_mem_token:
-            memory_states = torch.zeros(
-                (hidden_states.shape[0], self.config.num_hidden_layers, self.num_mem_token, self.config.hidden_size)
-            ).to(self.device)
+            # Only collect memory_states for full_attention layers (matching
+            # only_full_1for1 filtering). This avoids creating unnecessary
+            # autograd nodes on linear_attention layers which would cause
+            # backward to propagate into layers that don't need gradients,
+            # leading to asymmetric communication and NCCL deadlock in SP mode.
+            _full_attn_layer_set = set(
+                i for i, t in enumerate(self.config.layer_types) if t == "full_attention"
+            )
+            if mem_write_counts is not None:
+                # SP mode: use out-of-place construction
+                _mem_slices = []  # will hold (num_full_attn_layers,) tensors of shape (B, M, H)
+            else:
+                # Non-SP mode: use original in-place scheme (no deadlock risk)
+                memory_states = hidden_states.new_zeros(
+                    (hidden_states.shape[0], len(_full_attn_layer_set), self.num_mem_token, self.config.hidden_size)
+                )
+                _fa_counter = 0  # index into memory_states layer dimension
+
+        # --- Hidden-dim SP: scatter hidden_states before the layer loop ---
+        # When enabled, hidden_states is stored as [B, S, H/TP] between layers
+        # to reduce CPU-offload traffic. Each layer's checkpoint wrapper will
+        # AllGather to [B, S, H] before the real forward.
+        _hidden_sp_cfg = getattr(self, "_hidden_sp_config", None)
+        if _hidden_sp_cfg is not None:
+            from utils.mytp.tp_linear import scatter_hidden_forward, gather_hidden_forward
+            _hsp_tp_rank = _hidden_sp_cfg["tp_rank"]
+            _hsp_tp_world = _hidden_sp_cfg["tp_world"]
+            _hsp_tp_group = _hidden_sp_cfg["tp_group"]
+            hidden_states = scatter_hidden_forward(
+                hidden_states, _hsp_tp_group, _hsp_tp_world, _hsp_tp_rank
+            )
 
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             layer_mask = linear_attn_mask if self.config.layer_types[i] == "linear_attention" else causal_mask
@@ -895,17 +1042,53 @@ class LoraQwen3_5TextModel(LoraQwen3_5PreTrainedModel):
                 nograd_wdict=nograd_wdict[i] if nograd_wdict is not None else None,
                 **kwargs,
             )
+            # Layer output is [B, S, H] (full) because the checkpoint wrapper
+            # AllGathers inside. Now extract mem_tokens (needs full H), then
+            # scatter back to [B, S, H/TP] for the next layer.
 
-            if self.has_mem_token and use_mem_token:
-                # Scheme B: extract mem_token hidden states from per-sample positions
-                for b in range(hidden_states.shape[0]):
-                    start = context_lengths[b].item()
-                    memory_states[b, i, :, :] = hidden_states[b, start:start + self.num_mem_token].to(self.device)
+            if self.has_mem_token and use_mem_token and i in _full_attn_layer_set:
+                if mem_write_counts is not None:
+                    # SP mode: extract local mem_tokens and exchange across SP
+                    # ranks via all_reduce so every rank has the full (B, M, H).
+                    # Only called for full_attention layers to keep autograd graph
+                    # identical to pure-TP mode (no extra nodes on linear layers).
+                    layer_mem = _SPMemTokenExchange.apply(
+                        hidden_states, mem_write_offsets, mem_write_counts,
+                        context_lengths, self.num_mem_token,
+                        sp_group, sp_rank, sp_world,
+                    )
+                    _mem_slices.append(layer_mem)
+                else:
+                    # Non-SP: original in-place scheme (only full_attention layers)
+                    for b in range(hidden_states.shape[0]):
+                        start = context_lengths[b].item()
+                        if start + self.num_mem_token <= hidden_states.shape[1]:
+                            memory_states[b, _fa_counter, :, :] = (
+                                hidden_states[b, start:start + self.num_mem_token].to(self.device)
+                            )
+                    _fa_counter += 1
+
+            # Hidden-dim SP: scatter back to [B, S, H/TP] for next layer
+            if _hidden_sp_cfg is not None:
+                hidden_states = scatter_hidden_forward(
+                    hidden_states, _hsp_tp_group, _hsp_tp_world, _hsp_tp_rank
+                )
+
+        # --- Hidden-dim SP: gather hidden_states after the layer loop ---
+        if _hidden_sp_cfg is not None:
+            hidden_states = gather_hidden_forward(
+                hidden_states, _hsp_tp_group, _hsp_tp_world, _hsp_tp_rank
+            )
 
         if self.has_mem_token and use_mem_token:
             # Scheme B: strip everything after valid tokens (mem_tokens + padding)
             max_valid = context_lengths.max().item()
             hidden_states = hidden_states[:, :max_valid, :]
+
+            if mem_write_counts is not None:
+                # SP mode: stack full_attention layer slices into memory_states.
+                # Shape: (num_full_attn_layers,) list -> (B, num_full_attn_layers, M, H)
+                memory_states = torch.stack(_mem_slices, dim=1)  # (B, FA_L, M, H)
 
         hidden_states = self.norm(hidden_states)
 

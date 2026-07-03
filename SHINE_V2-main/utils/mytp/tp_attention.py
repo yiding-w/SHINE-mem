@@ -230,6 +230,119 @@ class TPLoraQwen3_5Attention(LoraQwen3_5Attention):
         self.tp_world = tp_world
         self.tp_process_group = tp_process_group
 
+        # SP (Sequence Parallelism) support
+        self.sp_group = None
+        self.sp_world = 1
+        self._use_sp = False
+        self._sp_attn_fn = None
+
+    def enable_sp(self, sp_group, sp_world: int, sp_mode: str = "alltoall_zigzag"):
+        """Enable sequence parallelism on this attention layer.
+
+        Called after __init__ (during model loading) to avoid import
+        issues and keep __init__ signature compatible.
+        """
+        from utils.mytp.ring_attention import get_sp_attention_fn
+        self.sp_group = sp_group
+        self.sp_world = sp_world
+        self._use_sp = (sp_group is not None and sp_world > 1)
+        if self._use_sp:
+            self._sp_attn_fn = get_sp_attention_fn(sp_mode)
+
+    @torch.compiler.disable
+    def forward(
+        self,
+        hidden_states,
+        position_embeddings,
+        attention_mask=None,
+        past_key_values=None,
+        loradict=None,
+        nograd_loradict=None,
+        nograd_wdict=None,
+        **kwargs,
+    ):
+        """Forward with optional SP ring attention.
+
+        When SP is disabled (_use_sp=False), delegates to parent forward
+        (identical to before). When SP is enabled, replaces the attention
+        computation with ring flash attention.
+        """
+        if not self._use_sp:
+            return super().forward(
+                hidden_states, position_embeddings, attention_mask,
+                past_key_values=past_key_values,
+                loradict=loradict, nograd_loradict=nograd_loradict,
+                nograd_wdict=nograd_wdict, **kwargs,
+            )
+
+        # --- SP-aware forward (ring attention) ---
+        from src_transformers_lora.LoraQwen3_5 import apply_rotary_pos_emb
+
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
+
+        if loradict is None and nograd_loradict is None and nograd_wdict is None:
+            query_states, gate = torch.chunk(
+                self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
+            )
+            gate = gate.reshape(*input_shape, -1)
+            query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
+            key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+            value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        else:
+            query_states, gate = torch.chunk(
+                self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
+            )
+            if loradict is not None and loradict.get("q_query") is not None:
+                query_states = query_states + self.q_query_lora.lora_delta(hidden_states, loradict["q_query"]).view(*input_shape, -1, self.head_dim)
+            if loradict is not None and loradict.get("q_gate") is not None:
+                gate = gate + self.q_gate_lora.lora_delta(hidden_states, loradict["q_gate"]).view(*input_shape, -1, self.head_dim)
+            if nograd_loradict is not None and nograd_loradict.get("q_query") is not None:
+                query_states = query_states + self.q_query_lora.lora_delta(hidden_states, nograd_loradict["q_query"]).view(*input_shape, -1, self.head_dim)
+            if nograd_loradict is not None and nograd_loradict.get("q_gate") is not None:
+                gate = gate + self.q_gate_lora.lora_delta(hidden_states, nograd_loradict["q_gate"]).view(*input_shape, -1, self.head_dim)
+            if nograd_wdict is not None and nograd_wdict.get("q_query") is not None:
+                query_states = query_states + self._compute_helper_w_delta(hidden_states, nograd_wdict["q_query"], self.q_query_lora).view(*input_shape, -1, self.head_dim)
+            if nograd_wdict is not None and nograd_wdict.get("q_gate") is not None:
+                gate = gate + self._compute_helper_w_delta(hidden_states, nograd_wdict["q_gate"], self.q_gate_lora).view(*input_shape, -1, self.head_dim)
+            gate = gate.reshape(*input_shape, -1)
+
+            k_lora = loradict.get("k") if loradict else None
+            k_nograd = nograd_loradict.get("k") if nograd_loradict else None
+            k_w = nograd_wdict.get("k") if nograd_wdict else None
+            v_lora = loradict.get("v") if loradict else None
+            v_nograd = nograd_loradict.get("v") if nograd_loradict else None
+            v_w = nograd_wdict.get("v") if nograd_wdict else None
+
+            query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)
+            key_states = self.k_norm(self.k_proj(hidden_states, k_lora, k_nograd, k_w).view(hidden_shape)).transpose(1, 2)
+            value_states = self.v_proj(hidden_states, v_lora, v_nograd, v_w).view(hidden_shape).transpose(1, 2)
+
+        # RoPE
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        # Ring attention (SP): expects [B, S, H, D] layout
+        # query_states/key_states/value_states are [B, H, S, D] after transpose(1,2)
+        q = query_states.transpose(1, 2)  # [B, S_local, Hq_local, D]
+        k = key_states.transpose(1, 2)    # [B, S_local, Hkv_local, D]
+        v = value_states.transpose(1, 2)  # [B, S_local, Hkv_local, D]
+
+        attn_output = self._sp_attn_fn(q, k, v, sp_group=self.sp_group, causal=True)
+        # attn_output: [B, S_local, Hq_local, D]
+
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        attn_output = attn_output * torch.sigmoid(gate)
+
+        if loradict is None and nograd_loradict is None and nograd_wdict is None:
+            attn_output = self.o_proj(attn_output)
+        else:
+            o_lora = loradict.get("o") if loradict else None
+            o_nograd = nograd_loradict.get("o") if nograd_loradict else None
+            o_w = nograd_wdict.get("o") if nograd_wdict else None
+            attn_output = self.o_proj(attn_output, o_lora, o_nograd, o_w)
+        return attn_output, None
+
 
 def load_attention_weights_from_full(
     tp_attn: TPLoraQwen3_5Attention,

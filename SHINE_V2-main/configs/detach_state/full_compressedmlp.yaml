@@ -45,13 +45,33 @@ w_transform_context:
   conditioning: film
   # Which statistics to compute. Options: mean, std, norm, max, min
   cond_stats: [mean, std, norm, max, min]
-  # --- Enhancement H: Cross-Projection Attention ---
-  # Enable lightweight cross-projection attention within each layer.
-  # After all projections compute z_tilde, a multi-head attention allows
-  # them to exchange information (e.g. q/k coordination) before decompression.
-  # No additional TP communication needed (z is already full on each rank).
-  cross_projection_attn: true
-  cross_attn_num_heads: 4
+  # --- Network Architecture (blocks) ---
+  # Define the processing blocks between compress and decompress.
+  # Each element is either "mlp" or "attn":
+  #   - "mlp": A residual MLP block (k² → mlp_ratio*k² → k²), per-projection.
+  #   - "attn": A cross-projection attention block (multi-head self-attention
+  #             across all projections within the same layer). Requires all
+  #             projections' z to be available, so triggers two-pass mode.
+  # The first mlp block receives FiLM-modulated input; subsequent mlp blocks
+  # receive the previous block's output directly.
+  # Examples:
+  #   [mlp, attn]           — current default (1 MLP + 1 cross-attn)
+  #   [mlp]                 — MLP only, no cross-projection interaction
+  #   [mlp, attn, mlp]      — MLP, cross-attn, then another MLP
+  #   [mlp, mlp, attn, mlp] — deeper network
+  blocks: [mlp, attn]
+  # Number of attention heads for "attn" blocks (d_model=k², d_head=k²/num_heads)
+  attn_num_heads: 4
+  # --- Cross-Layer Parameter Sharing ---
+  # Share parameters across different layers for the SAME projection type.
+  # e.g. if share_mlp is true, all layers' "q_query" share one MLP,
+  # all layers' "k_key" share another MLP, etc.
+  # Within the same layer, different projections always have independent params.
+  # Set to true to share across layers, false to keep each layer independent.
+  share_lr: false        # Share L_enc/R_enc/L_dec/R_dec across layers
+  share_mlp: false       # Share MLP across layers
+  share_film: false      # Share FiLM conditioning network across layers
+  share_attn: false      # Share CrossProjectionAttn across layers
 
 # W-transform for Phase C (conversation forward with detach_state wdict).
 # Phase C has no objective mismatch (wdict was trained for this purpose),

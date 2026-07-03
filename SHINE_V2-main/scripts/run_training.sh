@@ -49,6 +49,8 @@ export DETACH_STATE_CONFIG=${DETACH_STATE_CONFIG:-""}
 export LAUNCH_CMD=${LAUNCH_CMD:-""}
 export FORCE_OVERWRITE=${FORCE_OVERWRITE:-""}
 export EVALUATION_BASELINE=${EVALUATION_BASELINE:-""}
+export EVALUATION_EXPORT_LORA=${EVALUATION_EXPORT_LORA:-""}
+export EXPORT_LORA_MAX_TRAJ=${EXPORT_LORA_MAX_TRAJ:-""}
 # Force online mode
 export WANDB_MODE=online
 
@@ -61,13 +63,16 @@ export PYTHONDONTWRITEBYTECODE=1
 # Triton/TileLang/Inductor compile caches are stored persistently so that
 # kernel recompilation is avoided across restarts.
 # --- Compile cache (pp) ---
-# Triton/Inductor caches use local /tmp to avoid CephFS "Stale file handle" errors
+# Triton/Inductor caches MUST use local /tmp to avoid CephFS "Stale file handle" errors
 # (multiple GPU workers on the same node concurrently read/write cache files).
-# TileLang cache stays on shared FS (rarely causes issues and benefits from persistence).
+# We clean old caches on startup to prevent /tmp from filling up.
+# TileLang cache stays on shared FS (single-writer, benefits from persistence).
 CACHE_BASE="$(cd "$(dirname "$0")/.." && pwd)/cache/compile/pp"
 NODE_CACHE_DIR="${CACHE_BASE}/node_${NODE_RANK}"
 LOCAL_CACHE_DIR="/tmp/shine_compile_cache_pp_node_${NODE_RANK}"
 
+# Clean old local cache to free /tmp space (will be regenerated on first run)
+rm -rf "${LOCAL_CACHE_DIR}"
 mkdir -p "${LOCAL_CACHE_DIR}/triton" "${LOCAL_CACHE_DIR}/inductor"
 mkdir -p "${NODE_CACHE_DIR}/tilelang"
 

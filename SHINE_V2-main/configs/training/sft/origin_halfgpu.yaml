@@ -17,10 +17,13 @@ pp_knobs:
 
 # Acceleration knobs — TP mode
 tp_knobs:
-  activation_checkpointing: true   # Recompute layer activations in backward
-  ckpt_skip_stride: 1              # 0 = ckpt all 64 layers; 1 = ckpt none (max speed)
+  activation_checkpointing_llm: true    # Recompute LLM decoder layer activations in backward
+  activation_checkpointing_m2p: true    # Recompute m2p_transformer layer activations in backward
+  ckpt_skip_stride_llm: 1              # 0 = ckpt all 64 LLM layers; 1 = ckpt none (max speed)
+  ckpt_skip_stride_m2p: 1              # 0 = ckpt all m2p layers; 1 = ckpt none (max speed)
   compile_hypernetwork: true       # torch.compile the replicated hypernetwork (-5% step)
   zero1: true                      # ZeRO-1 shards Adam state across DP
+  cpu_offload: false               # Offload checkpointed activations to CPU (save GPU mem, slight slowdown)
 
 # Checkpointing
 save_steps: 200          # Save checkpoint at these steps. int=interval, list=specific steps, -1=disabled
