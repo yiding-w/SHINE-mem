@@ -96,9 +96,7 @@ def _split_train_val(dataset, validation_split_num, seed: int):
     return split["train"], split["test"]
 
 
-def _token_lengths(tokenizer, texts: Sequence[str], *, num_proc: int, batch_size: int) -> List[int]:
-    hf_dataset = HFDataset.from_dict({"text": [str(t) for t in texts]})
-
+def _token_lengths(tokenizer, hf_dataset, *, num_proc: int, batch_size: int) -> List[int]:
     def compute_len(batch):
         enc = tokenizer(
             batch["text"],
@@ -199,7 +197,7 @@ class ShineGroupTransMLADataset(BaseDataset):
             tokenizer_cfg=tokenizer_cfg,
             chat_template=NOTHINKING_CHAT_TEMPLATE,
         )
-        self.texts = [str(x) for x in hf_dataset["text"]]
+        self.hf_dataset = hf_dataset
         self.context_seq_length = int(data_cfg.context_seq_length)
         self.conv_seq_length = int(data_cfg.conv_seq_length)
         self.seed = int(seed)
@@ -228,7 +226,7 @@ class ShineGroupTransMLADataset(BaseDataset):
             num_bins = int(data_cfg.get("group_num_bins", 100))
             lengths = _token_lengths(
                 self.tokenizer,
-                self.texts,
+                self.hf_dataset,
                 num_proc=num_proc,
                 batch_size=batch_size,
             )
@@ -250,7 +248,7 @@ class ShineGroupTransMLADataset(BaseDataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         return {
-            "textlist": [self.texts[i] for i in self.groups[idx]],
+            "textlist": [str(self.hf_dataset[int(i)]["text"]) for i in self.groups[idx]],
             "repo": f"{self.split_name}_{idx}",
         }
 
