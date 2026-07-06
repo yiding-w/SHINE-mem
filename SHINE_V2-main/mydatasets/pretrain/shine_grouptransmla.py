@@ -96,25 +96,32 @@ def _split_train_val(dataset, validation_split_num, seed: int):
     return split["train"], split["test"]
 
 
-def _token_lengths(tokenizer, hf_dataset, *, num_proc: int, batch_size: int) -> List[int]:
+def _token_lengths(tokenizer, hf_dataset, *, num_proc: int, batch_size: int,
+                   max_length: int, cache_file_name: Optional[str] = None) -> List[int]:
     def compute_len(batch):
         enc = tokenizer(
             batch["text"],
             add_special_tokens=False,
-            truncation=False,
+            truncation=True,
+            max_length=max_length,
             return_attention_mask=False,
             return_token_type_ids=False,
         )
         return {"tok_len": [len(ids) for ids in enc["input_ids"]]}
 
-    hf_dataset = hf_dataset.map(
+    map_kwargs = {}
+    if cache_file_name:
+        map_kwargs["cache_file_name"] = cache_file_name
+    len_dataset = hf_dataset.map(
         compute_len,
         batched=True,
         batch_size=batch_size,
         num_proc=num_proc,
+        remove_columns=list(hf_dataset.column_names),
         desc="[shine_grouptransmla] Computing token lengths",
+        **map_kwargs,
     )
-    return [int(x) for x in hf_dataset["tok_len"]]
+    return [int(x) for x in len_dataset["tok_len"]]
 
 
 def _build_groups(token_lens: Sequence[int], *, max_len: int, chat_len: int,
@@ -224,11 +231,17 @@ class ShineGroupTransMLADataset(BaseDataset):
             batch_size = int(data_cfg.get("map_batch_size", 2048))
             chat_len = int(data_cfg.get("group_chat_len", 11))
             num_bins = int(data_cfg.get("group_num_bins", 100))
+            length_cache_path = os.path.join(
+                cache_dir,
+                f"{cache_name}_{split_name}_toklen_ctx{self.context_seq_length}_conv{self.conv_seq_length}.arrow",
+            )
             lengths = _token_lengths(
                 self.tokenizer,
                 self.hf_dataset,
                 num_proc=num_proc,
                 batch_size=batch_size,
+                max_length=max(self.context_seq_length, self.conv_seq_length),
+                cache_file_name=length_cache_path,
             )
             self.groups = _build_groups(
                 lengths,
