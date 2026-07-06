@@ -1,0 +1,29 @@
+# SHINE-style grouped transmla pretraining for SHINE_V2.
+name: shine_grouptransmla
+dataset_module: mydatasets.pretrain.shine_grouptransmla
+
+# Sequence lengths
+context_seq_length: 1024
+conv_seq_length: 1024
+
+# Data source. Matches the original SHINE pretraining dataset.
+data_path: "data/transmla_pretrain_6B_tokens"
+data_format: "hf_dataset"       # hf_dataset, hf_disk, or jsonl
+train_split: "train"
+validation_split_num: 512
+shuffle: true
+
+# Grouping cache
+group_cache_dir: "cache/shine_grouptransmla"
+group_cache_name: "transmla"
+overwrite_group_cache: false
+map_num_proc: 16
+map_batch_size: 2048
+group_num_bins: 100
+group_chat_len: 11
+group_separator: "<|endoftext|>"
+
+# Original SHINE pretrain task mix.
+completion_freq: 0.5
+min_completion_ratio: 0.1
+max_completion_ratio: 0.3
