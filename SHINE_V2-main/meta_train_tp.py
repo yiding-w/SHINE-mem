@@ -1144,7 +1144,7 @@ def _tp_run_evaluation(
 
                 # set_last_sq_norms → update_steps → get_reset_stats → maybe_reset_slice
                 # (same order as training loop)
-                if model.detach_state is not None:
+                if model.detach_state is not None and hasattr(model.detach_state, "_local_batch_size"):
                     _ds_batch_size = model.detach_state._local_batch_size
                     if _eval_regu_sq and _eval_regu_sq > 0:
                         # All-reduce across TP for full sq_norm before threshold check
