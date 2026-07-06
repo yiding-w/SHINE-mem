@@ -1570,8 +1570,25 @@ def tp_main(cfg: DictConfig):
         os.environ.get("MEMORY_QA_GEN", "") == "1"
         or os.environ.get("SQUAD_QA_GEN", "") == "1"
     )
-    # Read resume_from config (same key as PP: supports "latest", path, or null/None)
+    # warm_start_from is model-only initialization for a new training run.
+    # resume_from remains strict resume and requires optimizer/scheduler state.
+    _warm_start_raw = cfg.training.get("warm_start_from", None)
     _resume_from_raw = cfg.training.get("resume_from", "latest")
+    if _warm_start_raw is not None and str(_warm_start_raw).lower() not in ("null", "none", ""):
+        if _resume_from_raw is not None and str(_resume_from_raw).lower() not in ("null", "none", ""):
+            raise ValueError(
+                "training.warm_start_from is model-only initialization and cannot be used "
+                "together with training.resume_from. Set training.resume_from=null when "
+                "using warm_start_from."
+            )
+        resume_checkpoint_dir = str(_warm_start_raw)
+        if not os.path.isabs(resume_checkpoint_dir):
+            resume_checkpoint_dir = os.path.join(get_original_cwd(), resume_checkpoint_dir)
+        load_model_only_flag = True
+        if is_main_process_per_node():
+            logger.info(f"  [WarmStart] Loading model-only from: {resume_checkpoint_dir}")
+
+    # Read resume_from config (same key as PP: supports "latest", path, or null/None)
     if _resume_from_raw is not None and str(_resume_from_raw).lower() not in ("null", "none", ""):
         if str(_resume_from_raw).lower() == "latest":
             # Auto-detect latest checkpoint for this run
