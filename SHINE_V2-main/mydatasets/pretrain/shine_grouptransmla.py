@@ -38,6 +38,11 @@ from utils.mytokenizer import NOTHINKING_CHAT_TEMPLATE, create_tokenizer
 
 logger = logging.getLogger(__name__)
 
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover - tqdm is optional
+    tqdm = None
+
 
 def _is_present(value: Any) -> bool:
     return value is not None and str(value).lower() not in ("null", "none", "")
@@ -122,7 +127,16 @@ def _build_groups(token_lens: Sequence[int], *, max_len: int, chat_len: int,
     cache_groups: List[List[int]] = [[] for _ in range(num_bins)]
     cache_left = [max_body_len for _ in range(num_bins)]
 
-    for i, tok_len in enumerate(token_lens):
+    iterator = enumerate(token_lens)
+    if tqdm is not None:
+        iterator = tqdm(
+            iterator,
+            total=len(token_lens),
+            desc="[shine_grouptransmla] Packing token lengths into groups",
+            dynamic_ncols=True,
+        )
+
+    for i, tok_len in iterator:
         l = int(tok_len) + int(chat_len)
         if l > max_body_len:
             groups.append([i])
