@@ -151,8 +151,11 @@ def main(cfg: DictConfig) -> None:
             tp_world=tp_cfg["tensor_parallel_size"],
             tp_process_group=tp_cfg.get("tp_process_group"),
             dtype=torch.bfloat16,
-            activation_checkpointing=cfg.training.get("tp_knobs", {}).get("activation_checkpointing", True),
-            ckpt_skip_stride=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride", 0),
+            activation_checkpointing_llm=cfg.training.get("tp_knobs", {}).get("activation_checkpointing_llm", True),
+            activation_checkpointing_m2p=cfg.training.get("tp_knobs", {}).get("activation_checkpointing_m2p", True),
+            ckpt_skip_stride_llm=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride_llm", 0),
+            ckpt_skip_stride_m2p=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride_m2p", 0),
+            cpu_offload=cfg.training.get("tp_knobs", {}).get("cpu_offload", False),
             compile_hypernetwork=cfg.training.get("tp_knobs", {}).get("compile_hypernetwork", True),
         )
         all_gpu_stats("After model load")
