@@ -4,6 +4,7 @@ import torch.nn as nn
 import weakref
 import os
 from utils.myddp import is_main_process, barrier
+from utils.myloradict import merge_loradict_with_wdict_state
 
 def generate_couple_mask(idx_range, couple_hidden_size, couple_num_tokens):
     mask = torch.ones((couple_num_tokens, couple_num_tokens), dtype=torch.bool)
@@ -148,16 +149,21 @@ class Metanetwork(nn.Module):
         return getattr(self.metamodel, "config", None)
 
     @torch.compile # (mode="max-autotune")
-    def forward(self, input_ids, input_attention_mask, evidence_ids, evidence_attention_mask, metalora = None, labels = None, use_metanet = True, use_gradient_checkpoint = False, **kwargs) -> dict:
+    def forward(self, input_ids, input_attention_mask, evidence_ids, evidence_attention_mask, metalora = None, labels = None, use_metanet = True, use_gradient_checkpoint = False, detach_wdict = None, capture_raw_loradict = False, **kwargs) -> dict:
         '''
         memory_states: (batch_size, num_layer, num_mem_token, hidden_size)
         '''
         if use_metanet:
             assert metalora is not None, "metalora cannot be None when use_metanet is True"
             loradict, plain_output = self.generate_lora_dict(evidence_ids, evidence_attention_mask, metalora, use_gradient_checkpoint=use_gradient_checkpoint, return_plain=True)
-            outputs = self.metamodel(input_ids=input_ids, attention_mask=input_attention_mask, loradict=loradict, labels=labels, ignore_mem_token=True, use_gradient_checkpoint=use_gradient_checkpoint, **kwargs)
+            if capture_raw_loradict:
+                self._last_raw_loradict = loradict
+            forward_loradict = merge_loradict_with_wdict_state(loradict, detach_wdict)
+            outputs = self.metamodel(input_ids=input_ids, attention_mask=input_attention_mask, loradict=forward_loradict, labels=labels, ignore_mem_token=True, use_gradient_checkpoint=use_gradient_checkpoint, **kwargs)
             outputs.reg_loss = self.adapter_reg * torch.abs(plain_output).sum()
         else:
+            if capture_raw_loradict:
+                self._last_raw_loradict = None
             outputs = self.metamodel(input_ids=input_ids, attention_mask=input_attention_mask, labels=labels, ignore_mem_token=True, use_gradient_checkpoint=use_gradient_checkpoint, **kwargs)
         return outputs
     

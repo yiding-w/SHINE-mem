@@ -50,18 +50,33 @@ class LoraLinear(nn.Linear):
         if lora_dict is None:
             return base
 
+        if "grad" in lora_dict or "state" in lora_dict:
+            grad_lora = lora_dict.get("grad", None)
+            state_lora = lora_dict.get("state", None)
+            lora_out = None
+            if state_lora is not None:
+                lora_out = self._forward_wdict_state(input, state_lora)
+            if grad_lora is not None:
+                grad_out = self._forward_lora_delta(input, grad_lora)
+                lora_out = grad_out if lora_out is None else lora_out + grad_out
+            return base if lora_out is None else base + lora_out
+
+        lora_out = self._forward_lora_delta(input, lora_dict)
+        return base + lora_out
+
+    def _reshape_lora_input(self, input: Tensor, lora_batch_size: int) -> tuple[Tensor, int]:
+        torch._assert(input.shape[-1] == self.in_features, "last dim must be in_features")
+        torch._assert(input.shape[0] % lora_batch_size == 0, "input batch must be multiple of lora batch")
+        num_beams = input.shape[0] // lora_batch_size
+        return input.reshape(lora_batch_size, num_beams, -1, self.in_features), num_beams
+
+    def _forward_lora_delta(self, input: Tensor, lora_dict) -> Tensor:
         A = lora_dict["A"]              # [Lb, in, r]
         B = lora_dict["B"]              # [Lb, r, out]
         C = lora_dict.get("C", None)    # [Lb, out] or None
 
         Lb = A.shape[0]
-        torch._assert(input.shape[-1] == self.in_features, "last dim must be in_features")
-        torch._assert(input.shape[0] % Lb == 0, "input batch must be multiple of lora batch")
-        num_beams = input.shape[0] // Lb
-
-        # Flatten all middle dims (e.g., seq_len) into S for faster matmul
-        # input: [B, ..., in] -> x: [Lb, beams, S, in]
-        x = input.reshape(Lb, num_beams, -1, self.in_features)
+        x, _ = self._reshape_lora_input(input, Lb)
 
         # [Lb, beams, S, in] @ [Lb, in, r] -> [Lb, beams, S, r]
         tmp = torch.matmul(x, A[:, None, :, :])
@@ -77,15 +92,22 @@ class LoraLinear(nn.Linear):
 
         # Restore original middle dims: [Lb*beams, ..., out]
         lora_out = lora_out.reshape(*input.shape[:-1], self.out_features)
-        # try:
-        #     lora_out = lora_out.reshape(*input.shape[:-1], self.out_features)
-        # except RuntimeError:
-        #     res = f"input shape: {input.shape}, A shape: {A.shape}, B shape: {B.shape}, C shape: {C.shape if C is not None else 'None'}, \
-        #     in_features: {self.in_features}, out_features: {self.out_features}, tmp_shape: {tmp.shape}, lora_out shape before reshape: {lora_out.shape}, \
-        #         num_beams: {num_beams}, Lb: {Lb}, x shape: {x.shape}"
-        #     print(res)
+        return lora_out
 
-        return base + lora_out
+    def _forward_wdict_state(self, input: Tensor, state_dict) -> Tensor:
+        W = state_dict["W"]              # [Lb, in, out]
+        C = state_dict.get("C", None)    # [Lb, out] or None
+
+        Lb = W.shape[0]
+        x, _ = self._reshape_lora_input(input, Lb)
+        state_out = torch.matmul(x, W[:, None, :, :])
+
+        if self.bias is None:
+            torch._assert(C is None, "If bias is None, detach_state C must also be None")
+        elif C is not None:
+            state_out = state_out + C[:, None, None, :]
+
+        return state_out.reshape(*input.shape[:-1], self.out_features)
     
     def lora_params_numel(self, r):
         if not hasattr(self, "lora_params_numel_cache"):

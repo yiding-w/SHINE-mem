@@ -99,6 +99,43 @@ def merge_loradicts(lora1: dict, lora2: dict, method: str) -> dict:
 
     return _merge_leaf(lora1, lora2)
 
+def merge_loradict_with_wdict_state(loradict: dict, wdict: dict | None) -> dict:
+    """
+    Wrap a normal v1 loradict with a detached full-delta state.
+
+    The original v1 forward path expects each leaf to be {"A", "B", "C"}.
+    The detach-state path uses {"grad": {"A", "B", "C"}, "state": {"W", "C"}}
+    only when a state is present, so the default code path remains unchanged.
+    """
+    if wdict is None:
+        return loradict
+
+    def _merge(grad_node, state_node, path=""):
+        if isinstance(grad_node, dict) and "A" in grad_node and "B" in grad_node:
+            if state_node is None:
+                return grad_node
+            if not (isinstance(state_node, dict) and "W" in state_node):
+                raise ValueError(f"{path}: state leaf must contain W")
+            return {"grad": grad_node, "state": state_node}
+
+        if isinstance(grad_node, dict):
+            if state_node is None:
+                return grad_node
+            if grad_node.keys() != state_node.keys():
+                raise ValueError(f"{path}: key mismatch between loradict and wdict state")
+            return {
+                k: _merge(
+                    grad_node[k],
+                    state_node[k],
+                    path=f"{path}.{k}" if path else str(k),
+                )
+                for k in grad_node.keys()
+            }
+
+        raise TypeError(f"{path}: unsupported loradict node type {type(grad_node)}")
+
+    return _merge(loradict, wdict)
+
 def freeze_loradict(loradict: dict) -> dict:
     """
     Freeze all torch.Tensors inside a nested loradict IN-PLACE

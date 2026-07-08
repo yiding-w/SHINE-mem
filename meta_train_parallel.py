@@ -45,6 +45,7 @@ from torch.utils.tensorboard import SummaryWriter
 from metanetwork_family import Metanetwork
 
 from utils.mydataset import TextDataset, create_mock_dataset, SquadDataset, SquadCollator, PretrainCollator, GroupedSquadDataset, GroupTextDataset, GroupPretrainCollator, IFTCollator, IFTDataset, IFTC1QADataset
+from utils.memory_stream_dataset_v1 import MemoryStreamV1Collator, load_memory_stream_v1
 from utils.myseed import set_seed
 from utils.mylogging import get_logger
 from utils.mysaveload import (
@@ -69,6 +70,7 @@ from utils.myddp import (
     barrier,
 )
 from utils.myloradict import iter_learnable_tensors, merge_loradicts, freeze_loradict, loradict_all_requires_grad
+from utils.detach_state_v1 import V1FullDetachState
 from utils.myinit import _resolve_device, _import_class
 from collections import OrderedDict
 from typing import Optional, Union, Mapping, Sequence
@@ -77,6 +79,36 @@ logger = get_logger("metalora")
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+
+DETACH_STATE_V1_FILENAME = "detach_state_v1.pt"
+
+def _detach_state_enabled(cfg) -> bool:
+    detach_cfg = cfg.get("detach_state", None)
+    return bool(detach_cfg is not None and detach_cfg.get("enabled", False))
+
+def _detach_state_path(ckpt_dir: str) -> str:
+    return os.path.join(ckpt_dir, DETACH_STATE_V1_FILENAME)
+
+def _save_detach_state_v1(detach_state, ckpt_dir: str):
+    if detach_state is None:
+        return
+    torch.save(detach_state.state_dict(), _detach_state_path(ckpt_dir))
+
+def _load_detach_state_v1(detach_state, ckpt_dir: str, device):
+    if detach_state is None:
+        return
+    path = _detach_state_path(ckpt_dir)
+    if os.path.isfile(path):
+        state = torch.load(path, map_location=device, weights_only=False)
+        detach_state.load_state_dict(state)
+
+def _batch_repos(batch) -> Optional[List[str]]:
+    repos = batch.get("repo", None)
+    if repos is None:
+        return None
+    if isinstance(repos, str):
+        return [repos]
+    return [str(repo) for repo in repos]
 
 # @torch.no_grad()
 # def generate_stepwise(
@@ -288,10 +320,14 @@ torch.backends.cudnn.allow_tf32 = True
 #     return generated
 
 @torch.no_grad()
-def evaluate(metanetwork_ddp_or_module, dataloader, device, use_amp: bool = False, use_metanet: bool = True, metalora: Optional[torch.Tensor] = None, amp_dtype=None) -> Dict[str, float]:
+def evaluate(metanetwork_ddp_or_module, dataloader, device, use_amp: bool = False, use_metanet: bool = True, metalora: Optional[torch.Tensor] = None, amp_dtype=None, detach_state=None) -> Dict[str, float]:
     # Handle both wrapped and unwrapped metanetwork
     metanet = metanetwork_ddp_or_module.module if isinstance(metanetwork_ddp_or_module, DDP) else metanetwork_ddp_or_module
     metanet.eval()
+    eval_detach_state = None
+    prev_eval_repos = None
+    if detach_state is not None:
+        eval_detach_state = V1FullDetachState(detach_state._cfg, local_batch_size=getattr(detach_state, "_local_batch_size", 1))
 
     if use_metanet:
         assert metalora is not None, "metalora cannot be None when use_metanet is True"
@@ -311,6 +347,10 @@ def evaluate(metanetwork_ddp_or_module, dataloader, device, use_amp: bool = Fals
         labels = batch["labels"].to(device, non_blocking=True)
         evidence_ids = batch["evidence_ids"].to(device, non_blocking=True)
         evidence_attention_mask = batch["evidence_attention_mask"].to(device, non_blocking=True)
+        repos = _batch_repos(batch)
+        if eval_detach_state is not None and repos != prev_eval_repos:
+            eval_detach_state.reset()
+            prev_eval_repos = repos
         
         with amp_ctx:
             outputs = metanet(
@@ -321,7 +361,14 @@ def evaluate(metanetwork_ddp_or_module, dataloader, device, use_amp: bool = Fals
                 labels=labels,
                 use_metanet=use_metanet,
                 metalora=metalora,
+                detach_wdict=eval_detach_state.read() if eval_detach_state is not None else None,
+                capture_raw_loradict=eval_detach_state is not None,
             )
+        if eval_detach_state is not None:
+            sq_norms = eval_detach_state.write(getattr(metanet, "_last_raw_loradict", None))
+            eval_detach_state.set_last_sq_norms(sq_norms)
+            eval_detach_state.update_all_steps()
+            eval_detach_state.maybe_reset_all()
         loss = outputs.loss
         reg_loss = outputs.reg_loss
 
@@ -676,6 +723,41 @@ def main(cfg: DictConfig):
         val_ds = GroupedSquadDataset(val_dataset, tokenizer, 512, name="Validation", sep="\n\n")
         train_collator = IFTCollator(tokenizer, cfg.data.context_max_length, cfg.data.conversation_max_length, cfg=cfg)
         val_collator = SquadCollator(tokenizer=tokenizer, conversation_max_length=cfg.data.conversation_max_length, context_max_length=cfg.data.context_max_length, metatrain=True, cfg=cfg)
+    elif cfg.data.source == "memory-stream-jsonl":
+        if get_world_size() > 1:
+            raise NotImplementedError(
+                "memory-stream-jsonl requires ordered contiguous segments and is not yet "
+                "compatible with the default DistributedSampler. Run single-process first."
+            )
+        if cfg.data.train_batch_size != 1 or cfg.data.eval_batch_size != 1:
+            raise NotImplementedError(
+                "memory-stream-jsonl v1 path currently supports train/eval batch_size=1 only, "
+                "so each detach_state stream corresponds to one ordered repo."
+            )
+        data_path = cfg.data.get("data_path", os.path.join("data", "mem_synth"))
+        train_file = cfg.data.get("train_file", "train.jsonl")
+        val_file = cfg.data.get("val_file", "val.jsonl")
+        include_final_cfg = cfg.data.get("include_final_qa", None)
+        include_final_qa = _detach_state_enabled(cfg) if include_final_cfg is None else bool(include_final_cfg)
+        train_ds = load_memory_stream_v1(data_path, train_file, include_final_qa=include_final_qa)
+        val_ds = load_memory_stream_v1(data_path, val_file, include_final_qa=include_final_qa)
+        train_collator = MemoryStreamV1Collator(
+            tokenizer=tokenizer,
+            context_max_length=cfg.data.context_max_length,
+            conversation_max_length=cfg.data.conversation_max_length,
+            cfg=cfg,
+        )
+        val_collator = MemoryStreamV1Collator(
+            tokenizer=tokenizer,
+            context_max_length=cfg.data.context_max_length,
+            conversation_max_length=cfg.data.conversation_max_length,
+            cfg=cfg,
+        )
+        if is_main_process():
+            logger.info(
+                f"[memory-stream-jsonl] Loaded {len(train_ds)} train samples and {len(val_ds)} val samples "
+                f"from {data_path}; include_final_qa={include_final_qa}"
+            )
     else:
         raise ValueError(f"Unknown data source: {cfg.data.source}")
 
@@ -684,7 +766,8 @@ def main(cfg: DictConfig):
     pin = (device.type == "cuda")
 
     # Distributed samplers (only if world_size > 1)
-    train_sampler = DistributedSampler(train_ds, num_replicas=get_world_size(), rank=get_rank(), shuffle=True, seed=cfg.run.seed) if get_world_size() > 1 else None
+    data_shuffle = bool(getattr(cfg.data, "shuffle", True))
+    train_sampler = DistributedSampler(train_ds, num_replicas=get_world_size(), rank=get_rank(), shuffle=data_shuffle, seed=cfg.run.seed) if get_world_size() > 1 else None
     val_sampler = DistributedSampler(val_ds, num_replicas=get_world_size(), rank=get_rank(), shuffle=False) if get_world_size() > 1 else None
 
     # Use a few workers by default when on GPU
@@ -721,6 +804,20 @@ def main(cfg: DictConfig):
         logger.info(f"TensorBoard logs will be written to: {tb_log_dir}")
         logger.info("Starting training loop...")
 
+    detach_state = None
+    if _detach_state_enabled(cfg):
+        detach_cfg = cfg.detach_state
+        if detach_cfg.get("type", "full") != "full":
+            raise ValueError(f"Unsupported detach_state.type: {detach_cfg.get('type')}")
+        detach_state = V1FullDetachState(detach_cfg, local_batch_size=cfg.data.train_batch_size)
+        if resume_dir is not None:
+            _load_detach_state_v1(detach_state, resume_dir, device)
+        if is_main_process():
+            logger.info(
+                "Enabled SHINE-v1 detach_state "
+                f"(type=full, reset_threshold={detach_cfg.get('reset_threshold', None)})"
+            )
+
 
     # Make sure all ranks see the directory
     
@@ -742,13 +839,19 @@ def main(cfg: DictConfig):
         best_eval_loss = resume_state["best_eval_loss"]
         start_epoch = resume_state["epoch"]
         start_step_in_epoch = resume_state["step_in_epoch"]
+    max_steps = int(getattr(cfg.optim, "max_steps", -1))
     
     def one_train_epoch(epoch, start_epoch=1, start_step_in_epoch=0):
         nonlocal global_step, best_eval_loss
+        if max_steps > 0 and global_step >= max_steps:
+            return True
         epoch_loss = 0.0
         epoch_tokens = 0
         tmp_loss = 0.0
         tmp_tokens = 0
+        last_detach_reset_ratio = 0.0
+        last_detach_mean_update_step = 0.0
+        prev_train_repos = None
         # need to change
         if isinstance(train_loader.sampler, DistributedSampler):
             train_loader.sampler.set_epoch(epoch)
@@ -773,6 +876,10 @@ def main(cfg: DictConfig):
             labels = batch["labels"].to(device, non_blocking=True)
             evidence_ids = batch["evidence_ids"].to(device, non_blocking=True)
             evidence_attention_mask = batch["evidence_attention_mask"].to(device, non_blocking=True)
+            repos = _batch_repos(batch)
+            if detach_state is not None and repos != prev_train_repos:
+                detach_state.reset()
+                prev_train_repos = repos
             
             if not USE_ADDITIONAL_METALORA:
                 cur_metalora = metalora
@@ -783,7 +890,9 @@ def main(cfg: DictConfig):
                 # Forward through possibly DDP-wrapped metanetwork
                 outputs = ddp_metanet(input_ids=input_ids, input_attention_mask=input_attention_mask, 
                                     evidence_ids=evidence_ids, evidence_attention_mask=evidence_attention_mask, 
-                                    labels=labels, metalora=cur_metalora, use_gradient_checkpoint=cfg.run.use_gradient_checkpoint)
+                                    labels=labels, metalora=cur_metalora, use_gradient_checkpoint=cfg.run.use_gradient_checkpoint,
+                                    detach_wdict=detach_state.read() if detach_state is not None else None,
+                                    capture_raw_loradict=detach_state is not None)
                 loss = (outputs.loss / max(1, cfg.run.gradient_accumulation_steps)).item()
                 reg_loss = (outputs.reg_loss / max(1, cfg.run.gradient_accumulation_steps)).item()
                 backward_loss = (outputs.loss + outputs.reg_loss) / max(1, cfg.run.gradient_accumulation_steps)
@@ -794,6 +903,13 @@ def main(cfg: DictConfig):
             valid_tokens = (labels != -100).sum().item()
             if not math.isinf(loss) and not math.isnan(loss) and valid_tokens > 0:
                 backward_loss.backward()
+                if detach_state is not None:
+                    metanet_module = ddp_metanet.module if isinstance(ddp_metanet, DDP) else ddp_metanet
+                    sq_norms = detach_state.write(getattr(metanet_module, "_last_raw_loradict", None))
+                    detach_state.set_last_sq_norms(sq_norms)
+                    detach_state.update_all_steps()
+                    last_detach_reset_ratio, last_detach_mean_update_step = detach_state.get_reset_stats()
+                    detach_state.maybe_reset_all()
                 epoch_loss += loss * valid_tokens * max(1, cfg.run.gradient_accumulation_steps)
                 tmp_loss += loss * valid_tokens * max(1, cfg.run.gradient_accumulation_steps)
                 epoch_tokens += valid_tokens
@@ -840,11 +956,18 @@ def main(cfg: DictConfig):
                             writer.add_scalar("train/tmp_loss", tmp_loss_world, global_step)
                             writer.add_scalar("train/tmp_ppl", tmp_ppl, global_step)
                             writer.add_scalar("train/tmp_reg_loss", tmp_loss_reg_world, global_step)
+                            if detach_state is not None:
+                                writer.add_scalar("train/detach_reset_ratio", last_detach_reset_ratio, global_step)
+                                writer.add_scalar("train/detach_mean_update_step", last_detach_mean_update_step, global_step)
                         if isinstance(pbar, tqdm):
-                            pbar.set_postfix({"lr": lr_scheduler.get_last_lr()[0],
-                                            "epoch_avg_loss": f"{avg_loss_world:.4f}", "epoch_avg_ppl": f"{avg_ppl:.2f}",
-                                            "tmp_loss": f"{tmp_loss_world:.4f}", "tmp_ppl": f"{tmp_ppl:.2f}",
-                                            "tmp_reg_loss": f"{tmp_loss_reg_world:.8f}"})
+                            postfix = {"lr": lr_scheduler.get_last_lr()[0],
+                                    "epoch_avg_loss": f"{avg_loss_world:.4f}", "epoch_avg_ppl": f"{avg_ppl:.2f}",
+                                    "tmp_loss": f"{tmp_loss_world:.4f}", "tmp_ppl": f"{tmp_ppl:.2f}",
+                                    "tmp_reg_loss": f"{tmp_loss_reg_world:.8f}"}
+                            if detach_state is not None:
+                                postfix["detach_reset"] = f"{last_detach_reset_ratio:.4f}"
+                                postfix["detach_step"] = f"{last_detach_mean_update_step:.2f}"
+                            pbar.set_postfix(postfix)
                     tmp_loss = 0.0
                     tmp_tokens = 0
 
@@ -870,6 +993,7 @@ def main(cfg: DictConfig):
                             step,
                             best_eval_loss,
                         )
+                        _save_detach_state_v1(detach_state, ckpt_dir)
                     if ddp_is_active():
                         dist.barrier()
 
@@ -880,13 +1004,21 @@ def main(cfg: DictConfig):
                         cur_metalora = metalora
                     else:
                         cur_metalora = merge_loradicts(metalora, ift_additional_metalora, method=cfg.metanetwork.method)
-                    eval_metrics = evaluate(ddp_metanet, val_loader, device, use_amp=cfg.run.use_amp, metalora=cur_metalora, amp_dtype=amp_dtype)
+                    eval_metrics = evaluate(ddp_metanet, val_loader, device, use_amp=cfg.run.use_amp, metalora=cur_metalora, amp_dtype=amp_dtype, detach_state=detach_state)
                     if writer is not None:
                         writer.add_scalar("eval/loss", eval_metrics["eval_loss"], global_step)
                         writer.add_scalar("eval/ppl", eval_metrics["perplexity"], global_step)
                     if is_main_process():
                         logger.info(f"[Eval @ step {global_step}] loss={eval_metrics['eval_loss']:.4f} ppl={eval_metrics['perplexity']:.2f}")
+
+                if max_steps > 0 and global_step >= max_steps:
+                    if is_main_process():
+                        logger.info(f"Reached optim.max_steps={max_steps}; stopping training.")
+                    return True
         
+        if max_steps > 0 and global_step >= max_steps:
+            return True
+
         if device.type == "cuda":
             torch.cuda.empty_cache()
         # Epoch-end eval/log (averaged)
@@ -900,7 +1032,7 @@ def main(cfg: DictConfig):
             cur_metalora = metalora
         else:
             cur_metalora = merge_loradicts(metalora, ift_additional_metalora, method=cfg.metanetwork.method)
-        eval_metrics = evaluate(ddp_metanet, val_loader, device, use_amp=cfg.run.use_amp, metalora=cur_metalora, amp_dtype=amp_dtype)
+        eval_metrics = evaluate(ddp_metanet, val_loader, device, use_amp=cfg.run.use_amp, metalora=cur_metalora, amp_dtype=amp_dtype, detach_state=detach_state)
         if writer is not None:
             writer.add_scalar("eval/loss", eval_metrics["eval_loss"], global_step)
             writer.add_scalar("eval/ppl", eval_metrics["perplexity"], global_step)
@@ -924,6 +1056,8 @@ def main(cfg: DictConfig):
                 step,
                 best_eval_loss,
             )
+            _save_detach_state_v1(detach_state, ckpt_dir)
+        return False
     
     # # Initial eval
     # if resume_dir is None:
@@ -939,9 +1073,11 @@ def main(cfg: DictConfig):
 
     # Main training epochs
     for epoch in range(1, cfg.optim.num_epochs + 1):
-        one_train_epoch(epoch, start_epoch, start_step_in_epoch)
+        stop_training = one_train_epoch(epoch, start_epoch, start_step_in_epoch)
         if cfg.data.source == "squad":
             train_ds.shuffle()
+        if stop_training:
+            break
         
 
     # Final save (rank 0 only)
@@ -955,6 +1091,7 @@ def main(cfg: DictConfig):
             metalora=metalora,
             ift_additional_metalora=ift_additional_metalora if USE_ADDITIONAL_METALORA else None,
         )
+        _save_detach_state_v1(detach_state, final_dir)
 
         if cfg.paths.output_dir:
             stable_out = cfg.paths.output_dir
@@ -966,6 +1103,7 @@ def main(cfg: DictConfig):
                 metalora=metalora,
                 ift_additional_metalora=ift_additional_metalora if USE_ADDITIONAL_METALORA else None,
             )
+            _save_detach_state_v1(detach_state, stable_out)
             logger.info(f"Model saved to {stable_out}")
 
         logger.info(f"Complete !")

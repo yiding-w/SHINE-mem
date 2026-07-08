@@ -21,6 +21,11 @@ data:
   train_batch_size: 1
   eval_batch_size: 1
   num_workers: 4
+  shuffle: true
+  data_path: data/mem_synth
+  train_file: train.jsonl
+  val_file: val.jsonl
+  include_final_qa: null
   # Switch between "mock" and "hf" when you add a real dataset loader
   source: squad
 
@@ -29,6 +34,7 @@ optim:
   weight_decay: 0.01
   adapter_reg: 0.0 # 0.000001
   num_epochs: 1
+  max_steps: -1
   warmup_steps: 2000
   grad_clip_norm: 1.0
 
@@ -50,6 +56,11 @@ eval:
 save:
   save_steps: 1250
   # save_best: true    # best files sometimes corrupted, disable for now
+
+detach_state:
+  enabled: false
+  type: full
+  reset_threshold: null
 
 # If you use a custom local module for LoRA-wrapped Qwen, keep it here.
 # Otherwise, replace with a transformers model import path and update train.py accordingly.
