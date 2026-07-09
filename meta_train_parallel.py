@@ -561,7 +561,33 @@ def main(cfg: DictConfig):
         metanetwork, metalora, ift_additional_metalora = load_checkpoint(metanetwork, resume_dir, device, load_ift_additional_metalora=USE_ADDITIONAL_METALORA, zero_ift_additional_metalora=(cfg.model.ift_additional_metalora_r == 0))
         resume_state = load_training_state(resume_dir)
     else:
-        if cfg.mode == "iftpwc":
+        warm_start_dir = cfg.get("warm_start_dir", None)
+        if warm_start_dir is not None:
+            if not os.path.isdir(warm_start_dir):
+                raise ValueError(f"warm_start_dir does not exist: {warm_start_dir}")
+            if is_main_process():
+                logger.info(f"Warm-start mode, loading model checkpoint from {warm_start_dir}...")
+            metanetwork, metalora, ift_additional_metalora = load_checkpoint(
+                metanetwork,
+                warm_start_dir,
+                device,
+                load_ift_additional_metalora=False,
+            )
+            if USE_ADDITIONAL_METALORA:
+                freeze_loradict(metalora)
+                ift_additional_metalora = metanetwork.metamodel.init_lora_dict(
+                    cfg.model.ift_additional_metalora_r,
+                    scale=cfg.metanetwork.transformer_cfg.scale,
+                    device=device,
+                ) if cfg.model.ift_additional_metalora_r > 0 else None
+                if is_main_process():
+                    logger.info(
+                        f"Initialized additional IFT metalora with r={cfg.model.ift_additional_metalora_r} "
+                        "from scratch. Freezing warm-start metalora."
+                    )
+            elif is_main_process():
+                logger.info("No additional IFT metalora used.")
+        elif cfg.mode == "iftpwc":
             try:
                 pretrain_dir = os.path.join("checkpoints", f"{cfg.name}", "pretrain")
                 pretrain_dir = get_latest_checkpoint(pretrain_dir)

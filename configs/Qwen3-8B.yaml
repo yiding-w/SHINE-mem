@@ -2,6 +2,7 @@ name: default
 mode: train # pretrain | grain
 
 resume_global_step: -1  # -1: don't resume,   int: resume from global steps,  latest: resume from latest
+warm_start_dir: null     # optional checkpoint dir for model-only initialization when not resuming
 test_global_step: latest # int: test at global steps,  latest: test at latest
 
 run:
