@@ -651,13 +651,16 @@ def main(cfg: DictConfig):
     if is_main_process():
         logger.info("Setting up optimizer & scheduler...")
     no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight", "norm.weight", "norm1", "norm2"]
+    def _is_metamodel_param(name: str) -> bool:
+        return name.startswith("metamodel") or name.startswith("module.metamodel")
+
     grouped_params = [
         {
-            "params": [p for n, p in ddp_metanet.named_parameters() if (not any(nd in n for nd in no_decay) and not n.startswith("module.metamodel"))],
+            "params": [p for n, p in ddp_metanet.named_parameters() if (not any(nd in n for nd in no_decay) and not _is_metamodel_param(n))],
             "weight_decay": cfg.optim.weight_decay,
         },
         {
-            "params": [p for n, p in ddp_metanet.named_parameters() if (any(nd in n for nd in no_decay) and not n.startswith("module.metamodel"))],
+            "params": [p for n, p in ddp_metanet.named_parameters() if (any(nd in n for nd in no_decay) and not _is_metamodel_param(n))],
             "weight_decay": 0.0,
         },
         {
