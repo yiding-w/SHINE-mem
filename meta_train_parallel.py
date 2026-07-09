@@ -371,6 +371,8 @@ def evaluate(metanetwork_ddp_or_module, dataloader, device, use_amp: bool = Fals
             eval_detach_state.maybe_reset_all()
         loss = outputs.loss
         reg_loss = outputs.reg_loss
+        if reg_loss is None:
+            reg_loss = loss.new_zeros(())
 
         valid_tokens = (labels != -100).sum().item()
         total_loss += loss.item() * valid_tokens
@@ -922,9 +924,12 @@ def main(cfg: DictConfig):
                                     labels=labels, metalora=cur_metalora, use_gradient_checkpoint=cfg.run.use_gradient_checkpoint,
                                     detach_wdict=detach_state.read() if detach_state is not None else None,
                                     capture_raw_loradict=detach_state is not None)
+                reg_loss_tensor = outputs.reg_loss
+                if reg_loss_tensor is None:
+                    reg_loss_tensor = outputs.loss.new_zeros(())
                 loss = (outputs.loss / max(1, cfg.run.gradient_accumulation_steps)).item()
-                reg_loss = (outputs.reg_loss / max(1, cfg.run.gradient_accumulation_steps)).item()
-                backward_loss = (outputs.loss + outputs.reg_loss) / max(1, cfg.run.gradient_accumulation_steps)
+                reg_loss = (reg_loss_tensor / max(1, cfg.run.gradient_accumulation_steps)).item()
+                backward_loss = (outputs.loss + reg_loss_tensor) / max(1, cfg.run.gradient_accumulation_steps)
 
             if writer is not None:
                 writer.add_scalar("train/lr", lr_scheduler.get_last_lr()[0], global_step)
