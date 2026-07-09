@@ -97,6 +97,10 @@ class LoraLinear(nn.Linear):
     def _forward_wdict_state(self, input: Tensor, state_dict) -> Tensor:
         W = state_dict["W"]              # [Lb, in, out]
         C = state_dict.get("C", None)    # [Lb, out] or None
+        if W.device != input.device or W.dtype != input.dtype:
+            W = W.to(device=input.device, dtype=input.dtype, non_blocking=True)
+        if C is not None and (C.device != input.device or C.dtype != input.dtype):
+            C = C.to(device=input.device, dtype=input.dtype, non_blocking=True)
 
         Lb = W.shape[0]
         x, _ = self._reshape_lora_input(input, Lb)

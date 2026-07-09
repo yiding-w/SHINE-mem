@@ -22,6 +22,8 @@ class V1FullDetachState:
         self._wdict: Optional[Dict] = None
         self._last_sq_norms: Optional[List[float]] = None
         self._update_steps: List[int] = [0] * self._local_batch_size
+        self._state_device = self._get_cfg_value("state_device", "cpu")
+        self._state_dtype = self._parse_dtype(self._get_cfg_value("state_dtype", "bfloat16"))
 
     def read(self) -> Optional[Dict]:
         return self._wdict
@@ -156,11 +158,11 @@ class V1FullDetachState:
     def _loradict_to_wdict(self, loradict: Dict) -> Dict:
         def _convert(node):
             if isinstance(node, dict) and "A" in node and "B" in node:
-                A = node["A"].detach()
-                B = node["B"].detach()
-                W = torch.bmm(A, B).detach().clone()
+                A = self._to_state_storage(node["A"].detach())
+                B = self._to_state_storage(node["B"].detach())
+                W = torch.bmm(A, B).detach()
                 C = node.get("C", None)
-                C = None if C is None else C.detach().clone()
+                C = None if C is None else self._to_state_storage(C.detach())
                 return {"W": W, "C": C}
             if isinstance(node, dict):
                 return {key: _convert(value) for key, value in node.items()}
@@ -226,3 +228,25 @@ class V1FullDetachState:
         if hasattr(self._cfg, "get"):
             return self._cfg.get(key, default)
         return getattr(self._cfg, key, default)
+
+    def _parse_dtype(self, value):
+        if value is None or value == "none":
+            return None
+        if isinstance(value, torch.dtype):
+            return value
+        mapping = {
+            "float32": torch.float32,
+            "fp32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "bf16": torch.bfloat16,
+            "float16": torch.float16,
+            "fp16": torch.float16,
+        }
+        key = str(value).lower()
+        if key not in mapping:
+            raise ValueError(f"Unsupported detach_state.state_dtype: {value}")
+        return mapping[key]
+
+    def _to_state_storage(self, tensor: torch.Tensor) -> torch.Tensor:
+        device = torch.device(self._state_device)
+        return tensor.to(device=device, dtype=self._state_dtype).detach()

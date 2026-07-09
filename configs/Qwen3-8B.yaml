@@ -62,6 +62,8 @@ detach_state:
   enabled: false
   type: full
   reset_threshold: null
+  state_device: cpu
+  state_dtype: bfloat16
 
 # If you use a custom local module for LoRA-wrapped Qwen, keep it here.
 # Otherwise, replace with a transformers model import path and update train.py accordingly.
