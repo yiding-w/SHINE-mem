@@ -676,7 +676,8 @@ def main(cfg: DictConfig):
     # if is_main_process():
     #     logger.info("attn_implementation: " + str(metanetwork.metamodel.attn_implementation))
     metanetwork.to(device)
-    if should_use_ddp():
+    use_ddp_wrapper = should_use_ddp() and not tp_detach_cfg["enabled"]
+    if use_ddp_wrapper:
         ddp_metanet = DDP(
             metanetwork,
             device_ids=[device.index] if device.type == "cuda" else None,
@@ -685,7 +686,7 @@ def main(cfg: DictConfig):
             broadcast_buffers=False,
         )
     else:
-        ddp_metanet = metanetwork  # no wrapping in single-process run
+        ddp_metanet = metanetwork  # no wrapping in single-process or tp_detach run
 
     # Optimizer & Scheduler
     if is_main_process():
