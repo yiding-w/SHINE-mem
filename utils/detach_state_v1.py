@@ -3,6 +3,11 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
+
+
+_V1_COLWISE_PROJS = frozenset({"q", "k", "v", "gate", "up"})
+_V1_ROWWISE_PROJS = frozenset({"o", "down"})
 
 
 class V1FullDetachState:
@@ -250,3 +255,97 @@ class V1FullDetachState:
     def _to_state_storage(self, tensor: torch.Tensor) -> torch.Tensor:
         device = torch.device(self._state_device)
         return tensor.to(device=device, dtype=self._state_dtype).detach()
+
+
+class V1TPDetachState(V1FullDetachState):
+    """
+    TP-sharded SHINE v1 detach_state.
+
+    This is intentionally narrower than SHINE v2's full TP path: the base
+    model stays replicated, while the persistent dense detach_state W is
+    sharded by projection. This removes the largest OOM source without
+    changing the default v1 training path.
+    """
+
+    def __init__(
+        self,
+        cfg=None,
+        *,
+        local_batch_size: int = 1,
+        tp_rank: int = 0,
+        tp_world: int = 1,
+        tp_group=None,
+    ):
+        super().__init__(cfg, local_batch_size=local_batch_size)
+        self._tp_rank = int(tp_rank)
+        self._tp_world = int(tp_world)
+        self._tp_group = tp_group
+
+    def state_dict(self) -> Dict:
+        state = super().state_dict()
+        state.update(
+            {
+                "type": "v1_tp",
+                "tp_rank": self._tp_rank,
+                "tp_world": self._tp_world,
+            }
+        )
+        return state
+
+    def per_sample_sq_norms(self) -> List[float]:
+        norms = super().per_sample_sq_norms()
+        if not norms:
+            return norms
+        if self._tp_group is not None and self._tp_world > 1 and dist.is_available() and dist.is_initialized():
+            tensor = torch.tensor(norms, dtype=torch.float64, device="cuda" if torch.cuda.is_available() else "cpu")
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=self._tp_group)
+            norms = tensor.cpu().tolist()
+        return norms
+
+    def _loradict_to_wdict(self, loradict: Dict) -> Dict:
+        return self._convert_node(loradict, [])
+
+    def _convert_node(self, node, path_keys: List[str]):
+        if isinstance(node, dict) and "A" in node and "B" in node:
+            proj_name = path_keys[-1] if path_keys else ""
+            A = self._to_state_storage(node["A"].detach())
+            B = self._to_state_storage(node["B"].detach())
+            C = node.get("C", None)
+
+            if proj_name in _V1_COLWISE_PROJS:
+                B_local, c_slice = self._slice_colwise(B, C)
+                W = torch.bmm(A, B_local).detach()
+                C_local = None if C is None else self._to_state_storage(C.detach())[:, c_slice]
+                return {"W": W, "C": C_local, "_tp_axis": "col"}
+
+            if proj_name in _V1_ROWWISE_PROJS:
+                A_local, _ = self._slice_rowwise(A)
+                W = torch.bmm(A_local, B).detach()
+                C_full = None if C is None else self._to_state_storage(C.detach())
+                return {"W": W, "C": C_full, "_tp_axis": "row"}
+
+            W = torch.bmm(A, B).detach()
+            C_full = None if C is None else self._to_state_storage(C.detach())
+            return {"W": W, "C": C_full, "_tp_axis": "full"}
+
+        if isinstance(node, dict):
+            return {key: self._convert_node(value, path_keys + [str(key)]) for key, value in node.items()}
+        raise TypeError(f"Unsupported loradict node type: {type(node)}")
+
+    def _slice_colwise(self, B: torch.Tensor, C) -> Tuple[torch.Tensor, slice]:
+        out_full = B.shape[2]
+        if out_full % self._tp_world != 0:
+            raise ValueError(f"Colwise out dim {out_full} is not divisible by tp_world={self._tp_world}")
+        out_local = out_full // self._tp_world
+        s = self._tp_rank * out_local
+        e = s + out_local
+        return B[:, :, s:e], slice(s, e)
+
+    def _slice_rowwise(self, A: torch.Tensor) -> Tuple[torch.Tensor, slice]:
+        in_full = A.shape[1]
+        if in_full % self._tp_world != 0:
+            raise ValueError(f"Rowwise input dim {in_full} is not divisible by tp_world={self._tp_world}")
+        in_local = in_full // self._tp_world
+        s = self._tp_rank * in_local
+        e = s + in_local
+        return A[:, s:e, :], slice(s, e)

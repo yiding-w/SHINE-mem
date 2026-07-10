@@ -11,6 +11,10 @@ run:
   gradient_accumulation_steps: 4
   device: cuda                # auto | cuda | cpu
   use_gradient_checkpoint: false
+
+parallel:
+  mode: none                  # none | tp_detach
+  tensor_parallel_size: 1     # first tp_detach path requires WORLD_SIZE == tensor_parallel_size
   
 paths:
   model_path: "./models/Qwen3-8B"

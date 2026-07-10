@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Union
 import torch.nn.functional as F
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch import Tensor
 from transformers.models.qwen3.modeling_qwen3 import ACT2FN, Cache, DynamicCache, GenerationMixin, use_kernel_forward_from_hub, create_causal_mask, create_sliding_window_causal_mask, FlashAttentionKwargs, GenericForQuestionAnswering, GenericForSequenceClassification, GenericForTokenClassification, GradientCheckpointingLayer, BaseModelOutputWithPast, CausalLMOutputWithPast, ROPE_INIT_FUNCTIONS, dynamic_rope_update, ALL_ATTENTION_FUNCTIONS, PreTrainedModel, Unpack, TransformersKwargs, auto_docstring, can_return_tuple, deprecate_kwarg, check_model_inputs, Qwen3Config, Qwen3RMSNorm, Qwen3MLP, Qwen3Attention, apply_rotary_pos_emb, eager_attention_forward, Qwen3RotaryEmbedding
@@ -41,9 +42,54 @@ def _loradict_requires_grad(obj) -> bool:
     return False
 
 
+class _AllGatherLastDim(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, group, world_size: int, rank: int):
+        ctx.world_size = world_size
+        ctx.rank = rank
+        if world_size <= 1:
+            return x
+        chunks = [torch.empty_like(x) for _ in range(world_size)]
+        dist.all_gather(chunks, x.contiguous(), group=group)
+        return torch.cat(chunks, dim=-1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if ctx.world_size <= 1:
+            return grad_output, None, None, None
+        local = grad_output.shape[-1] // ctx.world_size
+        start = ctx.rank * local
+        end = start + local
+        return grad_output[..., start:end].contiguous(), None, None, None
+
+
+class _AllReduceForwardIdentityBackward(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, group, world_size: int):
+        if world_size > 1:
+            out = x.clone()
+            dist.all_reduce(out, op=dist.ReduceOp.SUM, group=group)
+            return out
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None
+
+
 class LoraLinear(nn.Linear):
     def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
         super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
+        self._tp_axis = None
+        self._tp_rank = 0
+        self._tp_world = 1
+        self._tp_group = None
+
+    def set_detach_state_tp(self, axis: Optional[str], tp_rank: int, tp_world: int, tp_group=None) -> None:
+        self._tp_axis = axis
+        self._tp_rank = int(tp_rank)
+        self._tp_world = int(tp_world)
+        self._tp_group = tp_group
 
     def forward(self, input: Tensor, lora_dict=None) -> Tensor:
         base = F.linear(input, self.weight, self.bias)
@@ -97,12 +143,16 @@ class LoraLinear(nn.Linear):
     def _forward_wdict_state(self, input: Tensor, state_dict) -> Tensor:
         W = state_dict["W"]              # [Lb, in, out]
         C = state_dict.get("C", None)    # [Lb, out] or None
+        tp_axis = state_dict.get("_tp_axis", self._tp_axis)
         if W.device != input.device or W.dtype != input.dtype:
             W = W.to(device=input.device, dtype=input.dtype, non_blocking=True)
         if C is not None and (C.device != input.device or C.dtype != input.dtype):
             C = C.to(device=input.device, dtype=input.dtype, non_blocking=True)
 
         Lb = W.shape[0]
+        if self._tp_world > 1 and tp_axis in ("col", "row"):
+            return self._forward_tp_wdict_state(input, W, C, tp_axis, Lb)
+
         x, _ = self._reshape_lora_input(input, Lb)
         state_out = torch.matmul(x, W[:, None, :, :])
 
@@ -112,6 +162,40 @@ class LoraLinear(nn.Linear):
             state_out = state_out + C[:, None, None, :]
 
         return state_out.reshape(*input.shape[:-1], self.out_features)
+
+    def _forward_tp_wdict_state(self, input: Tensor, W: Tensor, C: Optional[Tensor], axis: str, lora_batch_size: int) -> Tensor:
+        if not (dist.is_available() and dist.is_initialized()):
+            raise RuntimeError("detach_state TP requires torch.distributed to be initialized")
+
+        if axis == "col":
+            x, _ = self._reshape_lora_input(input, lora_batch_size)
+            local_out = torch.matmul(x, W[:, None, :, :])
+            if C is not None:
+                local_out = local_out + C[:, None, None, :]
+            local_out = local_out.reshape(*input.shape[:-1], W.shape[-1]).contiguous()
+            return _AllGatherLastDim.apply(local_out, self._tp_group, self._tp_world, self._tp_rank)
+
+        if axis == "row":
+            in_local = W.shape[1]
+            start = self._tp_rank * in_local
+            end = start + in_local
+            x_local = input[..., start:end]
+            x = x_local.reshape(lora_batch_size, -1, in_local)
+            local_out = torch.matmul(x, W)
+            local_out = local_out.reshape(*input.shape[:-1], self.out_features).contiguous()
+            local_out = _AllReduceForwardIdentityBackward.apply(local_out, self._tp_group, self._tp_world)
+            if C is not None:
+                if self.bias is None:
+                    torch._assert(C is None, "If bias is None, detach_state C must also be None")
+                if local_out.shape[0] != lora_batch_size:
+                    view = local_out.reshape(lora_batch_size, -1, *local_out.shape[1:])
+                    view = view + C.view(lora_batch_size, *(1,) * (view.dim() - 2), self.out_features)
+                    local_out = view.reshape(*local_out.shape)
+                else:
+                    local_out = local_out + C.view(lora_batch_size, *(1,) * (local_out.dim() - 2), self.out_features)
+            return local_out
+
+        raise ValueError(f"Unknown detach_state TP axis: {axis}")
     
     def lora_params_numel(self, r):
         if not hasattr(self, "lora_params_numel_cache"):

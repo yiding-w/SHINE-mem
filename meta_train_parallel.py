@@ -70,7 +70,12 @@ from utils.myddp import (
     barrier,
 )
 from utils.myloradict import iter_learnable_tensors, merge_loradicts, freeze_loradict, loradict_all_requires_grad
-from utils.detach_state_v1 import V1FullDetachState
+from utils.detach_state_v1 import V1FullDetachState, V1TPDetachState
+from utils.tp_v1 import (
+    broadcast_loradict_from_rank0,
+    configure_model_for_tp_detach,
+    get_tp_detach_config,
+)
 from utils.myinit import _resolve_device, _import_class
 from collections import OrderedDict
 from typing import Optional, Union, Mapping, Sequence
@@ -92,12 +97,20 @@ def _detach_state_path(ckpt_dir: str) -> str:
 def _save_detach_state_v1(detach_state, ckpt_dir: str):
     if detach_state is None:
         return
-    torch.save(detach_state.state_dict(), _detach_state_path(ckpt_dir))
+    os.makedirs(ckpt_dir, exist_ok=True)
+    if isinstance(detach_state, V1TPDetachState):
+        path = os.path.join(ckpt_dir, f"detach_state_v1_rank{get_rank()}.pt")
+    else:
+        path = _detach_state_path(ckpt_dir)
+    torch.save(detach_state.state_dict(), path)
 
 def _load_detach_state_v1(detach_state, ckpt_dir: str, device):
     if detach_state is None:
         return
-    path = _detach_state_path(ckpt_dir)
+    if isinstance(detach_state, V1TPDetachState):
+        path = os.path.join(ckpt_dir, f"detach_state_v1_rank{get_rank()}.pt")
+    else:
+        path = _detach_state_path(ckpt_dir)
     if os.path.isfile(path):
         state = torch.load(path, map_location=device, weights_only=False)
         detach_state.load_state_dict(state)
@@ -327,7 +340,16 @@ def evaluate(metanetwork_ddp_or_module, dataloader, device, use_amp: bool = Fals
     eval_detach_state = None
     prev_eval_repos = None
     if detach_state is not None:
-        eval_detach_state = V1FullDetachState(detach_state._cfg, local_batch_size=getattr(detach_state, "_local_batch_size", 1))
+        if isinstance(detach_state, V1TPDetachState):
+            eval_detach_state = V1TPDetachState(
+                detach_state._cfg,
+                local_batch_size=getattr(detach_state, "_local_batch_size", 1),
+                tp_rank=getattr(detach_state, "_tp_rank", 0),
+                tp_world=getattr(detach_state, "_tp_world", 1),
+                tp_group=getattr(detach_state, "_tp_group", None),
+            )
+        else:
+            eval_detach_state = V1FullDetachState(detach_state._cfg, local_batch_size=getattr(detach_state, "_local_batch_size", 1))
 
     if use_metanet:
         assert metalora is not None, "metalora cannot be None when use_metanet is True"
@@ -485,6 +507,7 @@ def main(cfg: DictConfig):
     # Make seed rank-dependent to vary shuffles but keep reproducibility per rank
     set_seed(int(cfg.run.seed) + get_rank())
     device = _resolve_device(cfg.run.device)
+    tp_detach_cfg = get_tp_detach_config(cfg)
     torch.backends.cudnn.benchmark = True
     
     # Load model/tokenizer (supports your local LoRA-wrapped Qwen class)
@@ -530,6 +553,18 @@ def main(cfg: DictConfig):
     metanetwork.train()
     metanetwork.to(device)
     freeze(metamodel) 
+    if tp_detach_cfg["enabled"]:
+        configure_model_for_tp_detach(
+            metamodel,
+            tp_rank=tp_detach_cfg["tp_rank"],
+            tp_world=tp_detach_cfg["tp_world"],
+            tp_group=tp_detach_cfg["tp_group"],
+        )
+        if is_main_process():
+            logger.info(
+                "Enabled SHINE-v1 detach_state TP sharding "
+                f"(tp_rank={tp_detach_cfg['tp_rank']}, tp_world={tp_detach_cfg['tp_world']})."
+            )
     if is_main_process():
         logger.info(f"Metanetwork type: {cfg.metanetwork.type}, Transform method: {cfg.metanetwork.method}")
         
@@ -632,6 +667,9 @@ def main(cfg: DictConfig):
             metalora = metanetwork.metamodel.init_lora_dict(cfg.model.metalora_r, scale=cfg.metanetwork.transformer_cfg.scale, device=device)
         
     metanetwork.metamodel.config.use_cache = False
+    if tp_detach_cfg["enabled"]:
+        broadcast_loradict_from_rank0(metalora, group=tp_detach_cfg["tp_group"])
+        broadcast_loradict_from_rank0(ift_additional_metalora, group=tp_detach_cfg["tp_group"])
 
     # ====== Wrap ONLY the trainable module in DDP when applicable ======
     # metanetwork.metamodel.attn_implementation = "flash_attention_2"
@@ -755,7 +793,7 @@ def main(cfg: DictConfig):
         train_collator = IFTCollator(tokenizer, cfg.data.context_max_length, cfg.data.conversation_max_length, cfg=cfg)
         val_collator = SquadCollator(tokenizer=tokenizer, conversation_max_length=cfg.data.conversation_max_length, context_max_length=cfg.data.context_max_length, metatrain=True, cfg=cfg)
     elif cfg.data.source == "memory-stream-jsonl":
-        if get_world_size() > 1:
+        if get_world_size() > 1 and not tp_detach_cfg["enabled"]:
             raise NotImplementedError(
                 "memory-stream-jsonl requires ordered contiguous segments and is not yet "
                 "compatible with the default DistributedSampler. Run single-process first."
@@ -798,8 +836,11 @@ def main(cfg: DictConfig):
 
     # Distributed samplers (only if world_size > 1)
     data_shuffle = bool(getattr(cfg.data, "shuffle", True))
-    train_sampler = DistributedSampler(train_ds, num_replicas=get_world_size(), rank=get_rank(), shuffle=data_shuffle, seed=cfg.run.seed) if get_world_size() > 1 else None
-    val_sampler = DistributedSampler(val_ds, num_replicas=get_world_size(), rank=get_rank(), shuffle=False) if get_world_size() > 1 else None
+    if tp_detach_cfg["enabled"] and data_shuffle:
+        raise ValueError("parallel.mode=tp_detach requires data.shuffle=false so every TP rank reads the same stream order.")
+    use_distributed_sampler = get_world_size() > 1 and not tp_detach_cfg["enabled"]
+    train_sampler = DistributedSampler(train_ds, num_replicas=get_world_size(), rank=get_rank(), shuffle=data_shuffle, seed=cfg.run.seed) if use_distributed_sampler else None
+    val_sampler = DistributedSampler(val_ds, num_replicas=get_world_size(), rank=get_rank(), shuffle=False) if use_distributed_sampler else None
 
     # Use a few workers by default when on GPU
     num_workers_default = 2 if device.type == "cuda" else 0
@@ -840,13 +881,23 @@ def main(cfg: DictConfig):
         detach_cfg = cfg.detach_state
         if detach_cfg.get("type", "full") != "full":
             raise ValueError(f"Unsupported detach_state.type: {detach_cfg.get('type')}")
-        detach_state = V1FullDetachState(detach_cfg, local_batch_size=cfg.data.train_batch_size)
+        if tp_detach_cfg["enabled"]:
+            detach_state = V1TPDetachState(
+                detach_cfg,
+                local_batch_size=cfg.data.train_batch_size,
+                tp_rank=tp_detach_cfg["tp_rank"],
+                tp_world=tp_detach_cfg["tp_world"],
+                tp_group=tp_detach_cfg["tp_group"],
+            )
+        else:
+            detach_state = V1FullDetachState(detach_cfg, local_batch_size=cfg.data.train_batch_size)
         if resume_dir is not None:
             _load_detach_state_v1(detach_state, resume_dir, device)
         if is_main_process():
             logger.info(
                 "Enabled SHINE-v1 detach_state "
-                f"(type=full, reset_threshold={detach_cfg.get('reset_threshold', None)})"
+                f"(type={'tp' if tp_detach_cfg['enabled'] else 'full'}, "
+                f"reset_threshold={detach_cfg.get('reset_threshold', None)})"
             )
 
 
@@ -1007,10 +1058,10 @@ def main(cfg: DictConfig):
 
                 # ---- Periodic checkpoint (rank 0 only) ----
                 if getattr(cfg.save, "save_steps", 0) and global_step % cfg.save.save_steps == 0:
+                    ckpt_dir = os.path.join(ckpt_root, f"checkpoint-{global_step}")
                     if ddp_is_active():
                         dist.barrier()
                     if is_main_process():
-                        ckpt_dir = os.path.join(ckpt_root, f"checkpoint-{global_step}")
                         logger.info(f"Saving checkpoint to {ckpt_dir}")
                         # Save unwrapped metanetwork (state is in ddp_metanet.module when DDP)
                         save_checkpoint(
@@ -1027,7 +1078,9 @@ def main(cfg: DictConfig):
                             step,
                             best_eval_loss,
                         )
-                        _save_detach_state_v1(detach_state, ckpt_dir)
+                    if ddp_is_active():
+                        dist.barrier()
+                    _save_detach_state_v1(detach_state, ckpt_dir)
                     if ddp_is_active():
                         dist.barrier()
 
@@ -1072,8 +1125,8 @@ def main(cfg: DictConfig):
             writer.add_scalar("eval/ppl", eval_metrics["perplexity"], global_step)
         if is_main_process():
             logger.info(f"[Epoch {epoch} Eval] loss={eval_metrics['eval_loss']:.4f} ppl={eval_metrics['perplexity']:.2f}")
+        ckpt_dir = os.path.join(ckpt_root, f"checkpoint-epoch-{epoch}")
         if is_main_process():
-            ckpt_dir = os.path.join(ckpt_root, f"checkpoint-epoch-{epoch}")
             logger.info(f"Saving checkpoint to {ckpt_dir}")
             # Save unwrapped metanetwork (state is in ddp_metanet.module when DDP)
             save_checkpoint(
@@ -1090,7 +1143,11 @@ def main(cfg: DictConfig):
                 step,
                 best_eval_loss,
             )
-            _save_detach_state_v1(detach_state, ckpt_dir)
+        if ddp_is_active():
+            dist.barrier()
+        _save_detach_state_v1(detach_state, ckpt_dir)
+        if ddp_is_active():
+            dist.barrier()
         return False
     
     # # Initial eval
@@ -1115,9 +1172,10 @@ def main(cfg: DictConfig):
         
 
     # Final save (rank 0 only)
+    final_dir = os.path.join(ckpt_root, "final")
+    stable_out = cfg.paths.output_dir if cfg.paths.output_dir else None
     if is_main_process():
         logger.info("Saving final model...")
-        final_dir = os.path.join(ckpt_root, "final")
         save_checkpoint(
             ddp_metanet.module if isinstance(ddp_metanet, DDP) else ddp_metanet,
             final_dir,
@@ -1125,10 +1183,8 @@ def main(cfg: DictConfig):
             metalora=metalora,
             ift_additional_metalora=ift_additional_metalora if USE_ADDITIONAL_METALORA else None,
         )
-        _save_detach_state_v1(detach_state, final_dir)
 
-        if cfg.paths.output_dir:
-            stable_out = cfg.paths.output_dir
+        if stable_out:
             os.makedirs(stable_out, exist_ok=True)
             save_checkpoint(
                 ddp_metanet.module if isinstance(ddp_metanet, DDP) else ddp_metanet,
@@ -1137,10 +1193,16 @@ def main(cfg: DictConfig):
                 metalora=metalora,
                 ift_additional_metalora=ift_additional_metalora if USE_ADDITIONAL_METALORA else None,
             )
-            _save_detach_state_v1(detach_state, stable_out)
             logger.info(f"Model saved to {stable_out}")
 
         logger.info(f"Complete !")
+    if ddp_is_active():
+        dist.barrier()
+    _save_detach_state_v1(detach_state, final_dir)
+    if stable_out:
+        _save_detach_state_v1(detach_state, stable_out)
+    if ddp_is_active():
+        dist.barrier()
 
     if writer is not None:
         writer.close()
