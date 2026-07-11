@@ -49,6 +49,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from hypernetwork.tp_model_hypernetwork import TPModelHypernetwork
+from v1_backend.adapter import V1TPModelAdapter
 from utils.mydata import (
     PipelineDataLoader,
     resolve_pad_token_id,
@@ -1332,24 +1333,34 @@ def tp_main(cfg: DictConfig):
         with open_dict(cfg.model):
             cfg.model.detach_state = cfg.detach_state
 
+    backend_name = str(cfg.get("backend", {}).get("name", "v2"))
     if is_main_process_per_node():
-        logger.info("Building TPModelHypernetwork …")
-    model = TPModelHypernetwork(
-        model_cfg=cfg.model,
-        m2p_transformer_cfg=cfg.m2p_transformer,
-        tp_rank=tp_cfg["tp_rank"],
-        tp_world=tp_cfg["tensor_parallel_size"],
-        tp_process_group=tp_cfg.get("tp_process_group"),
-        sp_group=tp_cfg.get("sp_process_group"),
-        sp_world=tp_cfg.get("sequence_parallel_size", 1),
-        dtype=torch.bfloat16,
-        activation_checkpointing_llm=cfg.training.get("tp_knobs", {}).get("activation_checkpointing_llm", True),
-        activation_checkpointing_m2p=cfg.training.get("tp_knobs", {}).get("activation_checkpointing_m2p", True),
-        ckpt_skip_stride_llm=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride_llm", 0),
-        ckpt_skip_stride_m2p=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride_m2p", 0),
-        cpu_offload=cfg.training.get("tp_knobs", {}).get("cpu_offload", False),
-        compile_hypernetwork=cfg.training.get("tp_knobs", {}).get("compile_hypernetwork", True),
-    )
+        logger.info(f"Building TP model backend={backend_name}")
+    if backend_name == "shine_v1_qwen3":
+        model = V1TPModelAdapter(
+            cfg=cfg,
+            tp_rank=tp_cfg["tp_rank"],
+            tp_world=tp_cfg["tensor_parallel_size"],
+            tp_process_group=tp_cfg.get("tp_process_group"),
+            dtype=torch.bfloat16,
+        )
+    else:
+        model = TPModelHypernetwork(
+            model_cfg=cfg.model,
+            m2p_transformer_cfg=cfg.m2p_transformer,
+            tp_rank=tp_cfg["tp_rank"],
+            tp_world=tp_cfg["tensor_parallel_size"],
+            tp_process_group=tp_cfg.get("tp_process_group"),
+            sp_group=tp_cfg.get("sp_process_group"),
+            sp_world=tp_cfg.get("sequence_parallel_size", 1),
+            dtype=torch.bfloat16,
+            activation_checkpointing_llm=cfg.training.get("tp_knobs", {}).get("activation_checkpointing_llm", True),
+            activation_checkpointing_m2p=cfg.training.get("tp_knobs", {}).get("activation_checkpointing_m2p", True),
+            ckpt_skip_stride_llm=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride_llm", 0),
+            ckpt_skip_stride_m2p=cfg.training.get("tp_knobs", {}).get("ckpt_skip_stride_m2p", 0),
+            cpu_offload=cfg.training.get("tp_knobs", {}).get("cpu_offload", False),
+            compile_hypernetwork=cfg.training.get("tp_knobs", {}).get("compile_hypernetwork", True),
+        )
     all_gpu_stats("After model load")
 
     # Optional: disable SDPA Flash for A/B comparison via debug.no_flash.
@@ -1363,7 +1374,7 @@ def tp_main(cfg: DictConfig):
     # 3. Dataset + DataLoader
     # ------------------------------------------------------------------
     from hydra.utils import get_original_cwd
-    model_path = str(cfg.model.path)
+    model_path = str(cfg.v1_backend.model_path) if backend_name == "shine_v1_qwen3" else str(cfg.model.path)
     if not os.path.isabs(model_path):
         model_path = os.path.join(get_original_cwd(), model_path)
     pad_token_id = resolve_pad_token_id(model_path, tokenizer_cfg=cfg.tokenizer)

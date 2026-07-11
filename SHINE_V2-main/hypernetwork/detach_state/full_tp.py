@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # TP sharding plan: which projections are Colwise vs Rowwise.
 # Colwise: output dim is sharded (q_query, q_gate, k, v, gate, up)
 # Rowwise: input dim is sharded (o, down)
-_COLWISE_PROJS = frozenset({"q_query", "q_gate", "k", "v", "gate", "up"})
+_COLWISE_PROJS = frozenset({"q", "q_query", "q_gate", "k", "v", "gate", "up"})
 _ROWWISE_PROJS = frozenset({"o", "down"})
 
 
