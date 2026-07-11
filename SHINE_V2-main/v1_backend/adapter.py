@@ -7,6 +7,7 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 from hypernetwork.detach_state import create_detach_state
@@ -197,9 +198,6 @@ class V1TPModelAdapter(nn.Module):
         grad_accum_steps: int = 1,
         **kwargs,
     ):
-        if return_per_token_loss:
-            raise NotImplementedError("V1 backend first smoke path does not support per-token loss logging.")
-
         _, ds_wdict = self.detach_state.read() if self.detach_state is not None else (None, None)
         if context_attention_mask is None:
             context_attention_mask = _lengths_to_mask(context_ids, context_lengths)
@@ -234,6 +232,20 @@ class V1TPModelAdapter(nn.Module):
             regu_sq_norm = 0.0 if regu_sq_norm is None else regu_sq_norm
         self._cached_loradict_for_write = raw_loradict
         self._cached_precomputed_wdict = precomputed
+
+        if return_per_token_loss:
+            if getattr(outputs, "logits", None) is None:
+                raise RuntimeError("V1 backend cannot compute per-token loss because model output has no logits.")
+            shift_logits = outputs.logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            per_token_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.shape[-1]),
+                shift_labels.view(-1),
+                ignore_index=-100,
+                reduction="none",
+            ).view_as(shift_labels).float()
+            return (outputs.loss, per_token_loss), regu_sq_norm, regu_loss
+
         return outputs.loss, regu_sq_norm, regu_loss
 
     def post_backward_detach_state(self, grad_accum_steps: int = 1):
