@@ -23,6 +23,20 @@ def split_wrapped_loradict(loradict, nograd_wdict=None):
     return loradict, nograd_wdict
 
 
+def _cast_leaf_to_input(leaf, input):
+    if not isinstance(leaf, dict):
+        return leaf
+    result = {}
+    changed = False
+    for key, value in leaf.items():
+        if torch.is_tensor(value) and (value.dtype != input.dtype or value.device != input.device):
+            result[key] = value.to(device=input.device, dtype=input.dtype)
+            changed = True
+        else:
+            result[key] = value
+    return result if changed else leaf
+
+
 class V1ColwiseLoraLinear(ColwiseLoraLinear):
     def init_lora_dict(self, r: int, scale: float, device, dtype: Optional[torch.dtype] = None):
         if dtype is None:
@@ -31,6 +45,9 @@ class V1ColwiseLoraLinear(ColwiseLoraLinear):
 
     def forward(self, input, loradict=None, nograd_loradict=None, nograd_wdict=None):
         loradict, nograd_wdict = split_wrapped_loradict(loradict, nograd_wdict)
+        loradict = _cast_leaf_to_input(loradict, input)
+        nograd_loradict = _cast_leaf_to_input(nograd_loradict, input)
+        nograd_wdict = _cast_leaf_to_input(nograd_wdict, input)
         return super().forward(
             input,
             loradict=loradict,
@@ -54,6 +71,9 @@ class V1RowwiseLoraLinear(RowwiseLoraLinear):
 
     def forward(self, input, loradict=None, nograd_loradict=None, nograd_wdict=None):
         loradict, nograd_wdict = split_wrapped_loradict(loradict, nograd_wdict)
+        loradict = _cast_leaf_to_input(loradict, input)
+        nograd_loradict = _cast_leaf_to_input(nograd_loradict, input)
+        nograd_wdict = _cast_leaf_to_input(nograd_wdict, input)
         return super().forward(
             input,
             loradict=loradict,
