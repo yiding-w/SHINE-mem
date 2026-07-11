@@ -33,6 +33,25 @@ def _patch_transformers_qwen3_for_v1_import() -> None:
     """
     import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
 
+    def _identity_decorator(*args, **_kwargs):
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+
+        def decorator(fn):
+            return fn
+
+        return decorator
+
+    decorator_fallbacks = {
+        "auto_docstring": _identity_decorator,
+        "can_return_tuple": _identity_decorator,
+        "check_model_inputs": _identity_decorator,
+        "use_kernel_forward_from_hub": _identity_decorator,
+    }
+    for name, fallback in decorator_fallbacks.items():
+        if not hasattr(qwen3_mod, name):
+            setattr(qwen3_mod, name, fallback)
+
     if not hasattr(qwen3_mod, "deprecate_kwarg"):
         try:
             from transformers.utils.deprecation import deprecate_kwarg
@@ -40,11 +59,30 @@ def _patch_transformers_qwen3_for_v1_import() -> None:
             try:
                 from transformers.utils import deprecate_kwarg
             except Exception:
-                def deprecate_kwarg(*_args, **_kwargs):
-                    def decorator(fn):
-                        return fn
-                    return decorator
+                deprecate_kwarg = _identity_decorator
         qwen3_mod.deprecate_kwarg = deprecate_kwarg
+
+    required_names = (
+        "ACT2FN", "Cache", "DynamicCache", "GenerationMixin",
+        "use_kernel_forward_from_hub", "create_causal_mask",
+        "create_sliding_window_causal_mask", "FlashAttentionKwargs",
+        "GenericForQuestionAnswering", "GenericForSequenceClassification",
+        "GenericForTokenClassification", "GradientCheckpointingLayer",
+        "BaseModelOutputWithPast", "CausalLMOutputWithPast",
+        "ROPE_INIT_FUNCTIONS", "dynamic_rope_update",
+        "ALL_ATTENTION_FUNCTIONS", "PreTrainedModel", "Unpack",
+        "TransformersKwargs", "auto_docstring", "can_return_tuple",
+        "deprecate_kwarg", "check_model_inputs", "Qwen3Config",
+        "Qwen3RMSNorm", "Qwen3MLP", "Qwen3Attention",
+        "apply_rotary_pos_emb", "eager_attention_forward",
+        "Qwen3RotaryEmbedding",
+    )
+    missing = [name for name in required_names if not hasattr(qwen3_mod, name)]
+    if missing:
+        raise ImportError(
+            "Current transformers qwen3 module is missing symbols required by "
+            f"SHINE-v1 LoraQwen.py after compatibility patch: {missing}"
+        )
 
 
 def compute_v1_num_mem_token(config, lora_r: int, mean_pool_size: int = 1) -> int:
