@@ -24,6 +24,29 @@ def _ensure_repo_root_on_path() -> str:
     return repo_root
 
 
+def _patch_transformers_qwen3_for_v1_import() -> None:
+    """Patch small transformers API moves before importing the v1 Qwen file.
+
+    The root SHINE-v1 LoraQwen.py was generated against a slightly different
+    transformers snapshot than the SHINE-v2 environment. Keep the compatibility
+    shim local to this backend so the normal v2 model path is untouched.
+    """
+    import transformers.models.qwen3.modeling_qwen3 as qwen3_mod
+
+    if not hasattr(qwen3_mod, "deprecate_kwarg"):
+        try:
+            from transformers.utils.deprecation import deprecate_kwarg
+        except Exception:
+            try:
+                from transformers.utils import deprecate_kwarg
+            except Exception:
+                def deprecate_kwarg(*_args, **_kwargs):
+                    def decorator(fn):
+                        return fn
+                    return decorator
+        qwen3_mod.deprecate_kwarg = deprecate_kwarg
+
+
 def compute_v1_num_mem_token(config, lora_r: int, mean_pool_size: int = 1) -> int:
     hidden = int(config.hidden_size)
     intermediate = int(config.intermediate_size)
@@ -123,6 +146,7 @@ def load_v1_qwen3_for_tp(
     device: Optional[torch.device] = None,
 ):
     _ensure_repo_root_on_path()
+    _patch_transformers_qwen3_for_v1_import()
     from LoraQwen import LoraQwen3ForCausalLM, Qwen3Config
 
     if device is None:
@@ -157,4 +181,3 @@ def load_v1_qwen3_for_tp(
         for p in llm.parameters():
             p.requires_grad_(False)
     return llm
-
