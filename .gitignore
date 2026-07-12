@@ -62,3 +62,6 @@ MemoryAgentBench/cognee
 MemoryAgentBench/letta
 
 MemoryTest/teacher_loras
+
+/data
+/logs
