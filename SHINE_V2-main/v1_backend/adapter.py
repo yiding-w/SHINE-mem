@@ -73,7 +73,23 @@ def _lengths_to_mask(input_ids: torch.Tensor, lengths: Optional[torch.Tensor]):
         return None
     seq_len = input_ids.shape[1]
     positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
-    return (positions >= (seq_len - lengths.unsqueeze(1))).to(dtype=torch.long)
+    return (positions < lengths.unsqueeze(1)).to(dtype=torch.long)
+
+
+def _trim_context_to_lengths(input_ids: torch.Tensor, lengths: Optional[torch.Tensor]):
+    """Drop right padding before feeding contexts to the SHINE-v1 metanetwork.
+
+    V2 collators allocate ``context_seq_length + num_mem_token`` slots because
+    native V2 models use explicit memory-token placeholders. SHINE-v1 appends
+    its own mem tokens inside LoraQwen, so the adapter should pass only the real
+    context prefix and mask that prefix as valid.
+    """
+    if lengths is None:
+        return input_ids, lengths
+    max_len = int(lengths.max().item())
+    if max_len <= 0:
+        max_len = 1
+    return input_ids[:, :max_len], lengths
 
 
 class V1TPModelAdapter(nn.Module):
@@ -217,6 +233,7 @@ class V1TPModelAdapter(nn.Module):
         **kwargs,
     ):
         _, ds_wdict = self.detach_state.read() if self.detach_state is not None else (None, None)
+        context_ids, context_lengths = _trim_context_to_lengths(context_ids, context_lengths)
         if context_attention_mask is None:
             context_attention_mask = _lengths_to_mask(context_ids, context_lengths)
 
@@ -292,6 +309,7 @@ class V1TPModelAdapter(nn.Module):
         loradict projection. Return the generated loradict here and let
         generate_loradict pass it through.
         """
+        context_ids, context_lengths = _trim_context_to_lengths(context_ids, context_lengths)
         if context_attention_mask is None:
             context_attention_mask = _lengths_to_mask(context_ids, context_lengths)
         raw_loradict, _plain = self.v1_metanetwork.generate_lora_dict(

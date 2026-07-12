@@ -98,6 +98,22 @@ def _load_jsonl(path):
         return [json.loads(l) for l in f if l.strip()]
 
 
+def _parse_memory_qa_num(default: str = "5") -> int | None:
+    """Return None for full-set evaluation.
+
+    Historically MEMORY_QA_NUM defaulted to 5 for a quick smoke test. Keep that
+    default, but allow explicit full-val runs with MEMORY_QA_NUM=-1/all/full.
+    """
+    raw = os.environ.get("MEMORY_QA_NUM", default)
+    if raw is None:
+        return int(default)
+    raw = str(raw).strip().lower()
+    if raw in {"all", "full", "-1", "none"}:
+        return None
+    value = int(raw)
+    return None if value < 0 else value
+
+
 def _strip_think(text: str) -> str:
     # NOTHINKING template still emits an empty <think>..</think> before content.
     m = re.split(r"</think>", text, maxsplit=1)
@@ -142,7 +158,9 @@ def _gen_eval_core(model, cfg, my_device, *, n_hist, max_new, seg_sample, use_kv
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
     eos_id = tok.eos_token_id
     include_final = _include_final_qa(cfg, model)
-    records = filter_by_segments(_load_jsonl(test_file))[:n_hist]
+    records = filter_by_segments(_load_jsonl(test_file))
+    if n_hist is not None:
+        records = records[:n_hist]
     print(f"\n[memory_qa_gen] {len(records)} histories from {test_file} "
           f"(num_mem={num_mem}, ctx_cap={ctx_len_cap}, max_new={max_new}, "
           f"include_final_qa={include_final})", flush=True)
@@ -275,7 +293,7 @@ def run_memory_qa_gen(model, cfg, tp_cfg, my_device):
     recall = os.environ.get("MEMORY_QA_RECALL", "") == "1"
     hit, total, examples = _gen_eval_core(
         model, cfg, my_device,
-        n_hist=int(os.environ.get("MEMORY_QA_NUM", "5")),
+        n_hist=_parse_memory_qa_num(),
         max_new=int(os.environ.get("MEMORY_QA_MAX_NEW", "16")),
         seg_sample=int(os.environ.get("MEMORY_QA_SEG_SAMPLE", "4")),
         use_kv=os.environ.get("MEMORY_QA_KV", "1") != "0",
@@ -344,7 +362,7 @@ def run_memory_qa_icl(model, cfg, tp_cfg, my_device):
 
     test_file = os.environ.get("MEMORY_QA_TEST_FILE") or os.path.join(
         cfg.data.get("data_path", "data/mem_synth"), cfg.data.get("val_file", "val.jsonl"))
-    n_hist = int(os.environ.get("MEMORY_QA_NUM", "5"))
+    n_hist = _parse_memory_qa_num()
     max_new = int(os.environ.get("MEMORY_QA_MAX_NEW", "16"))
     seg_sample = int(os.environ.get("MEMORY_QA_SEG_SAMPLE", "4"))
     use_kv = os.environ.get("MEMORY_QA_KV", "1") != "0"
@@ -357,7 +375,9 @@ def run_memory_qa_icl(model, cfg, tp_cfg, my_device):
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
     eos_id = tok.eos_token_id
 
-    records = filter_by_segments(_load_jsonl(test_file))[:n_hist]
+    records = filter_by_segments(_load_jsonl(test_file))
+    if n_hist is not None:
+        records = records[:n_hist]
     include_final = _include_final_qa(cfg, model)
     print(f"\n[memory_qa_icl] ICL baseline (no SHINE): {len(records)} histories from "
           f"{test_file} (max_len={max_len}, max_new={max_new}, "
