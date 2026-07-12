@@ -54,6 +54,20 @@ def _wrap_loradict_with_wdict(loradict, wdict):
     return _wrap(loradict, wdict)
 
 
+def _state_only_loradict(wdict):
+    if wdict is None:
+        return None
+
+    def _wrap(node):
+        if isinstance(node, dict) and "W" in node:
+            return {"grad": None, "state": node}
+        if isinstance(node, dict):
+            return {k: _wrap(v) for k, v in node.items()}
+        return None
+
+    return _wrap(wdict)
+
+
 def _lengths_to_mask(input_ids: torch.Tensor, lengths: Optional[torch.Tensor]):
     if lengths is None:
         return None
@@ -125,6 +139,10 @@ class V1TPModelAdapter(nn.Module):
         warm_start_dir = self.v1_cfg.get("warm_start_dir", None)
         if warm_start_dir:
             self.load_v1_checkpoint(str(warm_start_dir))
+
+    @property
+    def is_v1_backend(self) -> bool:
+        return True
 
     def _build_v1_metanetwork_cfg(self):
         return OmegaConf.create(
@@ -247,6 +265,55 @@ class V1TPModelAdapter(nn.Module):
             return (outputs.loss, per_token_loss), regu_sq_norm, regu_loss
 
         return outputs.loss, regu_sq_norm, regu_loss
+
+    def _read_detach_state(self, mb_idx=None):
+        if self.detach_state is None:
+            return None, None
+        return self.detach_state.read(mb_idx)
+
+    def _write_detach_state(self, loradict: Optional[Dict], mb_idx=None, precomputed_wdict=None):
+        if self.detach_state is None or loradict is None:
+            return
+        self.detach_state.write(loradict, mb_idx=mb_idx, precomputed_wdict=precomputed_wdict)
+
+    def compute_memory_states(
+        self,
+        context_ids,
+        context_attention_mask=None,
+        context_lengths=None,
+        nograd_loradict=None,
+        nograd_wdict=None,
+        **kwargs,
+    ):
+        """Compatibility hook for eval_memory_gen.
+
+        SHINE-v1's metanetwork API directly maps context tokens to a loradict,
+        while the native v2 path separates memory-state computation from the
+        loradict projection. Return the generated loradict here and let
+        generate_loradict pass it through.
+        """
+        if context_attention_mask is None:
+            context_attention_mask = _lengths_to_mask(context_ids, context_lengths)
+        raw_loradict, _plain = self.v1_metanetwork.generate_lora_dict(
+            context_ids,
+            context_attention_mask,
+            self.metalora,
+            use_gradient_checkpoint=False,
+            return_plain=True,
+        )
+        return raw_loradict
+
+    def generate_loradict(self, memory_states):
+        return memory_states
+
+    def conversation_loradict_from_generated(self, loradict):
+        return loradict
+
+    def prepare_generation_loradict(self, loradict, ds_loradict=None, ds_wdict=None):
+        wrapped = _wrap_loradict_with_wdict(loradict, ds_wdict)
+        if wrapped is None:
+            wrapped = _state_only_loradict(ds_wdict)
+        return wrapped
 
     def post_backward_detach_state(self, grad_accum_steps: int = 1):
         if self.detach_state is not None and self._cached_loradict_for_write is not None:

@@ -39,6 +39,60 @@ from utils.myloradict import concat_loradict
 from mydatasets.pretrain_annealing.memory_stream import _encode_turns, _qa_to_messages, filter_by_segments  # noqa: F401
 
 
+def _model_path_from_cfg(cfg):
+    if str(cfg.get("backend", {}).get("name", "v2")) == "shine_v1_qwen3":
+        return str(cfg.v1_backend.model_path)
+    return str(cfg.model.path)
+
+
+def _conversation_loradict(model, loradict):
+    if hasattr(model, "conversation_loradict_from_generated"):
+        return model.conversation_loradict_from_generated(loradict)
+    n_layers = int(model._num_llm_layers)
+    return {l: concat_loradict([loradict[l], model.metalora[l]]) for l in range(n_layers)}
+
+
+def _prepare_forward_loradict(model, loradict, ds_l, ds_w):
+    if hasattr(model, "prepare_generation_loradict"):
+        return model.prepare_generation_loradict(loradict, ds_l, ds_w)
+    return loradict
+
+
+def _llm_model_forward(model, *, input_ids, loradict, ds_l, ds_w, use_cache, past_key_values=None):
+    forward_loradict = _prepare_forward_loradict(model, loradict, ds_l, ds_w)
+    kwargs = {
+        "input_ids": input_ids,
+        "attention_mask": None,
+        "loradict": forward_loradict,
+        "use_cache": use_cache,
+    }
+    if past_key_values is not None:
+        kwargs["past_key_values"] = past_key_values
+    if not hasattr(model, "prepare_generation_loradict"):
+        kwargs["nograd_loradict"] = ds_l
+        kwargs["nograd_wdict"] = ds_w
+    return model.llm.model(**kwargs)
+
+
+def _write_and_maybe_reset(model, loradict):
+    if getattr(model, "detach_state", None) is None or loradict is None:
+        return
+    sq_norm = None
+    precomputed = None
+    if hasattr(model.detach_state, "compute_regu_loss"):
+        sq_norm, _, precomputed = model.detach_state.compute_regu_loss(
+            loradict,
+            mb_idx=0,
+            num_mb=1,
+            grad_accum_steps=1,
+        )
+    model._write_detach_state(loradict, mb_idx=0, precomputed_wdict=precomputed)
+    if sq_norm is not None:
+        model.detach_state.set_last_sq_norms([float(sq_norm)])
+        model.detach_state.update_steps(0)
+        model.detach_state.maybe_reset_slice(0)
+
+
 def _load_jsonl(path):
     with open(path, "r", encoding="utf-8") as f:
         return [json.loads(l) for l in f if l.strip()]
@@ -80,10 +134,9 @@ def _gen_eval_core(model, cfg, my_device, *, n_hist, max_new, seg_sample, use_kv
     Main-process only; caller handles is_main_process gating, detach_state
     isolation (eval_context), barrier, and model.train() restore.
     """
-    n_layers = int(model._num_llm_layers)
     num_mem = int(getattr(model, "_num_mem_token", 0))
     ctx_len_cap = int(cfg.data.get("context_seq_length", 2048))
-    tok = create_tokenizer(cfg.model.path, tokenizer_cfg=cfg.get("tokenizer", None),
+    tok = create_tokenizer(_model_path_from_cfg(cfg), tokenizer_cfg=cfg.get("tokenizer", None),
                            chat_template=NOTHINKING_CHAT_TEMPLATE)
     pad_id = tok.pad_token_id or 0
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
@@ -118,9 +171,10 @@ def _gen_eval_core(model, cfg, my_device, *, n_hist, max_new, seg_sample, use_kv
             pkv = None
             cur = full
             for _ in range(max_new):
-                out = model.llm.model(input_ids=cur, attention_mask=None, loradict=new_loradict,
-                                      nograd_loradict=ds_l, nograd_wdict=ds_w,
-                                      use_cache=True, past_key_values=pkv)
+                out = _llm_model_forward(
+                    model, input_ids=cur, loradict=new_loradict, ds_l=ds_l, ds_w=ds_w,
+                    use_cache=True, past_key_values=pkv,
+                )
                 pkv = out.past_key_values
                 nxt = int(model.llm.lm_head(out.last_hidden_state[:, -1, :]).argmax(-1).item())
                 if nxt == im_end or nxt == eos_id:
@@ -134,8 +188,10 @@ def _gen_eval_core(model, cfg, my_device, *, n_hist, max_new, seg_sample, use_kv
             gen = []
             cur = full
             for _ in range(max_new):
-                out = model.llm.model(input_ids=cur, attention_mask=None, loradict=new_loradict,
-                                      nograd_loradict=ds_l, nograd_wdict=ds_w, use_cache=False)
+                out = _llm_model_forward(
+                    model, input_ids=cur, loradict=new_loradict, ds_l=ds_l, ds_w=ds_w,
+                    use_cache=False,
+                )
                 nxt = int(model.llm.lm_head(out.last_hidden_state[:, -1, :]).argmax(-1).item())
                 if nxt == im_end or nxt == eos_id:
                     break
@@ -174,13 +230,12 @@ def _gen_eval_core(model, cfg, my_device, *, n_hist, max_new, seg_sample, use_kv
                 mem = model.compute_memory_states(ctx_ids, None, ctx_lens,
                                                   nograd_loradict=ds_l, nograd_wdict=ds_w)
                 loradict = model.generate_loradict(mem)
-                new_loradict = {l: concat_loradict([loradict[l], model.metalora[l]]) for l in range(n_layers)}
+                new_loradict = _conversation_loradict(model, loradict)
                 qas = list(seg.get("qa", [])) if i in sample_idx else []
                 if include_final and i == K - 1 and final_qa:
                     qas = qas + final_qa
                 _score(qas, new_loradict, ds_l, ds_w)
-                if model.detach_state is not None:
-                    model._write_detach_state(loradict, mb_idx=0)
+                _write_and_maybe_reset(model, loradict)
         else:
             # Phase 1: write ALL segments into W (no decode).
             for i, seg in enumerate(segs):
@@ -189,11 +244,12 @@ def _gen_eval_core(model, cfg, my_device, *, n_hist, max_new, seg_sample, use_kv
                 mem = model.compute_memory_states(ctx_ids, None, ctx_lens,
                                                   nograd_loradict=ds_l, nograd_wdict=ds_w)
                 loradict = model.generate_loradict(mem)
-                if model.detach_state is not None:
-                    model._write_detach_state(loradict, mb_idx=0)
+                _write_and_maybe_reset(model, loradict)
             # Phase 2: answer from the FULL accumulated W with metalora ONLY.
             ds_l, ds_w = model._read_detach_state()
-            meta_only = {l: model.metalora[l] for l in range(n_layers)}
+            meta_only = model.conversation_loradict_from_generated(None) if hasattr(model, "conversation_loradict_from_generated") else {
+                l: model.metalora[l] for l in range(int(model._num_llm_layers))
+            }
             for i, seg in enumerate(segs):
                 if i not in sample_idx:
                     continue
@@ -295,7 +351,7 @@ def run_memory_qa_icl(model, cfg, tp_cfg, my_device):
     # Base LLM context budget for ICL (NOT the SHINE per-segment ctx cap).
     max_len = int(os.environ.get("MEMORY_QA_ICL_MAXLEN", "32768"))
 
-    tok = create_tokenizer(cfg.model.path, tokenizer_cfg=cfg.get("tokenizer", None),
+    tok = create_tokenizer(_model_path_from_cfg(cfg), tokenizer_cfg=cfg.get("tokenizer", None),
                            chat_template=NOTHINKING_CHAT_TEMPLATE)
     pad_id = tok.pad_token_id or 0
     im_end = tok.convert_tokens_to_ids("<|im_end|>")
@@ -334,9 +390,10 @@ def run_memory_qa_icl(model, cfg, tp_cfg, my_device):
             pkv = None
             cur = full
             for _ in range(max_new):
-                out = model.llm.model(input_ids=cur, attention_mask=None, loradict=None,
-                                      nograd_loradict=None, nograd_wdict=None,
-                                      use_cache=True, past_key_values=pkv)
+                out = _llm_model_forward(
+                    model, input_ids=cur, loradict=None, ds_l=None, ds_w=None,
+                    use_cache=True, past_key_values=pkv,
+                )
                 pkv = out.past_key_values
                 nxt = int(model.llm.lm_head(out.last_hidden_state[:, -1, :]).argmax(-1).item())
                 if nxt == im_end or nxt == eos_id:
@@ -350,8 +407,10 @@ def run_memory_qa_icl(model, cfg, tp_cfg, my_device):
             gen = []
             cur = full
             for _ in range(max_new):
-                out = model.llm.model(input_ids=cur, attention_mask=None, loradict=None,
-                                      nograd_loradict=None, nograd_wdict=None, use_cache=False)
+                out = _llm_model_forward(
+                    model, input_ids=cur, loradict=None, ds_l=None, ds_w=None,
+                    use_cache=False,
+                )
                 nxt = int(model.llm.lm_head(out.last_hidden_state[:, -1, :]).argmax(-1).item())
                 if nxt == im_end or nxt == eos_id:
                     break
