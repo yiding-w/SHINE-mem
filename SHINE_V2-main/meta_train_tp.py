@@ -1580,6 +1580,7 @@ def tp_main(cfg: DictConfig):
     load_model_only_flag = (
         os.environ.get("MEMORY_QA_GEN", "") == "1"
         or os.environ.get("SQUAD_QA_GEN", "") == "1"
+        or os.environ.get("LOCOMO_SHINE_GEN", "") == "1"
     )
     # warm_start_from is model-only initialization for a new training run.
     # resume_from remains strict resume and requires optimizer/scheduler state.
@@ -1770,6 +1771,14 @@ def tp_main(cfg: DictConfig):
         run_squad_qa_gen(model, cfg, tp_cfg, my_device)
         if is_main_process_per_node():
             logger.info("[SQUAD_QA_GEN] done. Exiting.")
+        cleanup_distributed()
+        os._exit(0)
+
+    if os.environ.get("LOCOMO_SHINE_GEN", "") == "1":
+        from eval_locomo_shine import run_locomo_shine_gen
+        run_locomo_shine_gen(model, cfg, tp_cfg, my_device)
+        if is_main_process_per_node():
+            logger.info("[LOCOMO_SHINE_GEN] done. Exiting.")
         cleanup_distributed()
         os._exit(0)
     # ------------------------------------------------------------------
