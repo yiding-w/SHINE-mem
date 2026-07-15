@@ -92,10 +92,10 @@ def _context_tensor(tokenizer, messages, device, max_tokens: int, num_mem_tokens
     return context, torch.tensor([len(ids)], dtype=torch.long, device=device), len(ids)
 
 
-def _generate_answer(model, tokenizer, device, question: str, loradict, ds_l, ds_w, max_new: int) -> str:
+def _generate_answer(model, tokenizer, device, prompt_messages, loradict, ds_l, ds_w, max_new: int) -> str:
     """Greedy decoding through SHINE's dynamically adapted backbone."""
     prompt_ids = tokenizer.apply_chat_template(
-        [{"role": "user", "content": question}],
+        prompt_messages,
         add_generation_prompt=True,
         tokenize=True,
         return_dict=False,
@@ -141,6 +141,8 @@ def _evaluate_sample(
     mode: str,
     granularity: str,
     max_context_tokens: int,
+    decoder_context_modes: list[str],
+    decoder_context_max_tokens: int,
     max_new_tokens: int,
     seed: int,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -187,17 +189,50 @@ def _evaluate_sample(
             question_index=question_index,
             seed=seed,
         )
-        raw_prediction = _generate_answer(
-            model,
-            tokenizer,
-            device,
-            protocol.build_official_question_prompt(spec),
-            answer_lora,
-            ds_l,
-            ds_w,
-            max_new_tokens,
-        )
-        prediction = protocol.canonicalize_locomo_prediction(raw_prediction, spec)
+        question_prompt = protocol.build_official_question_prompt(spec)
+        conditions = {}
+        for decoder_context_mode in decoder_context_modes:
+            if decoder_context_mode == "memory_only":
+                prompt_messages = [{"role": "user", "content": question_prompt}]
+            else:
+                # This is delta-Mem's official_prompt construction: the decoder
+                # receives the raw (window-truncated) conversation plus question.
+                prompt_messages = protocol.build_official_full_history_messages(
+                    sample,
+                    tokenizer,
+                    spec,
+                    max_context_tokens=decoder_context_max_tokens,
+                )
+            raw_prediction = _generate_answer(
+                model,
+                tokenizer,
+                device,
+                prompt_messages,
+                answer_lora,
+                ds_l,
+                ds_w,
+                max_new_tokens,
+            )
+            prediction = protocol.canonicalize_locomo_prediction(raw_prediction, spec)
+            condition_name = f"shine_{mode}_{decoder_context_mode}"
+            conditions[condition_name] = {
+                "prediction": prediction,
+                "raw_prediction": raw_prediction,
+                "score": round(protocol.score_locomo_prediction(qa, prediction), 4),
+                "turn_stats": {
+                    "mode": mode,
+                    "decoder_context_mode": decoder_context_mode,
+                    "segment_granularity": granularity,
+                    "num_contexts": num_contexts,
+                    "context_max_tokens": max_context_tokens,
+                    "decoder_context_max_tokens": (
+                        decoder_context_max_tokens
+                        if decoder_context_mode == "official_prompt"
+                        else None
+                    ),
+                    "full_context_tokens": context_len if mode == "full" else None,
+                },
+            }
         records.append(
             {
                 "question": qa["question"],
@@ -205,20 +240,7 @@ def _evaluate_sample(
                 "adversarial_answer": qa.get("adversarial_answer"),
                 "evidence": list(qa.get("evidence", [])),
                 "category": int(qa["category"]),
-                "conditions": {
-                    f"shine_{mode}": {
-                        "prediction": prediction,
-                        "raw_prediction": raw_prediction,
-                        "score": round(protocol.score_locomo_prediction(qa, prediction), 4),
-                        "turn_stats": {
-                            "mode": mode,
-                            "segment_granularity": granularity,
-                            "num_contexts": num_contexts,
-                            "context_max_tokens": max_context_tokens,
-                            "full_context_tokens": context_len if mode == "full" else None,
-                        },
-                    }
-                },
+                "conditions": conditions,
             }
         )
     return records, {"num_contexts": num_contexts}
@@ -242,6 +264,17 @@ def run_locomo_shine_gen(model, cfg, tp_cfg, my_device) -> None:
     granularity = os.environ.get("LOCOMO_SEGMENT_GRANULARITY", "session").strip().lower()
     if granularity not in {"session", "turn"}:
         raise ValueError("LOCOMO_SEGMENT_GRANULARITY must be 'session' or 'turn'.")
+    raw_decoder_context_mode = os.environ.get(
+        "LOCOMO_DECODER_CONTEXT", "memory_only"
+    ).strip().lower()
+    if raw_decoder_context_mode == "both":
+        decoder_context_modes = ["memory_only", "official_prompt"]
+    elif raw_decoder_context_mode in {"memory_only", "official_prompt"}:
+        decoder_context_modes = [raw_decoder_context_mode]
+    else:
+        raise ValueError(
+            "LOCOMO_DECODER_CONTEXT must be 'memory_only', 'official_prompt', or 'both'."
+        )
     detach_cfg = cfg.get("detach_state", None) or {}
     detach_type = str(detach_cfg.get("type", "empty"))
     if mode == "sequential" and (
@@ -262,6 +295,9 @@ def run_locomo_shine_gen(model, cfg, tp_cfg, my_device) -> None:
         raise FileNotFoundError(f"LoCoMo data file not found: {data_file}")
     max_context_tokens = int(
         os.environ.get("LOCOMO_CONTEXT_MAX_TOKENS", str(cfg.data.get("context_seq_length", 2048)))
+    )
+    decoder_context_max_tokens = int(
+        os.environ.get("LOCOMO_DECODER_CONTEXT_MAX_TOKENS", "32768")
     )
     max_new_tokens = int(os.environ.get("LOCOMO_MAX_NEW_TOKENS", "50"))
     seed = int(os.environ.get("LOCOMO_SEED", "42"))
@@ -285,7 +321,7 @@ def run_locomo_shine_gen(model, cfg, tp_cfg, my_device) -> None:
         tokenizer_cfg=cfg.get("tokenizer", None),
         chat_template=NOTHINKING_CHAT_TEMPLATE,
     )
-    condition_name = f"shine_{mode}"
+    condition_names = [f"shine_{mode}_{context_mode}" for context_mode in decoder_context_modes]
     records = []
     context_manager = (
         model.detach_state.eval_context()
@@ -306,6 +342,8 @@ def run_locomo_shine_gen(model, cfg, tp_cfg, my_device) -> None:
                     mode=mode,
                     granularity=granularity,
                     max_context_tokens=max_context_tokens,
+                    decoder_context_modes=decoder_context_modes,
+                    decoder_context_max_tokens=decoder_context_max_tokens,
                     max_new_tokens=max_new_tokens,
                     seed=seed,
                 )
@@ -340,19 +378,21 @@ def run_locomo_shine_gen(model, cfg, tp_cfg, my_device) -> None:
             "mode": mode,
             "segment_granularity": granularity,
             "context_max_tokens": max_context_tokens,
+            "decoder_context_modes": decoder_context_modes,
+            "decoder_context_max_tokens": decoder_context_max_tokens,
             "max_new_tokens": max_new_tokens,
             "records": records,
             "summary": protocol.summarize_locomo_records(
-                records, condition_names=[condition_name]
+                records, condition_names=condition_names
             ),
         },
     }
     output_json.parent.mkdir(parents=True, exist_ok=True)
     output_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    summary = payload["shine"]["summary"][condition_name]
+    summary = payload["shine"]["summary"]
     print(
-        f"\n[locomo_shine] mode={mode} score={summary['overall_score']:.4f} "
-        f"questions={summary['num_questions']} -> {output_json}",
+        f"\n[locomo_shine] mode={mode} decoder_context={','.join(decoder_context_modes)} "
+        f"summary={json.dumps(summary)} -> {output_json}",
         flush=True,
     )
     barrier()
