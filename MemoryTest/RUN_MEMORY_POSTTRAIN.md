@@ -259,6 +259,125 @@ python -m MemoryTest.evaluation.eval_shine_memory \
 
 ## 6. Post-Train SHINE
 
+This entry point now trains recurrent SHINE. Each optimizer step processes several context chunks. The backbone stores
+only the current memory tokens' per-layer K/V and carries those tensors into the next chunk. Context queries are blocked
+from attending to old memory; current memory queries can attend to both the current context and the old memory cache.
+Memory slots use fixed RoPE positions starting at `context_max_length`.
+
+By default the original Qwen weights and zero memory-token embeddings stay frozen, while both the loaded Metalora and
+the SHINE hypernetwork are trained. `--recurrent-steps 4` uses full four-chunk BPTT; set
+`--detach-recurrent-memory-every 1` only for a read-only-cache ablation that does not train earlier writers from later
+losses. Per-layer hidden/K/V RMS statistics and current/previous norm ratios are written to the JSONL training log.
+
+### Training data format
+
+The canonical file is a `shine_recurrent_v1` JSON object. Data declares only text, order, and QA targets; objective,
+loss weights, reconstruction scope, and source sampling probabilities remain command-line choices.
+
+```json
+{
+  "schema": "shine_recurrent_v1",
+  "streams": [
+    {
+      "stream_id": "alice",
+      "turns": [
+        {
+          "turn_id": "alice_01",
+          "text": "Alice moved to Paris.",
+          "qa": [{"question": "Where does Alice live?", "answer": "Paris"}]
+        },
+        {
+          "turn_id": "alice_02",
+          "text": "Alice started working at Google.",
+          "qa": [{"question": "Where does Alice work?", "answer": "Google"}]
+        }
+      ]
+    }
+  ],
+  "facts": [
+    {
+      "id": "semantic_0001",
+      "text": "Xander Hayes works as a gardener.",
+      "qa": [{"question": "What is Xander Hayes's job?", "answer": "gardener"}]
+    }
+  ]
+}
+```
+
+Turns retain array order and are never shuffled. For streams longer than `--recurrent-steps`, use
+`--stream-window-policy contiguous` for an order-preserving random window, `prefix` for the beginning, or `full` for
+the complete stream.
+
+The legacy top-level `question` / `answer` pair is accepted and normalized into the new `qa` list. Only `id` and
+`text` are needed for reconstruction-only pretraining with `--context-format natural`. `person`, `attribute` (or
+`relation`), and top-level `answer` are additionally needed for structured fact contexts.
+
+Existing top-level flat fact arrays remain valid and become a fact pool. The temporary flat `stream_id`/`turn` format
+is also accepted. `--ordered-stream-probability 0.7` selects a real stream for 70% of optimizer steps and a synthetic
+fact stream for the remaining 30%.
+
+A directly editable example is available at `MemoryTest/config/recurrent_data.example.json`.
+
+QA and reconstruction accumulation are training settings, not fields in the data. Use `--qa-scope current|cumulative`
+and `--reconstruction-scope current|cumulative` to control them independently.
+
+### Per-turn objectives
+
+Supervise QA after every recurrent update:
+
+```bash
+python -m MemoryTest.training.posttrain_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --train-file /path/to/qa_facts.json \
+  --val-file MemoryTest/json_data/splits/semantic_val.json \
+  --output-dir MemoryTest/checkpoints/recurrent_qa \
+  --recurrent-steps 4 \
+  --turn-supervision every \
+  --turn-objective qa \
+  --qa-per-context 4 \
+  --use-gradient-checkpoint
+```
+
+Run official-style `<RECON>` pretraining after every update. `current` repeats only the latest evidence chunk;
+`cumulative` asks the current memory to repeat everything observed so far.
+
+```bash
+python -m MemoryTest.training.posttrain_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --train-file /path/to/pretrain_texts.json \
+  --val-file MemoryTest/json_data/splits/semantic_val.json \
+  --output-dir MemoryTest/checkpoints/recurrent_recon \
+  --context-format natural \
+  --recurrent-steps 4 \
+  --turn-supervision every \
+  --turn-objective reconstruction \
+  --reconstruction-scope current \
+  --use-gradient-checkpoint
+```
+
+Alternate QA and reconstruction independently across turns:
+
+```bash
+python -m MemoryTest.training.posttrain_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /path/to/original_shine_checkpoint \
+  --train-file /path/to/qa_facts.json \
+  --val-file MemoryTest/json_data/splits/semantic_val.json \
+  --output-dir MemoryTest/checkpoints/recurrent_mixed \
+  --recurrent-steps 4 \
+  --turn-supervision every \
+  --turn-objective mixed \
+  --qa-turn-prob 0.5 \
+  --reconstruction-scope cumulative \
+  --use-gradient-checkpoint
+```
+
+Use `--turn-objective both --recon-weight 0.2` to apply QA and reconstruction in every turn. With
+`--turn-supervision final` (the compatibility default), intermediate chunks update only recurrent K/V and only the
+final turn performs hypernetwork readout and supervised loss.
+
 ```bash
 python -m MemoryTest.training.posttrain_shine_memory \
   --config MemoryTest/config/case_test.yaml \
@@ -268,6 +387,7 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --output-dir MemoryTest/checkpoints/shine_memory_posttrain \
   --fact-counts 1 2 4 8 12 20 \
   --qa-per-context 4 \
+  --recurrent-steps 4 \
   --torch-dtype bf16 \
   --use-gradient-checkpoint \
   --use-contrastive \
@@ -281,6 +401,7 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --output-dir MemoryTest/checkpoints/shine_memory_posttrain \
   --fact-counts 1 2 4 8 12 20 \
   --qa-per-context 4 \
+  --recurrent-steps 4 \
   --max-steps 2000 \
   --learning-rate 1e-5 \
   --eval-every 500 \
@@ -299,6 +420,7 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --output-dir MemoryTest/checkpoints/shine_memory_posttrain2 \
   --fact-counts 1 2 4 8 \
   --qa-per-context 4 \
+  --recurrent-steps 2 \
   --max-steps 2000 \
   --learning-rate 2e-6 \
   --eval-every 500 \
@@ -306,16 +428,15 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --context-max-length 1024 \
   --conversation-max-length 512 \
   --torch-dtype bf16 \
-  --use-gradient-checkpoint \
-  --freeze-metalora \
-  --freeze-mem-tokens
+  --use-gradient-checkpoint
 ```
 
 If this fits, add capacity and auxiliary losses back in order: first `--fact-counts 1 2 4 8 12 20`, then `--qa-per-context 2`, then `--use-contrastive`, and finally `--use-reconstruction`.
 
 `--use-gradient-checkpoint` is applied to the context-to-LoRA generation path. The supervised answer/contrastive/reconstruction forward uses the generated LoRA and keeps checkpointing off by default, because per-layer checkpointing can backprop through the same generated LoRA graph multiple times. Only enable `--use-answer-gradient-checkpoint` for debugging experiments.
 
-If loss becomes NaN, start more conservatively by freezing the loaded Meta-LoRA and clamping generated LoRA values:
+If loss becomes NaN, first reduce both learning rates and clamp generated LoRA values while continuing to train both
+the hypernetwork and Metalora:
 
 ```bash
 python -m MemoryTest.training.posttrain_shine_memory \
@@ -329,13 +450,13 @@ python -m MemoryTest.training.posttrain_shine_memory \
   --qa-per-context 2 \
   --max-steps 2000 \
   --learning-rate 2e-6 \
+  --metalora-learning-rate 1e-6 \
   --grad-clip-norm 0.5 \
   --answer-max-length 256 \
   --context-max-length 1024 \
   --conversation-max-length 512 \
   --torch-dtype bf16 \
   --use-gradient-checkpoint \
-  --freeze-metalora \
   --generated-lora-clamp 5.0
 ```
 

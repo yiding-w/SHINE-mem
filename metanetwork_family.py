@@ -3,7 +3,25 @@ import torch.nn.functional as F
 import torch.nn as nn
 import weakref
 import os
+from dataclasses import dataclass
+from typing import Optional
 from utils.myddp import is_main_process, barrier
+
+
+@dataclass
+class RecurrentMemoryState:
+    """Per-layer, RoPE-applied memory K/V carried between context chunks."""
+
+    key_values: tuple[tuple[torch.Tensor, torch.Tensor], ...]
+    attention_mask: torch.Tensor
+    norms: Optional[dict[str, torch.Tensor]] = None
+
+    def detach(self) -> "RecurrentMemoryState":
+        return RecurrentMemoryState(
+            key_values=tuple((key.detach(), value.detach()) for key, value in self.key_values),
+            attention_mask=self.attention_mask.detach(),
+            norms=self.norms,
+        )
 
 def generate_couple_mask(idx_range, couple_hidden_size, couple_num_tokens):
     mask = torch.ones((couple_num_tokens, couple_num_tokens), dtype=torch.bool)
@@ -161,15 +179,71 @@ class Metanetwork(nn.Module):
             outputs = self.metamodel(input_ids=input_ids, attention_mask=input_attention_mask, labels=labels, ignore_mem_token=True, use_gradient_checkpoint=use_gradient_checkpoint, **kwargs)
         return outputs
     
-    def generate_lora_dict(self, evidence_ids, evidence_attention_mask, metalora, use_gradient_checkpoint = False, return_plain = False) -> dict:
-        outputs = self.metamodel(input_ids=evidence_ids, attention_mask=evidence_attention_mask, loradict=metalora, use_gradient_checkpoint=use_gradient_checkpoint)
+    def generate_lora_dict(
+        self,
+        evidence_ids,
+        evidence_attention_mask,
+        metalora,
+        use_gradient_checkpoint=False,
+        return_plain=False,
+        recurrent_memory: Optional[RecurrentMemoryState] = None,
+        return_recurrent_state=False,
+        memory_position_offset: Optional[int] = None,
+    ) -> dict:
+        memory_states, recurrent_state = self.encode_context_memory(
+            evidence_ids,
+            evidence_attention_mask,
+            metalora,
+            use_gradient_checkpoint=use_gradient_checkpoint,
+            recurrent_memory=recurrent_memory,
+            memory_position_offset=memory_position_offset,
+        )
+        loradict, plain_output = self.readout_memory_lora(memory_states)
+        result = [loradict]
+        if return_plain:
+            result.append(plain_output)
+        if return_recurrent_state:
+            result.append(recurrent_state)
+        return result[0] if len(result) == 1 else tuple(result)
+
+    def encode_context_memory(
+        self,
+        evidence_ids,
+        evidence_attention_mask,
+        metalora,
+        use_gradient_checkpoint=False,
+        recurrent_memory: Optional[RecurrentMemoryState] = None,
+        memory_position_offset: Optional[int] = None,
+    ) -> tuple[torch.Tensor, RecurrentMemoryState]:
+        outputs = self.metamodel(
+            input_ids=evidence_ids,
+            attention_mask=evidence_attention_mask,
+            loradict=metalora,
+            use_gradient_checkpoint=use_gradient_checkpoint,
+            previous_memory_key_values=recurrent_memory.key_values if recurrent_memory is not None else None,
+            previous_memory_attention_mask=recurrent_memory.attention_mask if recurrent_memory is not None else None,
+            memory_position_offset=memory_position_offset,
+        )
         memory_states = outputs.memory_states
         target_dtype = next(self.metanetwork.parameters()).dtype
         if memory_states.dtype != target_dtype:
             memory_states = memory_states.to(dtype=target_dtype)
+        memory_length = outputs.memory_key_values[0][0].shape[-2]
+        recurrent_state = RecurrentMemoryState(
+            key_values=outputs.memory_key_values,
+            attention_mask=torch.ones(
+                (evidence_ids.shape[0], memory_length),
+                dtype=torch.bool,
+                device=evidence_ids.device,
+            ),
+            norms=outputs.memory_norms,
+        )
+        return memory_states, recurrent_state
+
+    def readout_memory_lora(self, memory_states: torch.Tensor) -> tuple[dict, torch.Tensor]:
         plain_output = self.metanetwork(memory_states)  # (batch_size, output_dim)
         loradict = self.metamodel.generate_lora_dict(self.lora_r, scale=self.scale, plain_tensor=plain_output)
-        return loradict if not return_plain else (loradict, plain_output)
+        return loradict, plain_output
     
     
     

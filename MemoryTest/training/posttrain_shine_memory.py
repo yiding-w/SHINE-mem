@@ -11,21 +11,27 @@ from pathlib import Path
 
 import torch
 
-from MemoryTest.prepare_data.prompt_templates import build_context, format_answer, question_prompt, reconstruction_prompt
+from MemoryTest.prepare_data.prompt_templates import format_answer, question_prompt, reconstruction_prompt
 from MemoryTest.evaluation.metrics import make_eval_row, summarize_examples
 from MemoryTest.training.lora_sft_utils import load_runtime_args
+from MemoryTest.training.recurrent_data import (
+    accumulated_qa,
+    load_recurrent_dataset,
+    sample_training_stream,
+    sample_turn_qa,
+)
 from MemoryTest.training.shine_train_utils import (
     append_jsonl,
     cast_floating_tensors,
     clamp_lora_tensors,
     compute_combined_lora_loss,
     lora_tensor_stats,
-    read_json,
+    recurrent_memory_norm_stats,
     resolve_path,
-    sample_context,
     save_posttrain_checkpoint,
     set_posttrain_requires_grad,
     trainable_generate_context_lora,
+    trainable_update_recurrent_memory,
 )
 
 
@@ -48,6 +54,63 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fact-counts", type=int, nargs="+", default=[1, 2, 4, 8, 12, 20])
     parser.add_argument("--qa-per-context", type=int, default=4)
     parser.add_argument("--context-format", choices=["natural", "structured", "mixed"], default="mixed")
+    parser.add_argument("--recurrent-steps", type=int, default=4, help="Number of context chunks in one memory stream.")
+    parser.add_argument(
+        "--ordered-stream-probability",
+        "--ordered-stream-prob",
+        dest="ordered_stream_probability",
+        type=float,
+        default=0.5,
+        help="When a file contains both streams and facts, probability of sampling an ordered stream.",
+    )
+    parser.add_argument(
+        "--turn-supervision",
+        choices=["final", "every"],
+        default="final",
+        help="Apply readout loss only after the final chunk or after every recurrent chunk.",
+    )
+    parser.add_argument(
+        "--turn-objective",
+        choices=["qa", "reconstruction", "both", "mixed"],
+        default="qa",
+        help="Per-turn readout objective. mixed samples QA or reconstruction independently each turn.",
+    )
+    parser.add_argument(
+        "--qa-turn-prob",
+        type=float,
+        default=0.5,
+        help="Probability of choosing QA when --turn-objective mixed.",
+    )
+    parser.add_argument(
+        "--reconstruction-scope",
+        choices=["current", "cumulative"],
+        default="current",
+        help="Whether <RECON> repeats the current chunk or all chunks observed so far.",
+    )
+    parser.add_argument(
+        "--qa-scope",
+        choices=["current", "cumulative"],
+        default="cumulative",
+        help="Sample QA attached only to the current turn or to all turns observed so far.",
+    )
+    parser.add_argument(
+        "--detach-recurrent-memory-every",
+        type=int,
+        default=0,
+        help="Detach recurrent K/V every N chunks; 0 keeps full truncated-BPTT across the stream.",
+    )
+    parser.add_argument(
+        "--memory-position-offset",
+        type=int,
+        default=None,
+        help="Fixed RoPE position of memory slot 0; defaults to context_max_length.",
+    )
+    parser.add_argument(
+        "--stream-window-policy",
+        choices=["contiguous", "prefix", "full"],
+        default="contiguous",
+        help="How to select turns when an ordered stream is longer than recurrent_steps.",
+    )
     parser.add_argument("--max-steps", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--metalora-learning-rate", type=float, default=None)
@@ -73,45 +136,54 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recon-weight", type=float, default=0.2)
     parser.add_argument("--generated-lora-clamp", type=float, default=10.0)
     parser.add_argument("--freeze-metalora", action="store_true")
-    parser.add_argument("--freeze-mem-tokens", action="store_true")
+    parser.add_argument(
+        "--train-mem-tokens",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Also train the zero memory-token embeddings; disabled by default.",
+    )
+    parser.add_argument("--freeze-mem-tokens", action="store_false", dest="train_mem_tokens", help=argparse.SUPPRESS)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--gpu-id", type=int, default=None)
     return parser.parse_args()
 
 
-def usable_fact_counts(requested_counts: list[int], rows: list[dict], split_name: str) -> list[int]:
-    usable = [count for count in requested_counts if count <= len(rows)]
-    dropped = [count for count in requested_counts if count > len(rows)]
-    if dropped:
-        LOGGER.warning(
-            "Dropping %s fact-counts %s because %s has only %s rows.",
-            split_name,
-            dropped,
-            split_name,
-            len(rows),
-        )
-    if not usable:
-        raise ValueError(f"No usable {split_name} fact-counts for {len(rows)} rows. Requested: {requested_counts}")
-    return usable
+def resolve_turn_objective(args: argparse.Namespace, rng: random.Random) -> str:
+    objective = args.turn_objective
+    if objective == "mixed":
+        objective = "qa" if rng.random() < args.qa_turn_prob else "reconstruction"
+    # Backward compatibility with the old flag, which meant QA + reconstruction.
+    if args.use_reconstruction and objective == "qa":
+        objective = "both"
+    return objective
 
 
-def build_training_records(context_rows: list[dict], qa_rows: list[dict], use_contrastive: bool, use_reconstruction: bool) -> list[dict]:
+def build_training_records(
+    qa_candidates: list[dict],
+    qa_rows: list[dict],
+    use_contrastive: bool,
+    objective: str,
+    reconstruction_text: str,
+) -> list[dict]:
     records = []
-    for row in qa_rows:
-        records.append(
-            {
-                "category": "answer",
-                "prompt": question_prompt(row["question"]),
-                "answer": " " + format_answer(row["answer"]),
-            }
-        )
-    if use_contrastive:
+    include_qa = objective in {"qa", "both"}
+    include_reconstruction = objective in {"reconstruction", "both"}
+    if include_qa:
+        for row in qa_rows:
+            records.append(
+                {
+                    "category": "answer",
+                    "prompt": question_prompt(row["question"]),
+                    "answer": " " + format_answer(row["answer"]),
+                }
+            )
+    if include_qa and use_contrastive:
         letters = list(string.ascii_uppercase)
         for qa in qa_rows:
             candidates = []
             seen = set()
-            for row in [qa] + context_rows:
+            for row in [qa] + qa_candidates:
                 answer = str(row["answer"])
                 if answer.casefold() not in seen:
                     candidates.append(answer)
@@ -132,12 +204,13 @@ def build_training_records(context_rows: list[dict], qa_rows: list[dict], use_co
                     "answer": " " + letters[gold_idx],
                 }
             )
-    if use_reconstruction:
+    if include_reconstruction:
         records.append(
             {
                 "category": "reconstruction",
                 "prompt": reconstruction_prompt(),
-                "answer": "\n" + build_context(context_rows, context_format="structured"),
+                # Official SHINE pretraining reconstructs evidence text after <RECON>.
+                "answer": "\n" + reconstruction_text,
             }
         )
     return records
@@ -184,7 +257,7 @@ def load_shine_for_training(args: argparse.Namespace):
         metanetwork,
         metalora,
         train_metalora=not args.freeze_metalora,
-        train_mem_tokens=not args.freeze_mem_tokens,
+        train_mem_tokens=args.train_mem_tokens,
     )
     return runtime_args, cfg, device, metanetwork, metalora, tokenizer, trainable
 
@@ -317,25 +390,56 @@ def generate_answer(metanetwork, tokenizer, lora_dict, question: str, device, ma
     return answer, raw
 
 
-def evaluate_current(metanetwork, metalora, tokenizer, cfg, rows, args, runtime_args, device, rng) -> dict:
+def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_args, device, rng) -> dict:
     metanetwork.eval()
     eval_rows = []
-    requested_counts = args.eval_fact_counts if args.eval_fact_counts is not None else args.fact_counts
-    eval_fact_counts = usable_fact_counts(requested_counts, rows, "val")
+    eval_fact_counts = args.eval_fact_counts if args.eval_fact_counts is not None else args.fact_counts
     progress = tqdm(
         range(args.eval_trials),
         desc="posttrain val",
         dynamic_ncols=True,
         leave=False,
     ) if tqdm is not None else range(args.eval_trials)
+    memory_position_offset = args.memory_position_offset or cfg.test.context_max_length
     with torch.no_grad():
         for trial in progress:
-            context_rows, qa_rows = sample_context(rows, eval_fact_counts, args.qa_per_context, rng)
-            context = build_context(context_rows, context_format=args.context_format)
-            from MemoryTest.case_test import generate_context_lora
-
-            lora_dict = generate_context_lora(context, metanetwork, tokenizer, metalora, cfg, device)
+            stream = sample_training_stream(
+                data,
+                recurrent_steps=args.recurrent_steps,
+                fact_counts=eval_fact_counts,
+                context_format=args.context_format,
+                ordered_stream_probability=args.ordered_stream_probability,
+                window_policy=args.stream_window_policy,
+                rng=rng,
+            )
+            recurrent_memory = None
+            for turn_index, turn in enumerate(stream.turns):
+                if turn_index + 1 == len(stream.turns):
+                    lora_dict, recurrent_memory = trainable_generate_context_lora(
+                        turn.text,
+                        metanetwork,
+                        tokenizer,
+                        metalora,
+                        cfg,
+                        device,
+                        recurrent_memory=recurrent_memory,
+                        return_recurrent_state=True,
+                        memory_position_offset=memory_position_offset,
+                    )
+                else:
+                    recurrent_memory = trainable_update_recurrent_memory(
+                        turn.text,
+                        metanetwork,
+                        tokenizer,
+                        metalora,
+                        cfg,
+                        device,
+                        recurrent_memory=recurrent_memory,
+                        memory_position_offset=memory_position_offset,
+                    )
             lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
+            qa_source_turns = stream.turns[-1:] if args.qa_scope == "current" else stream.turns
+            qa_rows = sample_turn_qa(qa_source_turns, args.qa_per_context, rng)
             for fact in qa_rows:
                 answer, raw = generate_answer(
                     metanetwork,
@@ -357,15 +461,32 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, rows, args, runtime_
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    if not 0.0 <= args.qa_turn_prob <= 1.0:
+        raise ValueError("--qa-turn-prob must be between 0 and 1")
+    if not 0.0 <= args.ordered_stream_probability <= 1.0:
+        raise ValueError("--ordered-stream-probability must be between 0 and 1")
     if not args.train_file:
         args.train_file = default_train_file()
-    train_rows = read_json(args.train_file)
-    val_rows = read_json(args.val_file)
+    train_data = load_recurrent_dataset(resolve_path(args.train_file))
+    val_data = load_recurrent_dataset(resolve_path(args.val_file))
     output_dir = resolve_path(args.output_dir)
     log_path = output_dir / "shine_posttrain_train_log.jsonl"
     rng = random.Random(args.seed)
 
     runtime_args, cfg, device, metanetwork, metalora, tokenizer, trainable = load_shine_for_training(args)
+    memory_position_offset = args.memory_position_offset or cfg.test.context_max_length
+    if memory_position_offset < cfg.test.context_max_length:
+        raise ValueError(
+            f"memory_position_offset ({memory_position_offset}) must be >= padded context length "
+            f"({cfg.test.context_max_length})"
+        )
+    LOGGER.info(
+        "Recurrent SHINE: steps=%s fixed_memory_position_offset=%s detach_every=%s",
+        args.recurrent_steps,
+        memory_position_offset,
+        args.detach_recurrent_memory_every,
+    )
+    LOGGER.info("Training hypernetwork=%s Metalora=%s", bool(trainable["metanetwork"]), bool(trainable["metalora"]))
     optimizer = build_optimizer(trainable, args)
     best_val_acc = -1.0
 
@@ -377,53 +498,159 @@ def main() -> None:
     ) if tqdm is not None else range(1, args.max_steps + 1)
 
     for step in train_progress:
-        context_rows, qa_rows = sample_context(train_rows, args.fact_counts, args.qa_per_context, rng)
-        context_format = rng.choice(["natural", "structured"]) if args.context_format == "mixed" else args.context_format
-        context = build_context(context_rows, context_format=context_format)
-        lora_dict = trainable_generate_context_lora(
-            context,
-            metanetwork,
-            tokenizer,
-            metalora,
-            cfg,
-            device,
-            use_gradient_checkpoint=args.use_gradient_checkpoint,
+        stream = sample_training_stream(
+            train_data,
+            recurrent_steps=args.recurrent_steps,
+            fact_counts=args.fact_counts,
+            context_format=args.context_format,
+            ordered_stream_probability=args.ordered_stream_probability,
+            window_policy=args.stream_window_policy,
+            rng=rng,
         )
-        lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
+        recurrent_memory = None
+        observed_turns = []
+        supervised_turns = []
+        memory_norms_by_turn = []
+        for turn_index, current_turn in enumerate(stream.turns):
+            observed_turns.append(current_turn)
+            is_final_turn = turn_index + 1 == len(stream.turns)
+            supervise_turn = args.turn_supervision == "every" or is_final_turn
+            if supervise_turn:
+                lora_dict, recurrent_memory = trainable_generate_context_lora(
+                    current_turn.text,
+                    metanetwork,
+                    tokenizer,
+                    metalora,
+                    cfg,
+                    device,
+                    use_gradient_checkpoint=args.use_gradient_checkpoint,
+                    recurrent_memory=recurrent_memory,
+                    return_recurrent_state=True,
+                    memory_position_offset=memory_position_offset,
+                )
+                lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
+                objective = resolve_turn_objective(args, rng)
+                qa_source_turns = [current_turn] if args.qa_scope == "current" else observed_turns
+                qa_rows = sample_turn_qa(
+                    qa_source_turns,
+                    args.qa_per_context,
+                    rng,
+                )
+                if objective in {"qa", "both"} and not qa_rows:
+                    if args.turn_objective == "mixed":
+                        objective = "reconstruction"
+                    else:
+                        raise ValueError(
+                            f"Stream {stream.stream_id!r} turn {current_turn.turn_id!r} selected "
+                            f"{objective} supervision but no QA targets are available."
+                        )
+                reconstruction_text = (
+                    current_turn.text
+                    if args.reconstruction_scope == "current"
+                    else "\n".join(turn.text for turn in observed_turns)
+                )
+                training_records = build_training_records(
+                    accumulated_qa(qa_source_turns),
+                    qa_rows,
+                    args.use_contrastive,
+                    objective,
+                    reconstruction_text=reconstruction_text,
+                )
+                category_losses = compute_combined_lora_loss(
+                    training_records,
+                    lora_dict,
+                    metanetwork,
+                    tokenizer,
+                    device,
+                    args.answer_max_length,
+                    use_gradient_checkpoint=args.use_answer_gradient_checkpoint,
+                )
+                first_category_loss = next(iter(category_losses.values()))
+                turn_loss = first_category_loss.new_zeros(())
+                if "answer" in category_losses:
+                    turn_loss = turn_loss + category_losses["answer"]
+                if "contrastive" in category_losses:
+                    turn_loss = turn_loss + args.contrastive_weight * category_losses["contrastive"]
+                if "reconstruction" in category_losses:
+                    reconstruction_weight = 1.0 if objective == "reconstruction" else args.recon_weight
+                    turn_loss = turn_loss + reconstruction_weight * category_losses["reconstruction"]
+                supervised_turns.append(
+                    {
+                        "turn": turn_index + 1,
+                        "turn_id": current_turn.turn_id,
+                        "objective": objective,
+                        "qa_rows": qa_rows if objective in {"qa", "both"} else [],
+                        "category_losses": category_losses,
+                        "loss": turn_loss,
+                    }
+                )
+            else:
+                recurrent_memory = trainable_update_recurrent_memory(
+                    current_turn.text,
+                    metanetwork,
+                    tokenizer,
+                    metalora,
+                    cfg,
+                    device,
+                    use_gradient_checkpoint=args.use_gradient_checkpoint,
+                    recurrent_memory=recurrent_memory,
+                    memory_position_offset=memory_position_offset,
+                )
+            memory_norms_by_turn.append(
+                {
+                    "turn": turn_index + 1,
+                    "turn_id": current_turn.turn_id,
+                    "norms": recurrent_memory_norm_stats(recurrent_memory),
+                }
+            )
+            detach_every = args.detach_recurrent_memory_every
+            if detach_every > 0 and (turn_index + 1) % detach_every == 0 and turn_index + 1 < len(stream.turns):
+                recurrent_memory = recurrent_memory.detach()
+
+        loss = torch.stack([turn["loss"] for turn in supervised_turns]).mean()
+
+        def mean_category_loss(category: str):
+            values = [turn["category_losses"][category] for turn in supervised_turns if category in turn["category_losses"]]
+            return torch.stack(values).mean() if values else None
+
+        answer_loss = mean_category_loss("answer")
+        contrastive_loss = mean_category_loss("contrastive")
+        recon_loss = mean_category_loss("reconstruction")
         lora_stats = lora_tensor_stats(lora_dict)
+        memory_norms = memory_norms_by_turn[-1]["norms"]
         if lora_stats["finite"] < 1.0:
             raise FloatingPointError(f"Generated LoRA is non-finite at step {step}.")
-        training_records = build_training_records(context_rows, qa_rows, args.use_contrastive, args.use_reconstruction)
-        category_losses = compute_combined_lora_loss(
-            training_records,
-            lora_dict,
-            metanetwork,
-            tokenizer,
-            device,
-            args.answer_max_length,
-            use_gradient_checkpoint=args.use_answer_gradient_checkpoint,
-        )
-        answer_loss = category_losses["answer"]
-        loss = answer_loss
-        contrastive_loss = category_losses.get("contrastive")
-        recon_loss = category_losses.get("reconstruction")
-        if args.use_contrastive:
-            loss = loss + args.contrastive_weight * contrastive_loss
-        if args.use_reconstruction:
-            loss = loss + args.recon_weight * recon_loss
+
+        turn_loss_log = [
+            {
+                "turn": turn["turn"],
+                "turn_id": turn["turn_id"],
+                "objective": turn["objective"],
+                "loss": float(turn["loss"].detach().cpu()),
+                "answer_loss": float(turn["category_losses"]["answer"].detach().cpu()) if "answer" in turn["category_losses"] else None,
+                "contrastive_loss": float(turn["category_losses"]["contrastive"].detach().cpu()) if "contrastive" in turn["category_losses"] else None,
+                "reconstruction_loss": float(turn["category_losses"]["reconstruction"].detach().cpu()) if "reconstruction" in turn["category_losses"] else None,
+                "qa_fact_ids": [row["id"] for row in turn["qa_rows"]],
+            }
+            for turn in supervised_turns
+        ]
 
         if not torch.isfinite(loss):
             bad_record = {
                 "step": step,
                 "loss": float(loss.detach().cpu()),
-                "answer_loss": float(answer_loss.detach().cpu()),
+                "answer_loss": float(answer_loss.detach().cpu()) if answer_loss is not None else None,
                 "contrastive_loss": float(contrastive_loss.detach().cpu()) if contrastive_loss is not None else None,
                 "reconstruction_loss": float(recon_loss.detach().cpu()) if recon_loss is not None else None,
-                "context_fact_ids": [row["id"] for row in context_rows],
-                "qa_fact_ids": [row["id"] for row in qa_rows],
-                "context_format": context_format,
+                "stream_id": stream.stream_id,
+                "source_kind": stream.source_kind,
+                "turn_ids": [turn.turn_id for turn in stream.turns],
+                "fact_ids_by_turn": [list(turn.fact_ids) for turn in stream.turns],
+                "turn_losses": turn_loss_log,
                 "nonfinite": True,
                 "lora_stats": lora_stats,
+                "memory_norms": memory_norms,
+                "memory_norms_by_turn": memory_norms_by_turn,
             }
             append_jsonl(log_path, bad_record)
             raise FloatingPointError(
@@ -441,20 +668,26 @@ def main() -> None:
         log_record = {
             "step": step,
             "loss": float(loss.detach().cpu()),
-            "answer_loss": float(answer_loss.detach().cpu()),
+            "answer_loss": float(answer_loss.detach().cpu()) if answer_loss is not None else None,
             "contrastive_loss": float(contrastive_loss.detach().cpu()) if contrastive_loss is not None else None,
             "reconstruction_loss": float(recon_loss.detach().cpu()) if recon_loss is not None else None,
-            "context_fact_ids": [row["id"] for row in context_rows],
-            "qa_fact_ids": [row["id"] for row in qa_rows],
-            "context_format": context_format,
+            "stream_id": stream.stream_id,
+            "source_kind": stream.source_kind,
+            "turn_ids": [turn.turn_id for turn in stream.turns],
+            "fact_ids_by_turn": [list(turn.fact_ids) for turn in stream.turns],
+            "turn_losses": turn_loss_log,
             "lora_stats": lora_stats,
+            "memory_norms": memory_norms,
+            "memory_norms_by_turn": memory_norms_by_turn,
         }
         if tqdm is not None:
             postfix = {
                 "loss": f"{log_record['loss']:.4f}",
-                "answer": f"{log_record['answer_loss']:.4f}",
                 "lora_max": f"{lora_stats['max_abs']:.2f}",
+                "mem_v": f"{memory_norms.get('value_rms_mean', 0.0):.3f}",
             }
+            if answer_loss is not None:
+                postfix["answer"] = f"{log_record['answer_loss']:.4f}"
             if contrastive_loss is not None:
                 postfix["choice"] = f"{log_record['contrastive_loss']:.4f}"
             if recon_loss is not None:
@@ -462,10 +695,16 @@ def main() -> None:
             train_progress.set_postfix(postfix)
         if step % 10 == 0 or step == 1:
             append_jsonl(log_path, log_record)
-            LOGGER.info("step=%s loss=%.6f answer=%.6f", step, log_record["loss"], log_record["answer_loss"])
+            LOGGER.info(
+                "step=%s loss=%.6f answer=%s reconstruction=%s",
+                step,
+                log_record["loss"],
+                f"{log_record['answer_loss']:.6f}" if log_record["answer_loss"] is not None else "n/a",
+                f"{log_record['reconstruction_loss']:.6f}" if log_record["reconstruction_loss"] is not None else "n/a",
+            )
 
         if step % args.eval_every == 0 or step == args.max_steps:
-            val_summary = evaluate_current(metanetwork, metalora, tokenizer, cfg, val_rows, args, runtime_args, device, rng)
+            val_summary = evaluate_current(metanetwork, metalora, tokenizer, cfg, val_data, args, runtime_args, device, rng)
             log_record["val"] = val_summary
             append_jsonl(log_path, log_record)
             LOGGER.info("val step=%s accuracy=%.4f", step, val_summary["accuracy"])

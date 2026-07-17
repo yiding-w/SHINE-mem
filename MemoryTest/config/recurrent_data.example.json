@@ -1,0 +1,52 @@
+{
+  "schema": "shine_recurrent_v1",
+  "streams": [
+    {
+      "stream_id": "alice_timeline",
+      "turns": [
+        {
+          "turn_id": "alice_001",
+          "text": "Alice moved to Paris.",
+          "qa": [
+            {
+              "question": "Where does Alice live?",
+              "answer": "Paris"
+            }
+          ]
+        },
+        {
+          "turn_id": "alice_002",
+          "text": "Alice started working at Google.",
+          "qa": [
+            {
+              "question": "Where does Alice work?",
+              "answer": "Google"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "facts": [
+    {
+      "id": "fact_001",
+      "text": "Bob likes coffee.",
+      "qa": [
+        {
+          "question": "What does Bob like?",
+          "answer": "coffee"
+        }
+      ]
+    },
+    {
+      "id": "fact_002",
+      "text": "Carol lives in London.",
+      "qa": [
+        {
+          "question": "Where does Carol live?",
+          "answer": "London"
+        }
+      ]
+    }
+  ]
+}

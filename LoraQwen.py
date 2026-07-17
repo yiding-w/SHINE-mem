@@ -41,6 +41,45 @@ def _loradict_requires_grad(obj) -> bool:
     return False
 
 
+def _tensor_rms(tensor: torch.Tensor) -> torch.Tensor:
+    """Detached scalar RMS used for cheap recurrent-memory monitoring."""
+    return tensor.detach().float().square().mean().sqrt()
+
+
+def _recurrent_memory_causal_mask(
+    attention_mask: Optional[torch.Tensor],
+    inputs_embeds: torch.Tensor,
+    context_length: int,
+    previous_memory_attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Mask [context, current-memory] queries over [previous-memory, context, current-memory] keys.
+
+    Context queries cannot see the previous-memory prefix. Current-memory queries can see
+    every valid previous-memory key and follow the ordinary causal rule for current tokens.
+    """
+    batch_size, query_length = inputs_embeds.shape[:2]
+    device = inputs_embeds.device
+    if attention_mask is None:
+        attention_mask = torch.ones((batch_size, query_length), dtype=torch.bool, device=device)
+    else:
+        attention_mask = attention_mask.to(device=device, dtype=torch.bool)
+    previous_memory_attention_mask = previous_memory_attention_mask.to(device=device, dtype=torch.bool)
+
+    query_index = torch.arange(query_length, device=device)[:, None]
+    key_index = torch.arange(query_length, device=device)[None, :]
+    current_allowed = key_index <= query_index
+    current_allowed = current_allowed[None, :, :] & attention_mask[:, None, :]
+
+    previous_allowed = query_index[:, 0] >= context_length
+    previous_allowed = previous_allowed[None, :, None] & previous_memory_attention_mask[:, None, :]
+    allowed = torch.cat((previous_allowed, current_allowed), dim=-1)
+
+    min_value = torch.finfo(inputs_embeds.dtype).min
+    causal_mask = torch.zeros(allowed.shape, dtype=inputs_embeds.dtype, device=device)
+    causal_mask.masked_fill_(~allowed, min_value)
+    return causal_mask[:, None, :, :]
+
+
 class LoraLinear(nn.Linear):
     def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
         super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
@@ -329,8 +368,10 @@ class LoraQwen3Attention(Qwen3Attention):
         past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         loradict = None,
+        previous_memory_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        capture_memory_tokens: int = 0,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -346,6 +387,16 @@ class LoraQwen3Attention(Qwen3Attention):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        memory_key_states = key_states[:, :, -capture_memory_tokens:, :] if capture_memory_tokens > 0 else None
+        memory_value_states = value_states[:, :, -capture_memory_tokens:, :] if capture_memory_tokens > 0 else None
+
+        if previous_memory_key_value is not None:
+            if past_key_values is not None:
+                raise ValueError("previous_memory_key_value and past_key_values cannot be used together")
+            previous_key_states, previous_value_states = previous_memory_key_value
+            key_states = torch.cat((previous_key_states.to(key_states), key_states), dim=-2)
+            value_states = torch.cat((previous_value_states.to(value_states), value_states), dim=-2)
+
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
@@ -354,6 +405,13 @@ class LoraQwen3Attention(Qwen3Attention):
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        # FlashAttention does not accept the block mask needed to keep context queries
+        # isolated from recurrent memory. SDPA supports the same 4-D additive mask.
+        if previous_memory_key_value is not None and self.config._attn_implementation == "flash_attention_2":
+            try:
+                attention_interface = ALL_ATTENTION_FUNCTIONS["sdpa"]
+            except KeyError:
+                attention_interface = eager_attention_forward
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -372,7 +430,7 @@ class LoraQwen3Attention(Qwen3Attention):
             attn_output = self.o_proj(attn_output)
         else:
             attn_output = self.o_proj(attn_output, loradict["o"])
-        return attn_output, attn_weights
+        return attn_output, attn_weights, memory_key_states, memory_value_states
 
     def lora_params_numel(self, r):
         if not hasattr(self, "lora_params_numel_cache"):
@@ -487,12 +545,14 @@ class LoraQwen3DecoderLayer(Qwen3DecoderLayer):
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         loradict: Optional[dict] = None,
+        previous_memory_key_value: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        capture_memory_tokens: int = 0,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Self Attention
-        hidden_states, _ = self.self_attn(
+        hidden_states, _, memory_key_states, memory_value_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -501,6 +561,8 @@ class LoraQwen3DecoderLayer(Qwen3DecoderLayer):
             cache_position=cache_position,
             position_embeddings=position_embeddings,
             loradict=loradict['attention'] if loradict is not None else None,
+            previous_memory_key_value=previous_memory_key_value,
+            capture_memory_tokens=capture_memory_tokens,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -510,6 +572,8 @@ class LoraQwen3DecoderLayer(Qwen3DecoderLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states, loradict=loradict['mlp'] if loradict is not None else None)
         hidden_states = residual + hidden_states
+        if capture_memory_tokens > 0:
+            return hidden_states, memory_key_states, memory_value_states
         return hidden_states
 
     def lora_params_numel(self, r):
@@ -567,6 +631,8 @@ class MemoryModelOutputWithPast(BaseModelOutputWithPast):
     reg_loss: Optional[torch.FloatTensor] = None
     '''
     memory_states: Optional[torch.Tensor] = None 
+    memory_key_values: Optional[tuple[tuple[torch.Tensor, torch.Tensor], ...]] = None
+    memory_norms: Optional[dict[str, torch.Tensor]] = None
     reg_loss: Optional[torch.FloatTensor] = None
 
 @auto_docstring
@@ -613,6 +679,9 @@ class LoraQwen3Model(Qwen3PreTrainedModel):
         loradict: Optional[dict] = None,
         ignore_mem_token: bool = False, 
         use_gradient_checkpoint: bool = False,
+        previous_memory_key_values: Optional[tuple[tuple[torch.Tensor, torch.Tensor], ...]] = None,
+        previous_memory_attention_mask: Optional[torch.Tensor] = None,
+        memory_position_offset: Optional[int] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         r"""
@@ -629,12 +698,33 @@ class LoraQwen3Model(Qwen3PreTrainedModel):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
+        context_length = None
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
             if self.use_mem_token and not ignore_mem_token:
+                context_length = inputs_embeds.shape[1]
                 inputs_embeds = torch.concat((inputs_embeds, self.mem_tokens.unsqueeze(0).repeat(inputs_embeds.shape[0], 1, 1)), dim=-2)
                 if attention_mask is not None:
                     attention_mask = torch.concat([attention_mask, torch.ones_like(attention_mask[:, [0]]).repeat(1, self.num_mem_token)], dim=-1)
+
+        recurrent_memory_enabled = previous_memory_key_values is not None
+        if recurrent_memory_enabled:
+            if not self.use_mem_token or ignore_mem_token:
+                raise ValueError("previous_memory_key_values requires enabled memory tokens")
+            if context_length is None:
+                raise ValueError("recurrent memory currently requires input_ids rather than inputs_embeds")
+            if len(previous_memory_key_values) != self.config.num_hidden_layers:
+                raise ValueError(
+                    f"Expected {self.config.num_hidden_layers} previous-memory layers, "
+                    f"got {len(previous_memory_key_values)}"
+                )
+            previous_length = previous_memory_key_values[0][0].shape[-2]
+            if previous_memory_attention_mask is None:
+                previous_memory_attention_mask = torch.ones(
+                    (inputs_embeds.shape[0], previous_length),
+                    dtype=torch.bool,
+                    device=inputs_embeds.device,
+                )
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
@@ -647,9 +737,29 @@ class LoraQwen3Model(Qwen3PreTrainedModel):
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
+            if self.use_mem_token and not ignore_mem_token and memory_position_offset is not None:
+                if memory_position_offset < 0:
+                    raise ValueError("memory_position_offset must be non-negative")
+                position_ids = position_ids.expand(inputs_embeds.shape[0], -1).clone()
+                position_ids[:, -self.num_mem_token:] = torch.arange(
+                    memory_position_offset,
+                    memory_position_offset + self.num_mem_token,
+                    device=inputs_embeds.device,
+                )
             
         # It may already have been prepared by e.g. `generate`
-        if not isinstance(causal_mask_mapping := attention_mask, dict):
+        if recurrent_memory_enabled:
+            recurrent_mask = _recurrent_memory_causal_mask(
+                attention_mask,
+                inputs_embeds,
+                context_length,
+                previous_memory_attention_mask,
+            )
+            causal_mask_mapping = {
+                "full_attention": recurrent_mask,
+                "sliding_attention": recurrent_mask,
+            }
+        elif not isinstance(causal_mask_mapping := attention_mask, dict):
             # Prepare mask arguments
             mask_kwargs = {
                 "config": self.config,
@@ -683,13 +793,19 @@ class LoraQwen3Model(Qwen3PreTrainedModel):
                 device=hidden_states.device,
                 dtype=hidden_states.dtype,
             )
+            next_memory_key_values = []
+            memory_hidden_norms = []
+            memory_key_norms = []
+            memory_value_norms = []
+            previous_key_norms = []
+            previous_value_norms = []
 
         if use_gradient_checkpoint and not hidden_states.requires_grad and _loradict_requires_grad(loradict):
             hidden_states = hidden_states.detach().requires_grad_(True)
             
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if use_gradient_checkpoint:
-                hidden_states = checkpoint(
+                layer_outputs = checkpoint(
                     decoder_layer, 
                     hidden_states,
                     attention_mask=causal_mask_mapping[decoder_layer.attention_type],
@@ -699,10 +815,12 @@ class LoraQwen3Model(Qwen3PreTrainedModel):
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
                     loradict=loradict[i] if isinstance(loradict, dict) else None,
+                    previous_memory_key_value=previous_memory_key_values[i] if recurrent_memory_enabled else None,
+                    capture_memory_tokens=self.num_mem_token if (self.use_mem_token and not ignore_mem_token) else 0,
                     **kwargs,
                     use_reentrant=False)
             else:
-                hidden_states =  decoder_layer(
+                layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask_mapping[decoder_layer.attention_type],
                     position_ids=position_ids,
@@ -711,10 +829,23 @@ class LoraQwen3Model(Qwen3PreTrainedModel):
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
                     loradict=loradict[i] if isinstance(loradict, dict) else None,
+                    previous_memory_key_value=previous_memory_key_values[i] if recurrent_memory_enabled else None,
+                    capture_memory_tokens=self.num_mem_token if (self.use_mem_token and not ignore_mem_token) else 0,
                     **kwargs,
                 )
             if self.use_mem_token and not ignore_mem_token:
-                memory_states[:, i, :, :] = hidden_states[:, -self.num_mem_token:].to(self.device)
+                hidden_states, memory_key_states, memory_value_states = layer_outputs
+                current_memory_states = hidden_states[:, -self.num_mem_token:]
+                memory_states[:, i, :, :] = current_memory_states
+                next_memory_key_values.append((memory_key_states, memory_value_states))
+                memory_hidden_norms.append(_tensor_rms(current_memory_states))
+                memory_key_norms.append(_tensor_rms(memory_key_states))
+                memory_value_norms.append(_tensor_rms(memory_value_states))
+                if recurrent_memory_enabled:
+                    previous_key_norms.append(_tensor_rms(previous_memory_key_values[i][0]))
+                    previous_value_norms.append(_tensor_rms(previous_memory_key_values[i][1]))
+            else:
+                hidden_states = layer_outputs
         # for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
         #     hidden_states = decoder_layer(
         #         hidden_states,
@@ -732,11 +863,21 @@ class LoraQwen3Model(Qwen3PreTrainedModel):
 
         if self.use_mem_token and not ignore_mem_token:
             hidden_states = hidden_states[:, :-self.num_mem_token, :]
+            memory_norms = {
+                "hidden_rms": torch.stack(memory_hidden_norms),
+                "key_rms": torch.stack(memory_key_norms),
+                "value_rms": torch.stack(memory_value_norms),
+            }
+            if recurrent_memory_enabled:
+                memory_norms["previous_key_rms"] = torch.stack(previous_key_norms)
+                memory_norms["previous_value_rms"] = torch.stack(previous_value_norms)
         hidden_states = self.norm(hidden_states)
         return MemoryModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
             memory_states=memory_states if (self.use_mem_token and not ignore_mem_token) else None,
+            memory_key_values=tuple(next_memory_key_values) if (self.use_mem_token and not ignore_mem_token) else None,
+            memory_norms=memory_norms if (self.use_mem_token and not ignore_mem_token) else None,
         )
     
     def lora_params_numel(self, r):
@@ -776,6 +917,8 @@ class MemoryCausalLMOutputWithPast(CausalLMOutputWithPast):
     reg_loss: Optional[torch.FloatTensor] = None
     '''
     memory_states: Optional[torch.Tensor] = None 
+    memory_key_values: Optional[tuple[tuple[torch.Tensor, torch.Tensor], ...]] = None
+    memory_norms: Optional[dict[str, torch.Tensor]] = None
     reg_loss: Optional[torch.FloatTensor] = None
 
 @auto_docstring
@@ -948,6 +1091,8 @@ class LoraQwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             memory_states=outputs.memory_states if not ignore_mem_token else None,
+            memory_key_values=outputs.memory_key_values if not ignore_mem_token else None,
+            memory_norms=outputs.memory_norms if not ignore_mem_token else None,
         )
 
     def lora_params_numel(self, r):

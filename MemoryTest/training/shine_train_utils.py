@@ -103,6 +103,27 @@ def lora_tensor_stats(obj: Any) -> dict[str, float]:
     }
 
 
+def recurrent_memory_norm_stats(recurrent_memory) -> dict[str, float]:
+    """Reduce per-layer recurrent-memory RMS tensors into JSON-friendly metrics."""
+    if recurrent_memory is None or recurrent_memory.norms is None:
+        return {}
+    stats = {}
+    for name, values in recurrent_memory.norms.items():
+        values = values.detach().float()
+        stats[f"{name}_mean"] = float(values.mean().cpu())
+        stats[f"{name}_min"] = float(values.min().cpu())
+        stats[f"{name}_max"] = float(values.max().cpu())
+    if "previous_key_rms" in recurrent_memory.norms:
+        previous = recurrent_memory.norms["previous_key_rms"].detach().float().mean()
+        current = recurrent_memory.norms["key_rms"].detach().float().mean()
+        stats["key_rms_ratio"] = float((current / previous.clamp_min(1e-12)).cpu())
+    if "previous_value_rms" in recurrent_memory.norms:
+        previous = recurrent_memory.norms["previous_value_rms"].detach().float().mean()
+        current = recurrent_memory.norms["value_rms"].detach().float().mean()
+        stats["value_rms_ratio"] = float((current / previous.clamp_min(1e-12)).cpu())
+    return stats
+
+
 def sample_context(rows: list[dict], fact_counts: list[int], qa_per_context: int, rng: random.Random) -> tuple[list[dict], list[dict]]:
     count = rng.choice(fact_counts)
     if len(rows) < count:
@@ -124,14 +145,52 @@ def encode_context(tokenizer, context: str, max_length: int, device):
     return enc["input_ids"].to(device), enc["attention_mask"].to(device)
 
 
-def trainable_generate_context_lora(context: str, metanetwork, tokenizer, metalora, cfg, device, use_gradient_checkpoint: bool = False):
+def trainable_generate_context_lora(
+    context: str,
+    metanetwork,
+    tokenizer,
+    metalora,
+    cfg,
+    device,
+    use_gradient_checkpoint: bool = False,
+    recurrent_memory=None,
+    return_recurrent_state: bool = False,
+    memory_position_offset: int | None = None,
+):
     evidence_ids, evidence_mask = encode_context(tokenizer, context, cfg.test.context_max_length, device)
     return metanetwork.generate_lora_dict(
         evidence_ids,
         evidence_mask,
         metalora,
         use_gradient_checkpoint=use_gradient_checkpoint,
+        recurrent_memory=recurrent_memory,
+        return_recurrent_state=return_recurrent_state,
+        memory_position_offset=memory_position_offset,
     )
+
+
+def trainable_update_recurrent_memory(
+    context: str,
+    metanetwork,
+    tokenizer,
+    metalora,
+    cfg,
+    device,
+    use_gradient_checkpoint: bool = False,
+    recurrent_memory=None,
+    memory_position_offset: int | None = None,
+):
+    """Encode one non-final stream chunk without running the expensive LoRA readout."""
+    evidence_ids, evidence_mask = encode_context(tokenizer, context, cfg.test.context_max_length, device)
+    _, recurrent_state = metanetwork.encode_context_memory(
+        evidence_ids,
+        evidence_mask,
+        metalora,
+        use_gradient_checkpoint=use_gradient_checkpoint,
+        recurrent_memory=recurrent_memory,
+        memory_position_offset=memory_position_offset,
+    )
+    return recurrent_state
 
 
 def encode_answer_batch(tokenizer, qa_rows: list[dict], max_length: int, device):
