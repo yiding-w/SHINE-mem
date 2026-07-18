@@ -5,6 +5,7 @@ import argparse
 import gc
 import json
 import logging
+import math
 import random
 import string
 from pathlib import Path
@@ -117,9 +118,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mem-token-learning-rate", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
-    parser.add_argument("--eval-every", type=int, default=500, help="QA evaluation interval; 0 disables evaluation.")
+    parser.add_argument("--eval-every", type=int, default=500, help="Validation interval; 0 disables evaluation.")
     parser.add_argument("--eval-trials", type=int, default=20)
     parser.add_argument("--eval-fact-counts", type=int, nargs="+", default=None)
+    parser.add_argument(
+        "--eval-objective",
+        choices=["auto", "qa", "reconstruction", "both"],
+        default="auto",
+        help=(
+            "Validation readout objective. auto mirrors --turn-objective; mixed validates both. "
+            "Reconstruction validation uses teacher-forced token loss rather than generation."
+        ),
+    )
+    parser.add_argument(
+        "--best-metric",
+        choices=["auto", "qa_accuracy", "reconstruction_loss"],
+        default="auto",
+        help="Metric used to select output-dir/best. auto uses reconstruction loss for reconstruction-only training.",
+    )
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--answer-max-length", type=int, default=1024)
@@ -157,6 +173,26 @@ def resolve_turn_objective(args: argparse.Namespace, rng: random.Random) -> str:
     if args.use_reconstruction and objective == "qa":
         objective = "both"
     return objective
+
+
+def resolve_eval_objective(args: argparse.Namespace) -> str:
+    if args.eval_objective != "auto":
+        return args.eval_objective
+    objective = args.turn_objective
+    if args.use_reconstruction and objective == "qa":
+        objective = "both"
+    return "both" if objective == "mixed" else objective
+
+
+def resolve_best_metric(args: argparse.Namespace, eval_objective: str) -> tuple[str, bool]:
+    metric = args.best_metric
+    if metric == "auto":
+        metric = "reconstruction_loss" if eval_objective == "reconstruction" else "qa_accuracy"
+    if metric == "qa_accuracy" and eval_objective not in {"qa", "both"}:
+        raise ValueError("--best-metric qa_accuracy requires QA validation")
+    if metric == "reconstruction_loss" and eval_objective not in {"reconstruction", "both"}:
+        raise ValueError("--best-metric reconstruction_loss requires reconstruction validation")
+    return metric, metric == "qa_accuracy"
 
 
 def build_training_records(
@@ -393,6 +429,12 @@ def generate_answer(metanetwork, tokenizer, lora_dict, question: str, device, ma
 def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_args, device, rng) -> dict:
     metanetwork.eval()
     eval_rows = []
+    reconstruction_loss_sum = 0.0
+    reconstruction_tokens = 0
+    reconstruction_readouts = 0
+    eval_objective = resolve_eval_objective(args)
+    evaluate_qa = eval_objective in {"qa", "both"}
+    evaluate_reconstruction = eval_objective in {"reconstruction", "both"}
     eval_fact_counts = args.eval_fact_counts if args.eval_fact_counts is not None else args.fact_counts
     progress = tqdm(
         range(args.eval_trials),
@@ -413,8 +455,12 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                 rng=rng,
             )
             recurrent_memory = None
+            observed_turns = []
             for turn_index, turn in enumerate(stream.turns):
-                if turn_index + 1 == len(stream.turns):
+                observed_turns.append(turn)
+                is_final_turn = turn_index + 1 == len(stream.turns)
+                supervise_turn = args.turn_supervision == "every" or is_final_turn
+                if supervise_turn:
                     lora_dict, recurrent_memory = trainable_generate_context_lora(
                         turn.text,
                         metanetwork,
@@ -426,6 +472,36 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                         return_recurrent_state=True,
                         memory_position_offset=memory_position_offset,
                     )
+                    lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
+                    if evaluate_reconstruction:
+                        reconstruction_text = (
+                            turn.text
+                            if args.reconstruction_scope == "current"
+                            else "\n".join(item.text for item in observed_turns)
+                        )
+                        reconstruction_records = build_training_records(
+                            qa_candidates=[],
+                            qa_rows=[],
+                            use_contrastive=False,
+                            objective="reconstruction",
+                            reconstruction_text=reconstruction_text,
+                        )
+                        reconstruction_losses, token_counts = compute_combined_lora_loss(
+                            reconstruction_records,
+                            lora_dict,
+                            metanetwork,
+                            tokenizer,
+                            device,
+                            args.answer_max_length,
+                            use_gradient_checkpoint=False,
+                            return_token_counts=True,
+                        )
+                        token_count = token_counts["reconstruction"]
+                        reconstruction_loss_sum += float(
+                            reconstruction_losses["reconstruction"].detach().cpu()
+                        ) * token_count
+                        reconstruction_tokens += token_count
+                        reconstruction_readouts += 1
                 else:
                     recurrent_memory = trainable_update_recurrent_memory(
                         turn.text,
@@ -437,25 +513,43 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                         recurrent_memory=recurrent_memory,
                         memory_position_offset=memory_position_offset,
                     )
-            lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
-            qa_source_turns = stream.turns[-1:] if args.qa_scope == "current" else stream.turns
-            qa_rows = sample_turn_qa(qa_source_turns, args.qa_per_context, rng)
-            for fact in qa_rows:
-                answer, raw = generate_answer(
-                    metanetwork,
-                    tokenizer,
-                    lora_dict,
-                    fact["question"],
-                    device,
-                    args.max_new_tokens or runtime_args.max_new_tokens,
-                    runtime_args.conversation_max_length,
-                )
-                eval_rows.append(make_eval_row(len(eval_rows) + 1, fact, answer, raw=raw))
+                if supervise_turn and evaluate_qa:
+                    qa_source_turns = [turn] if args.qa_scope == "current" else observed_turns
+                    qa_rows = sample_turn_qa(qa_source_turns, args.qa_per_context, rng)
+                    for fact in qa_rows:
+                        answer, raw = generate_answer(
+                            metanetwork,
+                            tokenizer,
+                            lora_dict,
+                            fact["question"],
+                            device,
+                            args.max_new_tokens or runtime_args.max_new_tokens,
+                            runtime_args.conversation_max_length,
+                        )
+                        eval_rows.append(make_eval_row(len(eval_rows) + 1, fact, answer, raw=raw))
             if tqdm is not None:
-                summary = summarize_examples(eval_rows)
-                progress.set_postfix({"acc": f"{summary['accuracy']:.4f}", "n": summary["total"]})
+                postfix = {}
+                if evaluate_qa:
+                    qa_summary = summarize_examples(eval_rows)
+                    postfix.update({"acc": f"{qa_summary['accuracy']:.4f}", "qa_n": qa_summary["total"]})
+                if evaluate_reconstruction and reconstruction_tokens:
+                    postfix.update({"recon": f"{reconstruction_loss_sum / reconstruction_tokens:.4f}"})
+                progress.set_postfix(postfix)
     metanetwork.train()
-    return summarize_examples(eval_rows)
+    summary = {"objective": eval_objective}
+    if evaluate_qa:
+        summary.update(summarize_examples(eval_rows))
+    if evaluate_reconstruction:
+        reconstruction_loss = reconstruction_loss_sum / reconstruction_tokens if reconstruction_tokens else float("nan")
+        summary.update(
+            {
+                "reconstruction_loss": reconstruction_loss,
+                "reconstruction_perplexity": math.exp(min(reconstruction_loss, 20.0)),
+                "reconstruction_tokens": reconstruction_tokens,
+                "reconstruction_readouts": reconstruction_readouts,
+            }
+        )
+    return summary
 
 
 def main() -> None:
@@ -467,6 +561,8 @@ def main() -> None:
         raise ValueError("--ordered-stream-probability must be between 0 and 1")
     if args.eval_every < 0:
         raise ValueError("--eval-every must be non-negative")
+    eval_objective = resolve_eval_objective(args)
+    best_metric_name, maximize_best_metric = resolve_best_metric(args, eval_objective)
     if not args.train_file:
         args.train_file = default_train_file()
     train_data = load_recurrent_dataset(resolve_path(args.train_file))
@@ -476,6 +572,13 @@ def main() -> None:
     rng = random.Random(args.seed)
 
     runtime_args, cfg, device, metanetwork, metalora, tokenizer, trainable = load_shine_for_training(args)
+    model_max_positions = getattr(getattr(metanetwork.metamodel, "config", None), "max_position_embeddings", None)
+    if model_max_positions is not None and args.answer_max_length > int(model_max_positions):
+        raise ValueError(
+            f"--answer-max-length ({args.answer_max_length}) exceeds the backbone limit "
+            f"max_position_embeddings={model_max_positions}. Use a shorter recurrent window or "
+            "--reconstruction-scope current."
+        )
     memory_position_offset = args.memory_position_offset or cfg.test.context_max_length
     if memory_position_offset < cfg.test.context_max_length:
         raise ValueError(
@@ -490,7 +593,7 @@ def main() -> None:
     )
     LOGGER.info("Training hypernetwork=%s Metalora=%s", bool(trainable["metanetwork"]), bool(trainable["metalora"]))
     optimizer = build_optimizer(trainable, args)
-    best_val_acc = -1.0 if args.eval_every > 0 else None
+    best_val_metric = (-float("inf") if maximize_best_metric else float("inf")) if args.eval_every > 0 else None
 
     train_progress = tqdm(
         range(1, args.max_steps + 1),
@@ -710,19 +813,49 @@ def main() -> None:
             val_summary = evaluate_current(metanetwork, metalora, tokenizer, cfg, val_data, args, runtime_args, device, rng)
             log_record["val"] = val_summary
             append_jsonl(log_path, log_record)
-            LOGGER.info("val step=%s accuracy=%.4f", step, val_summary["accuracy"])
+            current_val_metric = (
+                val_summary["accuracy"] if best_metric_name == "qa_accuracy" else val_summary["reconstruction_loss"]
+            )
+            if not math.isfinite(current_val_metric):
+                raise FloatingPointError(
+                    f"Validation metric {best_metric_name} is non-finite: {current_val_metric}"
+                )
+            LOGGER.info(
+                "val step=%s objective=%s %s=%.6f",
+                step,
+                val_summary["objective"],
+                best_metric_name,
+                current_val_metric,
+            )
             if tqdm is not None:
-                train_progress.set_postfix({"loss": f"{log_record['loss']:.4f}", "val_acc": f"{val_summary['accuracy']:.4f}", "best": f"{max(best_val_acc, val_summary['accuracy']):.4f}"})
+                displayed_best = (
+                    max(best_val_metric, current_val_metric)
+                    if maximize_best_metric
+                    else min(best_val_metric, current_val_metric)
+                )
+                train_progress.set_postfix(
+                    {
+                        "loss": f"{log_record['loss']:.4f}",
+                        "val": f"{current_val_metric:.4f}",
+                        "best": f"{displayed_best:.4f}",
+                    }
+                )
             save_posttrain_checkpoint(output_dir / "latest", metanetwork, metalora, extra_state={"step": step, "val": val_summary, "config": vars(args)})
-            if val_summary["accuracy"] > best_val_acc:
-                best_val_acc = val_summary["accuracy"]
+            is_better = current_val_metric > best_val_metric if maximize_best_metric else current_val_metric < best_val_metric
+            if is_better:
+                best_val_metric = current_val_metric
                 save_posttrain_checkpoint(output_dir / "best", metanetwork, metalora, extra_state={"step": step, "val": val_summary, "config": vars(args)})
         elif step == args.max_steps or (args.save_every > 0 and step % args.save_every == 0):
             save_posttrain_checkpoint(output_dir / "latest", metanetwork, metalora, extra_state={"step": step, "config": vars(args)})
         if args.empty_cache_every > 0 and step % args.empty_cache_every == 0 and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    final_summary = {"best_val_accuracy": best_val_acc, "max_steps": args.max_steps, "config": vars(args)}
+    final_summary = {
+        "best_val_metric": best_val_metric,
+        "best_metric_name": best_metric_name if args.eval_every > 0 else None,
+        "max_steps": args.max_steps,
+        "config": vars(args),
+    }
     (output_dir / "summary.json").write_text(json.dumps(final_summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     del metanetwork, metalora, tokenizer
     gc.collect()

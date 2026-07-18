@@ -376,28 +376,58 @@ CUDA_VISIBLE_DEVICES=0 python -u \
   --val-file MemoryTest/json_data/msc_recurrent_2048/msc_valid.json \
   --output-dir MemoryTest/checkpoints/msc_reconstruction \
   --ordered-stream-probability 1.0 \
-  --stream-window-policy full \
+  --stream-window-policy contiguous \
+  --recurrent-steps 2 \
   --turn-supervision every \
   --turn-objective reconstruction \
   --reconstruction-scope cumulative \
   --qa-per-context 0 \
-  --eval-every 0 \
+  --eval-every 200 \
+  --eval-trials 8 \
+  --eval-objective reconstruction \
+  --best-metric reconstruction_loss \
   --context-max-length 2048 \
   --memory-position-offset 2048 \
-  --answer-max-length 8192 \
+  --answer-max-length 4352 \
+  --max-steps 2000 \
+  --save-every 200 \
   --learning-rate 1e-6 \
   --metalora-learning-rate 1e-6 \
+  --generated-lora-clamp 5 \
   --torch-dtype bf16 \
   --use-gradient-checkpoint
 ```
 
 `cumulative` is important for long-term retention: after recurrent update t, the memory must reconstruct every chunk
 observed through t. With `current`, the model can discard previous memory and still minimize the loss. Set
-`--answer-max-length` slightly above `statistics.max_stream_tokens_observed` in the generated split (allowing extra
-room for the chat template and EOS). `--stream-window-policy full` processes the complete trajectory in chronological
-order; in this mode `--recurrent-steps` does not truncate an ordered stream. If full-trajectory BPTT or cumulative
-decoding is too large for the first run, start with `--stream-window-policy contiguous --recurrent-steps 2` and an
-answer limit above the largest two-turn window, then scale up.
+`--answer-max-length` above the matching value in
+`statistics.max_cumulative_reconstruction_target_tokens` (allowing extra room for the chat template). The trainer now
+refuses an oversized supervised record instead of silently
+discarding the beginning of its target. For 2048-token turns, `4352` is a safe two-turn starting limit; raise it as
+`--recurrent-steps` grows.
+
+`--eval-objective reconstruction` runs the same recurrent readout on validation streams and reports token-weighted
+`reconstruction_loss`, perplexity, supervised token count, and readout count. `best/` is selected by the lowest
+validation reconstruction loss. This validation is teacher-forced and does not call `generate()`.
+
+`--stream-window-policy full` processes the complete trajectory in chronological order; in this mode
+`--recurrent-steps` does not truncate an ordered stream. Before a full-trajectory run, inspect the converter statistics:
+
+```bash
+python -c 'import json; p=json.load(open("MemoryTest/json_data/msc_recurrent_2048/manifest.json")); print(json.dumps(p["splits"], indent=2))'
+```
+
+Use `contiguous_windows["2"]` for the two-turn starter or `full` for a full-trajectory run, then add approximately 64
+tokens for the minimal chat prompt. If that exceeds
+the backbone context limit or GPU budget, keep an order-preserving contiguous window and increase
+`--recurrent-steps` gradually rather than truncating reconstruction targets.
+
+For a full-trajectory experiment, replace the window arguments above with:
+
+```text
+--stream-window-policy full
+--answer-max-length <max_stream_tokens_observed + margin>
+```
 
 ### Per-turn objectives
 

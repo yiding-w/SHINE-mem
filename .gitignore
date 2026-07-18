@@ -62,6 +62,8 @@ MemoryAgentBench/cognee
 MemoryAgentBench/letta
 
 MemoryTest/teacher_loras
+MemoryTest/raw_data
+MemoryTest/json_data/msc_recurrent_*/
 
 /data
 /logs

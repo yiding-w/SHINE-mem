@@ -213,8 +213,12 @@ def encode_answer_batch(tokenizer, qa_rows: list[dict], max_length: int, device)
     input_rows = []
     label_rows = []
     for prompt_ids, answer_ids in zip(prompt_ids_list, answer_ids_list):
-        input_ids = (prompt_ids + answer_ids)[-max_length:]
-        labels = ([-100] * len(prompt_ids) + answer_ids)[-max_length:]
+        input_ids, labels = pack_supervised_tokens(
+            prompt_ids,
+            answer_ids,
+            max_length=max_length,
+            category="answer",
+        )
         input_rows.append(input_ids)
         label_rows.append(labels)
 
@@ -236,6 +240,34 @@ def encode_answer_batch(tokenizer, qa_rows: list[dict], max_length: int, device)
     }
 
 
+def pack_supervised_tokens(
+    prompt_ids: list[int],
+    answer_ids: list[int],
+    max_length: int,
+    category: str,
+) -> tuple[list[int], list[int]]:
+    """Pack a supervised example without silently discarding target tokens.
+
+    Truncating from the left can remove both the task prompt and the beginning of
+    a cumulative reconstruction target.  That changes the objective while
+    leaving the training loop apparently healthy, so recurrent post-training is
+    deliberately strict: callers must choose a large enough max length or use a
+    smaller recurrent window/reconstruction scope.
+    """
+    if max_length < 1:
+        raise ValueError(f"max_length must be positive, got {max_length}")
+    total_length = len(prompt_ids) + len(answer_ids)
+    if total_length > max_length:
+        raise ValueError(
+            f"Supervised {category!r} example needs {total_length} tokens "
+            f"(prompt={len(prompt_ids)}, target={len(answer_ids)}) but "
+            f"--answer-max-length is {max_length}. Refusing to truncate the "
+            "target silently. Increase --answer-max-length, reduce the ordered "
+            "stream window, or use --reconstruction-scope current."
+        )
+    return prompt_ids + answer_ids, [-100] * len(prompt_ids) + answer_ids
+
+
 def encode_supervised_records(tokenizer, records: list[dict], max_length: int, device):
     input_rows = []
     label_rows = []
@@ -251,8 +283,12 @@ def encode_supervised_records(tokenizer, records: list[dict], max_length: int, d
         if tokenizer.eos_token and not answer_text.endswith(tokenizer.eos_token):
             answer_text += tokenizer.eos_token
         answer_ids = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
-        input_ids = (prompt_ids + answer_ids)[-max_length:]
-        labels = ([-100] * len(prompt_ids) + answer_ids)[-max_length:]
+        input_ids, labels = pack_supervised_tokens(
+            prompt_ids,
+            answer_ids,
+            max_length=max_length,
+            category=str(record["category"]),
+        )
         input_rows.append(input_ids)
         label_rows.append(labels)
         categories.append(record["category"])
@@ -295,7 +331,16 @@ def category_token_losses(logits: torch.Tensor, labels: torch.Tensor, categories
     return losses
 
 
-def compute_combined_lora_loss(records, lora_dict, metanetwork, tokenizer, device, max_length, use_gradient_checkpoint: bool = False):
+def compute_combined_lora_loss(
+    records,
+    lora_dict,
+    metanetwork,
+    tokenizer,
+    device,
+    max_length,
+    use_gradient_checkpoint: bool = False,
+    return_token_counts: bool = False,
+):
     batch = encode_supervised_records(tokenizer, records, max_length=max_length, device=device)
     outputs = metanetwork.metamodel(
         input_ids=batch["input_ids"],
@@ -305,7 +350,19 @@ def compute_combined_lora_loss(records, lora_dict, metanetwork, tokenizer, devic
         ignore_mem_token=True,
         use_gradient_checkpoint=use_gradient_checkpoint,
     )
-    return category_token_losses(outputs.logits, batch["labels"], batch["categories"])
+    losses = category_token_losses(outputs.logits, batch["labels"], batch["categories"])
+    if not return_token_counts:
+        return losses
+    shifted_labels = batch["labels"][:, 1:]
+    token_counts = {}
+    for category in losses:
+        row_mask = torch.tensor(
+            [item == category for item in batch["categories"]],
+            device=shifted_labels.device,
+            dtype=torch.bool,
+        )
+        token_counts[category] = int(shifted_labels[row_mask].ne(-100).sum().detach().cpu())
+    return losses, token_counts
 
 
 def encode_reconstruction(tokenizer, context_rows: list[dict], max_length: int, device):
@@ -320,8 +377,12 @@ def encode_reconstruction(tokenizer, context_rows: list[dict], max_length: int, 
     if tokenizer.eos_token:
         answer_text += tokenizer.eos_token
     answer_ids = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
-    input_ids = (prompt_ids + answer_ids)[-max_length:]
-    labels = ([-100] * len(prompt_ids) + answer_ids)[-max_length:]
+    input_ids, labels = pack_supervised_tokens(
+        prompt_ids,
+        answer_ids,
+        max_length=max_length,
+        category="reconstruction",
+    )
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     return {
         "input_ids": torch.tensor([input_ids], dtype=torch.long, device=device),

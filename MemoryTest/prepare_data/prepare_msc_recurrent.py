@@ -374,6 +374,11 @@ def convert_split(
     session_histogram: dict[str, int] = {}
     max_turn_tokens_observed = 0
     max_stream_tokens_observed = 0
+    reconstruction_window_sizes = (1, 2, 4, 8, 16)
+    max_reconstruction_target_tokens = {
+        str(window_size): 0 for window_size in reconstruction_window_sizes
+    }
+    max_full_reconstruction_target_tokens = 0
 
     for trajectory_id in sorted(snapshots):
         snapshot = snapshots[trajectory_id]
@@ -416,6 +421,24 @@ def convert_split(
                 stream_token_count += chunk.token_count
                 max_turn_tokens_observed = max(max_turn_tokens_observed, chunk.token_count)
         max_stream_tokens_observed = max(max_stream_tokens_observed, stream_token_count)
+        turn_texts = [turn["text"] for turn in turns]
+        if turn_texts:
+            full_target_tokens = len(tokenizer.encode("\n" + "\n".join(turn_texts))) + 1
+            max_full_reconstruction_target_tokens = max(
+                max_full_reconstruction_target_tokens,
+                full_target_tokens,
+            )
+            for window_size in reconstruction_window_sizes:
+                effective_size = min(window_size, len(turn_texts))
+                window_max = max(
+                    len(tokenizer.encode("\n" + "\n".join(turn_texts[start : start + effective_size]))) + 1
+                    for start in range(0, len(turn_texts) - effective_size + 1)
+                )
+                key = str(window_size)
+                max_reconstruction_target_tokens[key] = max(
+                    max_reconstruction_target_tokens[key],
+                    window_max,
+                )
         streams.append(
             {
                 "stream_id": trajectory_id,
@@ -454,6 +477,11 @@ def convert_split(
             "trajectory_session_count": session_histogram,
             "max_turn_tokens_observed": max_turn_tokens_observed,
             "max_stream_tokens_observed": max_stream_tokens_observed,
+            "max_cumulative_reconstruction_target_tokens": {
+                "full": max_full_reconstruction_target_tokens,
+                "contiguous_windows": max_reconstruction_target_tokens,
+                "note": "Includes the leading reconstruction newline and one reserved EOS token; add chat-prompt margin for --answer-max-length.",
+            },
             "qa": qa_count,
         },
     }
