@@ -83,7 +83,9 @@ def question_prompt(question: str) -> str:
 
 
 def reconstruction_prompt() -> str:
-    return "<RECON>\nOutput the current memory facts in structured form."
+    # Match the original SHINE pretraining task exactly. The assistant target
+    # determines whether the reconstructed content is facts, prose, or dialog.
+    return "<RECON>"
 
 
 def format_answer(answer: str) -> str:

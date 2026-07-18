@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mem-token-learning-rate", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
-    parser.add_argument("--eval-every", type=int, default=500)
+    parser.add_argument("--eval-every", type=int, default=500, help="QA evaluation interval; 0 disables evaluation.")
     parser.add_argument("--eval-trials", type=int, default=20)
     parser.add_argument("--eval-fact-counts", type=int, nargs="+", default=None)
     parser.add_argument("--save-every", type=int, default=500)
@@ -465,10 +465,12 @@ def main() -> None:
         raise ValueError("--qa-turn-prob must be between 0 and 1")
     if not 0.0 <= args.ordered_stream_probability <= 1.0:
         raise ValueError("--ordered-stream-probability must be between 0 and 1")
+    if args.eval_every < 0:
+        raise ValueError("--eval-every must be non-negative")
     if not args.train_file:
         args.train_file = default_train_file()
     train_data = load_recurrent_dataset(resolve_path(args.train_file))
-    val_data = load_recurrent_dataset(resolve_path(args.val_file))
+    val_data = load_recurrent_dataset(resolve_path(args.val_file)) if args.eval_every > 0 else None
     output_dir = resolve_path(args.output_dir)
     log_path = output_dir / "shine_posttrain_train_log.jsonl"
     rng = random.Random(args.seed)
@@ -488,7 +490,7 @@ def main() -> None:
     )
     LOGGER.info("Training hypernetwork=%s Metalora=%s", bool(trainable["metanetwork"]), bool(trainable["metalora"]))
     optimizer = build_optimizer(trainable, args)
-    best_val_acc = -1.0
+    best_val_acc = -1.0 if args.eval_every > 0 else None
 
     train_progress = tqdm(
         range(1, args.max_steps + 1),
@@ -703,7 +705,8 @@ def main() -> None:
                 f"{log_record['reconstruction_loss']:.6f}" if log_record["reconstruction_loss"] is not None else "n/a",
             )
 
-        if step % args.eval_every == 0 or step == args.max_steps:
+        eval_due = args.eval_every > 0 and (step % args.eval_every == 0 or step == args.max_steps)
+        if eval_due:
             val_summary = evaluate_current(metanetwork, metalora, tokenizer, cfg, val_data, args, runtime_args, device, rng)
             log_record["val"] = val_summary
             append_jsonl(log_path, log_record)
@@ -714,7 +717,7 @@ def main() -> None:
             if val_summary["accuracy"] > best_val_acc:
                 best_val_acc = val_summary["accuracy"]
                 save_posttrain_checkpoint(output_dir / "best", metanetwork, metalora, extra_state={"step": step, "val": val_summary, "config": vars(args)})
-        elif step % args.save_every == 0:
+        elif step == args.max_steps or (args.save_every > 0 and step % args.save_every == 0):
             save_posttrain_checkpoint(output_dir / "latest", metanetwork, metalora, extra_state={"step": step, "config": vars(args)})
         if args.empty_cache_every > 0 and step % args.empty_cache_every == 0 and torch.cuda.is_available():
             torch.cuda.empty_cache()

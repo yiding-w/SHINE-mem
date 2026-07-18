@@ -18,10 +18,12 @@ class QARecord:
     question: str
     answer: str
     source_turn_id: str
+    task: str = "qa"
 
     def as_row(self) -> dict[str, str]:
         return {
             "id": self.qa_id,
+            "task": self.task,
             "question": self.question,
             "answer": self.answer,
             "source_turn_id": self.source_turn_id,
@@ -90,6 +92,7 @@ def _normalize_qa(container: dict[str, Any], source_id: str) -> tuple[QARecord, 
                 question=str(item["question"]),
                 answer=str(item["answer"]),
                 source_turn_id=source_id,
+                task=str(item.get("task", "qa")),
             )
         )
     return tuple(normalized)

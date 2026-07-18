@@ -52,8 +52,10 @@ def make_eval_row(index: int, fact: dict, model_answer: str, raw: str = "") -> d
     correct = answer_matches(fact["answer"], model_answer)
     return {
         "index": index,
-        "id": fact["id"],
-        "person": fact["person"],
+        "id": fact.get("id", f"eval:{index}"),
+        # Generic recurrent stream QA only requires question/answer.  Keep the
+        # semantic-dataset metadata when present without requiring it.
+        "person": fact.get("person"),
         "attribute": fact.get("attribute", fact.get("relation", "unknown")),
         "question": fact["question"],
         "expected_answer": fact["answer"],

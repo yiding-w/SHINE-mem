@@ -321,6 +321,84 @@ A directly editable example is available at `MemoryTest/config/recurrent_data.ex
 QA and reconstruction accumulation are training settings, not fields in the data. Use `--qa-scope current|cumulative`
 and `--reconstruction-scope current|cumulative` to control them independently.
 
+### Multi-Session Chat (MSC)
+
+Download and extract the official MSC v0.1 release:
+
+```bash
+mkdir -p MemoryTest/raw_data/msc
+curl -L https://parl.ai/downloads/msc/msc_v0.1.tar.gz \
+  -o MemoryTest/raw_data/msc_v0.1.tar.gz
+tar -xzf MemoryTest/raw_data/msc_v0.1.tar.gz \
+  -C MemoryTest/raw_data/msc
+```
+
+Convert every split using the same Qwen tokenizer as the SHINE backbone. The limit is applied to each recurrent turn,
+not to the complete multi-session trajectory. Session boundaries are always retained; a long session is split into
+multiple chunks, while two sessions are never merged into one chunk.
+
+```bash
+python -m MemoryTest.prepare_data.prepare_msc_recurrent \
+  --input-dir MemoryTest/raw_data/msc \
+  --output-dir MemoryTest/json_data/msc_recurrent_2048 \
+  --tokenizer /path/to/Qwen3-8B \
+  --max-turn-tokens 2048 \
+  --qa-tasks next_turn persona_extraction persona_summary
+```
+
+Use `--max-turn-tokens 4096` and a different output directory for a 4096-token collection. Omitting `--tokenizer`
+is supported for data-pipeline debugging, but then the limit is only a whitespace-token approximation.
+
+The converter performs the following leakage-safe reconstruction:
+
+- Groups snapshots by `metadata.initial_data_id` and keeps only the longest cumulative snapshot.
+- Restores chronological sessions from `previous_dialogs + dialog`.
+- Writes only speaker-tagged original utterances to each turn's `text`.
+- Never inserts top-level `personas`, `init_personas`, `newfact`, or `followup` into input text.
+- Stores next-turn, per-chunk persona extraction, and session persona summary targets under `qa`, with explicit prompts
+  and a `task` tag. They remain available for later experiments but do not select or weight a training loss.
+
+The current recurrent trainer reads a complete turn before running QA readout. Therefore, do not train the stored
+`next_turn` records through the current QA objective: their answers already occur in that turn's text. They are retained
+for a future prefix-readout/SFT path. Persona extraction and summary targets are valid after-session readouts. This does
+not affect the reconstruction-only command below, which ignores every QA record.
+
+The generated directory contains `msc_train.json`, `msc_valid.json`, `msc_test.json`, and `manifest.json`. To train
+strictly with memory reconstruction loss, use `--turn-objective reconstruction`; the stored QA records are not used:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -u \
+  -m MemoryTest.training.posttrain_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --device cuda --gpu-id 0 \
+  --checkpoint-dir /path/to/SHINE-ift_mqa_1qa \
+  --train-file MemoryTest/json_data/msc_recurrent_2048/msc_train.json \
+  --val-file MemoryTest/json_data/msc_recurrent_2048/msc_valid.json \
+  --output-dir MemoryTest/checkpoints/msc_reconstruction \
+  --ordered-stream-probability 1.0 \
+  --stream-window-policy full \
+  --turn-supervision every \
+  --turn-objective reconstruction \
+  --reconstruction-scope cumulative \
+  --qa-per-context 0 \
+  --eval-every 0 \
+  --context-max-length 2048 \
+  --memory-position-offset 2048 \
+  --answer-max-length 8192 \
+  --learning-rate 1e-6 \
+  --metalora-learning-rate 1e-6 \
+  --torch-dtype bf16 \
+  --use-gradient-checkpoint
+```
+
+`cumulative` is important for long-term retention: after recurrent update t, the memory must reconstruct every chunk
+observed through t. With `current`, the model can discard previous memory and still minimize the loss. Set
+`--answer-max-length` slightly above `statistics.max_stream_tokens_observed` in the generated split (allowing extra
+room for the chat template and EOS). `--stream-window-policy full` processes the complete trajectory in chronological
+order; in this mode `--recurrent-steps` does not truncate an ordered stream. If full-trajectory BPTT or cumulative
+decoding is too large for the first run, start with `--stream-window-policy contiguous --recurrent-steps 2` and an
+answer limit above the largest two-turn window, then scale up.
+
 ### Per-turn objectives
 
 Supervise QA after every recurrent update:
