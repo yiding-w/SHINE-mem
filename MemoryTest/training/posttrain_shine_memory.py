@@ -27,9 +27,11 @@ from MemoryTest.training.recurrent_data import (
 )
 from MemoryTest.training.shine_train_utils import (
     append_jsonl,
+    category_token_losses,
     cast_floating_tensors,
     clamp_lora_tensors,
     compute_combined_lora_loss,
+    encode_supervised_records,
     lora_tensor_stats,
     recurrent_memory_norm_stats,
     resolve_path,
@@ -290,6 +292,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-fact-counts", type=int, nargs="+", default=None)
     parser.add_argument("--eval-example-max-new-tokens", type=int, default=256)
     parser.add_argument("--eval-example-max-chars", type=int, default=2000)
+    parser.add_argument(
+        "--diagnose-lora-application",
+        action="store_true",
+        help=(
+            "For the first validation stream, compare reconstruction with generated LoRA "
+            "against the same forward/generation without LoRA. Intended for smoke tests."
+        ),
+    )
     parser.add_argument(
         "--print-eval-example",
         action=argparse.BooleanOptionalAction,
@@ -649,6 +659,44 @@ def generate_reconstruction(metanetwork, tokenizer, lora_dict, device, max_new_t
     return tokenizer.decode(outputs[0, input_ids.shape[1] :], skip_special_tokens=True).strip()
 
 
+def diagnose_lora_application(
+    records,
+    lora_dict,
+    metanetwork,
+    tokenizer,
+    device,
+    max_length: int,
+) -> dict[str, float]:
+    """Measure whether generated LoRA changes teacher-forced target logits."""
+    batch = encode_supervised_records(tokenizer, records, max_length=max_length, device=device)
+    common = {
+        "input_ids": batch["input_ids"],
+        "attention_mask": batch["attention_mask"],
+        "labels": None,
+        "ignore_mem_token": True,
+        "use_gradient_checkpoint": False,
+    }
+    with_lora = metanetwork.metamodel(loradict=lora_dict, **common).logits
+    without_lora = metanetwork.metamodel(loradict=None, **common).logits
+    lora_losses = category_token_losses(with_lora, batch["labels"], batch["categories"])
+    base_losses = category_token_losses(without_lora, batch["labels"], batch["categories"])
+    target_mask = batch["labels"][:, 1:].ne(-100)
+    target_delta = (with_lora[:, :-1] - without_lora[:, :-1])[target_mask].float()
+    stats = lora_tensor_stats(lora_dict)
+    return {
+        "base_loss": float(base_losses["reconstruction"].detach().cpu()),
+        "lora_loss": float(lora_losses["reconstruction"].detach().cpu()),
+        "loss_improvement": float(
+            (base_losses["reconstruction"] - lora_losses["reconstruction"]).detach().cpu()
+        ),
+        "target_logit_delta_rms": float(target_delta.square().mean().sqrt().cpu()),
+        "target_logit_delta_max": float(target_delta.abs().max().cpu()),
+        "lora_max_abs": stats["max_abs"],
+        "lora_mean_abs": stats["mean_abs"],
+        "lora_finite": stats["finite"],
+    }
+
+
 def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_args, device, rng) -> dict:
     metanetwork.eval()
     eval_rows = []
@@ -736,7 +784,7 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                                 device,
                                 args.eval_example_max_new_tokens,
                             )
-                            reconstruction_examples.append({
+                            example = {
                                 "stream_id": stream.stream_id,
                                 "turn": turn_index + 1,
                                 "turn_id": turn.turn_id,
@@ -747,7 +795,27 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                                 "prediction": prediction[: args.eval_example_max_chars],
                                 "reference_truncated": len(reconstruction_text) > args.eval_example_max_chars,
                                 "prediction_truncated": len(prediction) > args.eval_example_max_chars,
-                            })
+                            }
+                            if args.diagnose_lora_application:
+                                example["lora_diagnostic"] = diagnose_lora_application(
+                                    reconstruction_records,
+                                    lora_dict,
+                                    metanetwork,
+                                    tokenizer,
+                                    device,
+                                    args.answer_max_length,
+                                )
+                                base_prediction = generate_reconstruction(
+                                    metanetwork,
+                                    tokenizer,
+                                    None,
+                                    device,
+                                    args.eval_example_max_new_tokens,
+                                )
+                                example["prediction_without_lora"] = base_prediction[
+                                    : args.eval_example_max_chars
+                                ]
+                            reconstruction_examples.append(example)
                 else:
                     recurrent_memory = trainable_update_recurrent_memory(
                         turn.text,
@@ -828,11 +896,27 @@ def report_validation(step: int, val_summary: dict, best_metric_name: str, args:
         if not examples and val_summary.get("reconstruction_example") is not None:
             examples = [val_summary["reconstruction_example"]]
         for example in examples:
+            diagnostic = example.get("lora_diagnostic")
+            diagnostic_text = ""
+            if diagnostic is not None:
+                diagnostic_text = (
+                    "\n----- LoRA application diagnostic -----\n"
+                    f"base_loss={diagnostic['base_loss']:.6f} "
+                    f"lora_loss={diagnostic['lora_loss']:.6f} "
+                    f"improvement={diagnostic['loss_improvement']:.6f} "
+                    f"logit_delta_rms={diagnostic['target_logit_delta_rms']:.6f} "
+                    f"logit_delta_max={diagnostic['target_logit_delta_max']:.6f} "
+                    f"lora_max={diagnostic['lora_max_abs']:.6f} "
+                    f"lora_mean={diagnostic['lora_mean_abs']:.6f}\n"
+                    "----- prediction without LoRA -----\n"
+                    f"{example.get('prediction_without_lora', '')}\n"
+                    "----- end LoRA application diagnostic -----"
+                )
             LOGGER.info(
                 "val reconstruction example step=%s stream=%s turn=%s turn_id=%s "
                 "loss=%.6f ppl=%.6f target_tokens=%s\n"
                 "----- reference%s -----\n%s\n"
-                "----- prediction%s -----\n%s\n"
+                "----- prediction%s -----\n%s%s\n"
                 "----- end reconstruction example -----",
                 step,
                 example["stream_id"],
@@ -845,6 +929,7 @@ def report_validation(step: int, val_summary: dict, best_metric_name: str, args:
                 example["reference"],
                 " (truncated for log)" if example["prediction_truncated"] else "",
                 example["prediction"],
+                diagnostic_text,
             )
     return current_metric
 
