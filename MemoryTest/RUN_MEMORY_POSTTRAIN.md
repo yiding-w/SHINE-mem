@@ -408,7 +408,133 @@ discarding the beginning of its target. For 2048-token turns, `4352` is a safe t
 
 `--eval-objective reconstruction` runs the same recurrent readout on validation streams and reports token-weighted
 `reconstruction_loss`, perplexity, supervised token count, and readout count. `best/` is selected by the lowest
-validation reconstruction loss. This validation is teacher-forced and does not call `generate()`.
+validation reconstruction loss. The metrics are teacher-forced. In addition, the trainer greedily generates one
+fixed validation reconstruction and prints its reference/prediction pair at every evaluation. Control that preview
+with `--eval-example-max-new-tokens`, `--eval-example-max-chars`, and `--no-print-eval-example`.
+
+### Four-GPU data parallel, larger batches, and W&B
+
+Install and authenticate W&B once in the training environment:
+
+```bash
+pip install wandb
+wandb login
+```
+
+Launch one process per visible GPU with `torchrun`. Each rank holds a complete SHINE/Qwen replica and samples distinct
+streams. Gradients for the hypernetwork, memory tokens (when enabled), and the external MetaLoRA tensors are averaged
+before every optimizer step. Only rank 0 evaluates, saves checkpoints, writes JSONL/console logs, and talks to W&B.
+
+`--batch-size` is the number of streams accumulated sequentially on each GPU. This avoids stacking several long
+recurrent graphs in memory. The effective global batch is `batch-size * nproc-per-node`; for the command below it is
+`2 * 4 = 8` streams per optimizer step.
+
+```bash
+OUTPUT_DIR=MemoryTest/checkpoints/msc_reconstruction_dp4_bs8
+mkdir -p "$OUTPUT_DIR"
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun \
+  --standalone \
+  --nproc_per_node=4 \
+  -m MemoryTest.training.posttrain_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa \
+  --train-file MemoryTest/json_data/msc_recurrent_2048/msc_train.json \
+  --val-file MemoryTest/json_data/msc_recurrent_2048/msc_valid.json \
+  --output-dir "$OUTPUT_DIR" \
+  --ordered-stream-probability 1.0 \
+  --stream-window-policy full \
+  --turn-supervision every \
+  --turn-objective reconstruction \
+  --reconstruction-scope cumulative \
+  --qa-per-context 0 \
+  --batch-size 2 \
+  --context-max-length 1152 \
+  --memory-position-offset 1152 \
+  --answer-max-length 3072 \
+  --max-steps 2000 \
+  --eval-every 200 \
+  --eval-trials 8 \
+  --eval-objective reconstruction \
+  --best-metric reconstruction_loss \
+  --eval-example-max-new-tokens 512 \
+  --eval-example-max-chars 4000 \
+  --save-every 200 \
+  --log-every 10 \
+  --learning-rate 1e-6 \
+  --metalora-learning-rate 1e-6 \
+  --grad-clip-norm 1.0 \
+  --generated-lora-clamp 5 \
+  --torch-dtype bf16 \
+  --use-gradient-checkpoint \
+  --wandb-project shine-recurrent-memory \
+  --wandb-run-name msc-recon-dp4-bs8 \
+  --wandb-tags msc reconstruction dp4 \
+  2>&1 | tee -a "$OUTPUT_DIR/console.log"
+```
+
+Do not pass `--gpu-id` under `torchrun`; `LOCAL_RANK` selects the device in each process. For a first smoke test, use
+`--batch-size 1 --max-steps 2 --eval-every 1 --eval-trials 1`. If two streams per GPU do not fit, keep batch size 1;
+four GPUs still give a global batch of 4. Without `--wandb-project`, W&B is disabled and the JSONL plus `console.log`
+remain available. W&B's local run files are placed under `OUTPUT_DIR/wandb/`. Use `--wandb-mode offline` on a compute
+node without network access.
+
+### Very short reconstruction overfit smoke test
+
+`MemoryTest/config/reconstruction_smoke.json` contains four two-turn streams made only of short sentences. The command
+below deliberately uses that same file for training and validation. It is a pipeline/optimization check, not a
+generalization measurement: the useful signal is that reconstruction loss falls rapidly and the fixed generated
+example approaches its reference. The untrained step-1 loss does not have to satisfy a universal threshold.
+
+```bash
+OUTPUT_DIR=MemoryTest/checkpoints/reconstruction_overfit_smoke
+mkdir -p "$OUTPUT_DIR"
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun \
+  --standalone \
+  --nproc_per_node=4 \
+  -m MemoryTest.training.posttrain_shine_memory \
+  --config MemoryTest/config/case_test.yaml \
+  --checkpoint-dir /ceph/home/muhan01/huggingfacemodels/SHINE-ift_mqa_1qa \
+  --train-file MemoryTest/config/reconstruction_smoke.json \
+  --val-file MemoryTest/config/reconstruction_smoke.json \
+  --output-dir "$OUTPUT_DIR" \
+  --ordered-stream-probability 1.0 \
+  --stream-window-policy full \
+  --recurrent-steps 2 \
+  --turn-supervision every \
+  --turn-objective reconstruction \
+  --reconstruction-scope cumulative \
+  --qa-per-context 0 \
+  --batch-size 1 \
+  --context-max-length 64 \
+  --memory-position-offset 64 \
+  --answer-max-length 128 \
+  --max-steps 50 \
+  --eval-every 10 \
+  --eval-trials 4 \
+  --eval-objective reconstruction \
+  --best-metric reconstruction_loss \
+  --eval-example-max-new-tokens 32 \
+  --eval-example-max-chars 512 \
+  --save-every 10 \
+  --log-every 1 \
+  --learning-rate 5e-6 \
+  --metalora-learning-rate 5e-6 \
+  --grad-clip-norm 1.0 \
+  --generated-lora-clamp 5 \
+  --torch-dtype bf16 \
+  --use-gradient-checkpoint \
+  --wandb-project shine-recurrent-memory \
+  --wandb-run-name reconstruction-overfit-smoke \
+  --wandb-tags smoke reconstruction dp4 \
+  2>&1 | tee -a "$OUTPUT_DIR/console.log"
+```
+
+With four GPUs and `--batch-size 1`, the global batch is four streams. Since validation reuses the training fixture,
+loss should trend down rather than merely fluctuate, and the printed `prediction` should begin reproducing both short
+sentences. If W&B is not installed yet, omit the three `--wandb-*` arguments; JSONL and `console.log` still record the
+run.
 
 `--stream-window-policy full` processes the complete trajectory in chronological order; in this mode
 `--recurrent-steps` does not truncate an ordered stream. Before a full-trajectory run, inspect the converter statistics:

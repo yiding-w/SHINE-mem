@@ -6,11 +6,15 @@ import gc
 import json
 import logging
 import math
+import os
 import random
 import string
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 
 from MemoryTest.prepare_data.prompt_templates import format_answer, question_prompt, reconstruction_prompt
 from MemoryTest.evaluation.metrics import make_eval_row, summarize_examples
@@ -42,6 +46,144 @@ try:
     from tqdm.auto import tqdm
 except ImportError:
     tqdm = None
+
+
+@dataclass(frozen=True)
+class DistributedContext:
+    enabled: bool
+    rank: int
+    local_rank: int
+    world_size: int
+
+    @property
+    def is_main(self) -> bool:
+        return self.rank == 0
+
+
+def initialize_distributed(args: argparse.Namespace) -> DistributedContext:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return DistributedContext(enabled=False, rank=0, local_rank=0, world_size=1)
+    if not torch.cuda.is_available():
+        raise RuntimeError("torchrun distributed training requires CUDA")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    # Non-main ranks wait while rank 0 runs generation-based validation and checkpoint I/O.
+    dist.init_process_group(backend="nccl", init_method="env://", timeout=timedelta(hours=2))
+    args.device = "cuda"
+    args.gpu_id = local_rank
+    return DistributedContext(
+        enabled=True,
+        rank=dist.get_rank(),
+        local_rank=local_rank,
+        world_size=dist.get_world_size(),
+    )
+
+
+def distributed_barrier(context: DistributedContext) -> None:
+    if context.enabled:
+        dist.barrier()
+
+
+def distributed_any(value: bool, device: torch.device, context: DistributedContext) -> bool:
+    if not context.enabled:
+        return value
+    flag = torch.tensor([1 if value else 0], dtype=torch.int32, device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+    return bool(flag.item())
+
+
+def distributed_mean(value: float, device: torch.device, context: DistributedContext) -> float:
+    if not context.enabled:
+        return value
+    tensor = torch.tensor([value], dtype=torch.float64, device=device)
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return float((tensor / context.world_size).item())
+
+
+def distributed_mean_optional(value: float | None, device: torch.device, context: DistributedContext) -> float | None:
+    if not context.enabled:
+        return value
+    pair = torch.tensor(
+        [0.0 if value is None else value, 0.0 if value is None else 1.0],
+        dtype=torch.float64,
+        device=device,
+    )
+    dist.all_reduce(pair, op=dist.ReduceOp.SUM)
+    return float((pair[0] / pair[1]).item()) if pair[1].item() > 0 else None
+
+
+def trainable_parameters(trainable: dict[str, list[torch.Tensor]]) -> list[torch.Tensor]:
+    return [parameter for group in trainable.values() for parameter in group]
+
+
+def synchronize_gradients(
+    parameters: list[torch.Tensor],
+    device: torch.device,
+    context: DistributedContext,
+    bucket_size_mb: int,
+) -> None:
+    """Average registered hypernetwork and external MetaLoRA gradients across ranks."""
+    if not context.enabled:
+        return
+    presence = torch.tensor(
+        [1 if parameter.grad is not None else 0 for parameter in parameters],
+        dtype=torch.int32,
+        device=device,
+    )
+    dist.all_reduce(presence, op=dist.ReduceOp.SUM)
+    active_parameters = []
+    for index, parameter in enumerate(parameters):
+        active_ranks = int(presence[index].item())
+        if active_ranks == 0:
+            continue
+        if parameter.grad is None:
+            parameter.grad = torch.zeros_like(parameter)
+        active_parameters.append(parameter)
+
+    max_bucket_bytes = max(1, bucket_size_mb) * 1024 * 1024
+    bucket: list[torch.Tensor] = []
+    bucket_bytes = 0
+
+    def flush() -> None:
+        nonlocal bucket, bucket_bytes
+        if not bucket:
+            return
+        gradients = [parameter.grad for parameter in bucket]
+        flat = torch._utils._flatten_dense_tensors(gradients)
+        dist.all_reduce(flat, op=dist.ReduceOp.SUM)
+        flat.div_(context.world_size)
+        for gradient, averaged in zip(gradients, torch._utils._unflatten_dense_tensors(flat, gradients)):
+            gradient.copy_(averaged)
+        bucket = []
+        bucket_bytes = 0
+
+    for parameter in active_parameters:
+        gradient = parameter.grad
+        gradient_bytes = gradient.numel() * gradient.element_size()
+        if bucket and (gradient.dtype != bucket[0].grad.dtype or bucket_bytes + gradient_bytes > max_bucket_bytes):
+            flush()
+        bucket.append(parameter)
+        bucket_bytes += gradient_bytes
+    flush()
+
+
+def init_wandb(args: argparse.Namespace, context: DistributedContext):
+    if not context.is_main or not args.wandb_project or args.wandb_mode == "disabled":
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError("Install wandb or omit --wandb-project") from exc
+    return wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity or None,
+        name=args.wandb_run_name or None,
+        tags=args.wandb_tags or None,
+        mode=args.wandb_mode,
+        dir=str(resolve_path(args.output_dir)),
+        config=vars(args),
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,6 +254,12 @@ def parse_args() -> argparse.Namespace:
         default="contiguous",
         help="How to select turns when an ordered stream is longer than recurrent_steps.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Streams accumulated per optimizer step on each rank; global batch equals this times world size.",
+    )
     parser.add_argument("--max-steps", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--metalora-learning-rate", type=float, default=None)
@@ -121,6 +269,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-every", type=int, default=500, help="Validation interval; 0 disables evaluation.")
     parser.add_argument("--eval-trials", type=int, default=20)
     parser.add_argument("--eval-fact-counts", type=int, nargs="+", default=None)
+    parser.add_argument("--eval-example-max-new-tokens", type=int, default=256)
+    parser.add_argument("--eval-example-max-chars", type=int, default=2000)
+    parser.add_argument(
+        "--print-eval-example",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Print one deterministic validation reconstruction reference/prediction pair.",
+    )
     parser.add_argument(
         "--eval-objective",
         choices=["auto", "qa", "reconstruction", "both"],
@@ -137,6 +293,7 @@ def parse_args() -> argparse.Namespace:
         help="Metric used to select output-dir/best. auto uses reconstruction loss for reconstruction-only training.",
     )
     parser.add_argument("--save-every", type=int, default=500)
+    parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--answer-max-length", type=int, default=1024)
     parser.add_argument("--max-new-tokens", type=int, default=64)
@@ -160,6 +317,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--freeze-mem-tokens", action="store_false", dest="train_mem_tokens", help=argparse.SUPPRESS)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--distributed-bucket-mb", type=int, default=64)
+    parser.add_argument("--wandb-project", type=str, default="")
+    parser.add_argument("--wandb-entity", type=str, default="")
+    parser.add_argument("--wandb-run-name", type=str, default="")
+    parser.add_argument("--wandb-tags", nargs="*", default=None)
+    parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--gpu-id", type=int, default=None)
     return parser.parse_args()
@@ -426,12 +589,39 @@ def generate_answer(metanetwork, tokenizer, lora_dict, question: str, device, ma
     return answer, raw
 
 
+def generate_reconstruction(metanetwork, tokenizer, lora_dict, device, max_new_tokens: int) -> str:
+    enc = tokenizer.apply_chat_template(
+        [{"role": "user", "content": reconstruction_prompt()}],
+        add_generation_prompt=True,
+        tokenize=True,
+        return_tensors="pt",
+        return_dict=True,
+        enable_thinking=False,
+    )
+    input_ids = enc["input_ids"].to(device)
+    attention_mask = enc["attention_mask"].to(device)
+    with torch.no_grad():
+        outputs = metanetwork.metamodel.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            do_sample=False,
+            use_cache=True,
+            ignore_mem_token=True,
+            loradict=lora_dict,
+        )
+    return tokenizer.decode(outputs[0, input_ids.shape[1] :], skip_special_tokens=True).strip()
+
+
 def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_args, device, rng) -> dict:
     metanetwork.eval()
     eval_rows = []
     reconstruction_loss_sum = 0.0
     reconstruction_tokens = 0
     reconstruction_readouts = 0
+    reconstruction_example = None
     eval_objective = resolve_eval_objective(args)
     evaluate_qa = eval_objective in {"qa", "both"}
     evaluate_reconstruction = eval_objective in {"reconstruction", "both"}
@@ -502,6 +692,27 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                         ) * token_count
                         reconstruction_tokens += token_count
                         reconstruction_readouts += 1
+                        if (
+                            reconstruction_example is None
+                            and trial == 0
+                            and is_final_turn
+                            and args.eval_example_max_new_tokens > 0
+                        ):
+                            prediction = generate_reconstruction(
+                                metanetwork,
+                                tokenizer,
+                                lora_dict,
+                                device,
+                                args.eval_example_max_new_tokens,
+                            )
+                            reconstruction_example = {
+                                "stream_id": stream.stream_id,
+                                "turn_id": turn.turn_id,
+                                "reference": reconstruction_text[: args.eval_example_max_chars],
+                                "prediction": prediction[: args.eval_example_max_chars],
+                                "reference_truncated": len(reconstruction_text) > args.eval_example_max_chars,
+                                "prediction_truncated": len(prediction) > args.eval_example_max_chars,
+                            }
                 else:
                     recurrent_memory = trainable_update_recurrent_memory(
                         turn.text,
@@ -549,18 +760,212 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                 "reconstruction_readouts": reconstruction_readouts,
             }
         )
+        if reconstruction_example is not None:
+            summary["reconstruction_example"] = reconstruction_example
     return summary
 
 
-def main() -> None:
-    args = parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+def compute_stream_training_result(
+    stream,
+    args,
+    metanetwork,
+    metalora,
+    tokenizer,
+    cfg,
+    device,
+    rng,
+    memory_position_offset: int,
+) -> dict:
+    recurrent_memory = None
+    observed_turns = []
+    supervised_turns = []
+    memory_norms_by_turn = []
+    for turn_index, current_turn in enumerate(stream.turns):
+        observed_turns.append(current_turn)
+        is_final_turn = turn_index + 1 == len(stream.turns)
+        supervise_turn = args.turn_supervision == "every" or is_final_turn
+        if supervise_turn:
+            lora_dict, recurrent_memory = trainable_generate_context_lora(
+                current_turn.text,
+                metanetwork,
+                tokenizer,
+                metalora,
+                cfg,
+                device,
+                use_gradient_checkpoint=args.use_gradient_checkpoint,
+                recurrent_memory=recurrent_memory,
+                return_recurrent_state=True,
+                memory_position_offset=memory_position_offset,
+            )
+            lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
+            objective = resolve_turn_objective(args, rng)
+            qa_source_turns = [current_turn] if args.qa_scope == "current" else observed_turns
+            qa_rows = sample_turn_qa(qa_source_turns, args.qa_per_context, rng)
+            if objective in {"qa", "both"} and not qa_rows:
+                if args.turn_objective == "mixed":
+                    objective = "reconstruction"
+                else:
+                    raise ValueError(
+                        f"Stream {stream.stream_id!r} turn {current_turn.turn_id!r} selected "
+                        f"{objective} supervision but no QA targets are available."
+                    )
+            reconstruction_text = (
+                current_turn.text
+                if args.reconstruction_scope == "current"
+                else "\n".join(turn.text for turn in observed_turns)
+            )
+            training_records = build_training_records(
+                accumulated_qa(qa_source_turns),
+                qa_rows,
+                args.use_contrastive,
+                objective,
+                reconstruction_text=reconstruction_text,
+            )
+            category_losses = compute_combined_lora_loss(
+                training_records,
+                lora_dict,
+                metanetwork,
+                tokenizer,
+                device,
+                args.answer_max_length,
+                use_gradient_checkpoint=args.use_answer_gradient_checkpoint,
+            )
+            first_category_loss = next(iter(category_losses.values()))
+            turn_loss = first_category_loss.new_zeros(())
+            if "answer" in category_losses:
+                turn_loss = turn_loss + category_losses["answer"]
+            if "contrastive" in category_losses:
+                turn_loss = turn_loss + args.contrastive_weight * category_losses["contrastive"]
+            if "reconstruction" in category_losses:
+                reconstruction_weight = 1.0 if objective == "reconstruction" else args.recon_weight
+                turn_loss = turn_loss + reconstruction_weight * category_losses["reconstruction"]
+            supervised_turns.append(
+                {
+                    "turn": turn_index + 1,
+                    "turn_id": current_turn.turn_id,
+                    "objective": objective,
+                    "qa_rows": qa_rows if objective in {"qa", "both"} else [],
+                    "category_losses": category_losses,
+                    "loss": turn_loss,
+                }
+            )
+        else:
+            recurrent_memory = trainable_update_recurrent_memory(
+                current_turn.text,
+                metanetwork,
+                tokenizer,
+                metalora,
+                cfg,
+                device,
+                use_gradient_checkpoint=args.use_gradient_checkpoint,
+                recurrent_memory=recurrent_memory,
+                memory_position_offset=memory_position_offset,
+            )
+        memory_norms_by_turn.append(
+            {
+                "turn": turn_index + 1,
+                "turn_id": current_turn.turn_id,
+                "norms": recurrent_memory_norm_stats(recurrent_memory),
+            }
+        )
+        detach_every = args.detach_recurrent_memory_every
+        if detach_every > 0 and (turn_index + 1) % detach_every == 0 and turn_index + 1 < len(stream.turns):
+            recurrent_memory = recurrent_memory.detach()
+
+    loss = torch.stack([turn["loss"] for turn in supervised_turns]).mean()
+
+    def mean_category_loss(category: str):
+        values = [turn["category_losses"][category] for turn in supervised_turns if category in turn["category_losses"]]
+        return torch.stack(values).mean() if values else None
+
+    answer_loss = mean_category_loss("answer")
+    contrastive_loss = mean_category_loss("contrastive")
+    recon_loss = mean_category_loss("reconstruction")
+    lora_stats = lora_tensor_stats(lora_dict)
+    memory_norms = memory_norms_by_turn[-1]["norms"]
+    turn_loss_log = [
+        {
+            "turn": turn["turn"],
+            "turn_id": turn["turn_id"],
+            "objective": turn["objective"],
+            "loss": float(turn["loss"].detach().cpu()),
+            "answer_loss": float(turn["category_losses"]["answer"].detach().cpu()) if "answer" in turn["category_losses"] else None,
+            "contrastive_loss": float(turn["category_losses"]["contrastive"].detach().cpu()) if "contrastive" in turn["category_losses"] else None,
+            "reconstruction_loss": float(turn["category_losses"]["reconstruction"].detach().cpu()) if "reconstruction" in turn["category_losses"] else None,
+            "qa_fact_ids": [row["id"] for row in turn["qa_rows"]],
+        }
+        for turn in supervised_turns
+    ]
+    log = {
+        "loss": float(loss.detach().cpu()),
+        "answer_loss": float(answer_loss.detach().cpu()) if answer_loss is not None else None,
+        "contrastive_loss": float(contrastive_loss.detach().cpu()) if contrastive_loss is not None else None,
+        "reconstruction_loss": float(recon_loss.detach().cpu()) if recon_loss is not None else None,
+        "stream_id": stream.stream_id,
+        "source_kind": stream.source_kind,
+        "turn_ids": [turn.turn_id for turn in stream.turns],
+        "fact_ids_by_turn": [list(turn.fact_ids) for turn in stream.turns],
+        "turn_losses": turn_loss_log,
+        "lora_stats": lora_stats,
+        "memory_norms": memory_norms,
+        "memory_norms_by_turn": memory_norms_by_turn,
+    }
+    return {
+        "loss": loss,
+        "finite": bool(torch.isfinite(loss).detach().cpu()) and lora_stats["finite"] >= 1.0,
+        "log": log,
+    }
+
+
+def aggregate_batch_logs(stream_logs: list[dict]) -> dict:
+    def mean_optional(key: str):
+        values = [row[key] for row in stream_logs if row[key] is not None]
+        return sum(values) / len(values) if values else None
+
+    memory_keys = sorted({key for row in stream_logs for key in row["memory_norms"]})
+    memory_norms = {
+        key: sum(row["memory_norms"][key] for row in stream_logs if key in row["memory_norms"])
+        / sum(1 for row in stream_logs if key in row["memory_norms"])
+        for key in memory_keys
+    }
+    return {
+        "loss": sum(row["loss"] for row in stream_logs) / len(stream_logs),
+        "answer_loss": mean_optional("answer_loss"),
+        "contrastive_loss": mean_optional("contrastive_loss"),
+        "reconstruction_loss": mean_optional("reconstruction_loss"),
+        "stream_ids": [row["stream_id"] for row in stream_logs],
+        "source_kinds": [row["source_kind"] for row in stream_logs],
+        "streams": stream_logs,
+        "lora_stats": {
+            "max_abs": max(row["lora_stats"]["max_abs"] for row in stream_logs),
+            "mean_abs": sum(row["lora_stats"]["mean_abs"] for row in stream_logs) / len(stream_logs),
+            "finite": min(row["lora_stats"]["finite"] for row in stream_logs),
+        },
+        "memory_norms": memory_norms,
+    }
+
+
+def run_training(args: argparse.Namespace, distributed: DistributedContext) -> None:
     if not 0.0 <= args.qa_turn_prob <= 1.0:
         raise ValueError("--qa-turn-prob must be between 0 and 1")
     if not 0.0 <= args.ordered_stream_probability <= 1.0:
         raise ValueError("--ordered-stream-probability must be between 0 and 1")
+    if args.batch_size < 1:
+        raise ValueError("--batch-size must be at least 1")
+    if args.max_steps < 1:
+        raise ValueError("--max-steps must be at least 1")
+    if args.log_every < 1:
+        raise ValueError("--log-every must be at least 1")
     if args.eval_every < 0:
         raise ValueError("--eval-every must be non-negative")
+    if args.eval_trials < 1 and args.eval_every > 0:
+        raise ValueError("--eval-trials must be at least 1 when evaluation is enabled")
+    if args.eval_example_max_new_tokens < 0:
+        raise ValueError("--eval-example-max-new-tokens must be non-negative")
+    if args.eval_example_max_chars < 1:
+        raise ValueError("--eval-example-max-chars must be at least 1")
+    if args.distributed_bucket_mb < 1:
+        raise ValueError("--distributed-bucket-mb must be at least 1")
     eval_objective = resolve_eval_objective(args)
     best_metric_name, maximize_best_metric = resolve_best_metric(args, eval_objective)
     if not args.train_file:
@@ -569,9 +974,20 @@ def main() -> None:
     val_data = load_recurrent_dataset(resolve_path(args.val_file)) if args.eval_every > 0 else None
     output_dir = resolve_path(args.output_dir)
     log_path = output_dir / "shine_posttrain_train_log.jsonl"
-    rng = random.Random(args.seed)
+    if distributed.is_main:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    distributed_barrier(distributed)
+    rng = random.Random(args.seed + distributed.rank * 100_003)
 
+    # All ranks must start from identical newly-created tensors (notably mem_tokens).
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     runtime_args, cfg, device, metanetwork, metalora, tokenizer, trainable = load_shine_for_training(args)
+    # Use rank-specific dropout/random streams after identical initialization and checkpoint loading.
+    torch.manual_seed(args.seed + distributed.rank)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed + distributed.rank)
     model_max_positions = getattr(getattr(metanetwork.metamodel, "config", None), "max_position_embeddings", None)
     if model_max_positions is not None and args.answer_max_length > int(model_max_positions):
         raise ValueError(
@@ -585,282 +1001,339 @@ def main() -> None:
             f"memory_position_offset ({memory_position_offset}) must be >= padded context length "
             f"({cfg.test.context_max_length})"
         )
-    LOGGER.info(
-        "Recurrent SHINE: steps=%s fixed_memory_position_offset=%s detach_every=%s",
-        args.recurrent_steps,
-        memory_position_offset,
-        args.detach_recurrent_memory_every,
-    )
-    LOGGER.info("Training hypernetwork=%s Metalora=%s", bool(trainable["metanetwork"]), bool(trainable["metalora"]))
+    if distributed.is_main:
+        LOGGER.info(
+            "Recurrent SHINE: steps=%s fixed_memory_position_offset=%s detach_every=%s",
+            args.recurrent_steps,
+            memory_position_offset,
+            args.detach_recurrent_memory_every,
+        )
+        LOGGER.info(
+            "Synchronous data parallel: world_size=%s batch_per_rank=%s global_batch=%s",
+            distributed.world_size,
+            args.batch_size,
+            args.batch_size * distributed.world_size,
+        )
+        LOGGER.info(
+            "Training hypernetwork=%s Metalora=%s",
+            bool(trainable["metanetwork"]),
+            bool(trainable["metalora"]),
+        )
     optimizer = build_optimizer(trainable, args)
+    parameters = trainable_parameters(trainable)
     best_val_metric = (-float("inf") if maximize_best_metric else float("inf")) if args.eval_every > 0 else None
+    wandb_run = init_wandb(args, distributed)
 
     train_progress = tqdm(
         range(1, args.max_steps + 1),
         desc="SHINE posttrain",
         dynamic_ncols=True,
         leave=True,
-    ) if tqdm is not None else range(1, args.max_steps + 1)
+    ) if tqdm is not None and distributed.is_main else range(1, args.max_steps + 1)
 
     for step in train_progress:
-        stream = sample_training_stream(
-            train_data,
-            recurrent_steps=args.recurrent_steps,
-            fact_counts=args.fact_counts,
-            context_format=args.context_format,
-            ordered_stream_probability=args.ordered_stream_probability,
-            window_policy=args.stream_window_policy,
-            rng=rng,
-        )
-        recurrent_memory = None
-        observed_turns = []
-        supervised_turns = []
-        memory_norms_by_turn = []
-        for turn_index, current_turn in enumerate(stream.turns):
-            observed_turns.append(current_turn)
-            is_final_turn = turn_index + 1 == len(stream.turns)
-            supervise_turn = args.turn_supervision == "every" or is_final_turn
-            if supervise_turn:
-                lora_dict, recurrent_memory = trainable_generate_context_lora(
-                    current_turn.text,
-                    metanetwork,
-                    tokenizer,
-                    metalora,
-                    cfg,
-                    device,
-                    use_gradient_checkpoint=args.use_gradient_checkpoint,
-                    recurrent_memory=recurrent_memory,
-                    return_recurrent_state=True,
-                    memory_position_offset=memory_position_offset,
-                )
-                lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
-                objective = resolve_turn_objective(args, rng)
-                qa_source_turns = [current_turn] if args.qa_scope == "current" else observed_turns
-                qa_rows = sample_turn_qa(
-                    qa_source_turns,
-                    args.qa_per_context,
-                    rng,
-                )
-                if objective in {"qa", "both"} and not qa_rows:
-                    if args.turn_objective == "mixed":
-                        objective = "reconstruction"
-                    else:
-                        raise ValueError(
-                            f"Stream {stream.stream_id!r} turn {current_turn.turn_id!r} selected "
-                            f"{objective} supervision but no QA targets are available."
-                        )
-                reconstruction_text = (
-                    current_turn.text
-                    if args.reconstruction_scope == "current"
-                    else "\n".join(turn.text for turn in observed_turns)
-                )
-                training_records = build_training_records(
-                    accumulated_qa(qa_source_turns),
-                    qa_rows,
-                    args.use_contrastive,
-                    objective,
-                    reconstruction_text=reconstruction_text,
-                )
-                category_losses = compute_combined_lora_loss(
-                    training_records,
-                    lora_dict,
-                    metanetwork,
-                    tokenizer,
-                    device,
-                    args.answer_max_length,
-                    use_gradient_checkpoint=args.use_answer_gradient_checkpoint,
-                )
-                first_category_loss = next(iter(category_losses.values()))
-                turn_loss = first_category_loss.new_zeros(())
-                if "answer" in category_losses:
-                    turn_loss = turn_loss + category_losses["answer"]
-                if "contrastive" in category_losses:
-                    turn_loss = turn_loss + args.contrastive_weight * category_losses["contrastive"]
-                if "reconstruction" in category_losses:
-                    reconstruction_weight = 1.0 if objective == "reconstruction" else args.recon_weight
-                    turn_loss = turn_loss + reconstruction_weight * category_losses["reconstruction"]
-                supervised_turns.append(
-                    {
-                        "turn": turn_index + 1,
-                        "turn_id": current_turn.turn_id,
-                        "objective": objective,
-                        "qa_rows": qa_rows if objective in {"qa", "both"} else [],
-                        "category_losses": category_losses,
-                        "loss": turn_loss,
-                    }
-                )
-            else:
-                recurrent_memory = trainable_update_recurrent_memory(
-                    current_turn.text,
-                    metanetwork,
-                    tokenizer,
-                    metalora,
-                    cfg,
-                    device,
-                    use_gradient_checkpoint=args.use_gradient_checkpoint,
-                    recurrent_memory=recurrent_memory,
-                    memory_position_offset=memory_position_offset,
-                )
-            memory_norms_by_turn.append(
-                {
-                    "turn": turn_index + 1,
-                    "turn_id": current_turn.turn_id,
-                    "norms": recurrent_memory_norm_stats(recurrent_memory),
-                }
-            )
-            detach_every = args.detach_recurrent_memory_every
-            if detach_every > 0 and (turn_index + 1) % detach_every == 0 and turn_index + 1 < len(stream.turns):
-                recurrent_memory = recurrent_memory.detach()
-
-        loss = torch.stack([turn["loss"] for turn in supervised_turns]).mean()
-
-        def mean_category_loss(category: str):
-            values = [turn["category_losses"][category] for turn in supervised_turns if category in turn["category_losses"]]
-            return torch.stack(values).mean() if values else None
-
-        answer_loss = mean_category_loss("answer")
-        contrastive_loss = mean_category_loss("contrastive")
-        recon_loss = mean_category_loss("reconstruction")
-        lora_stats = lora_tensor_stats(lora_dict)
-        memory_norms = memory_norms_by_turn[-1]["norms"]
-        if lora_stats["finite"] < 1.0:
-            raise FloatingPointError(f"Generated LoRA is non-finite at step {step}.")
-
-        turn_loss_log = [
-            {
-                "turn": turn["turn"],
-                "turn_id": turn["turn_id"],
-                "objective": turn["objective"],
-                "loss": float(turn["loss"].detach().cpu()),
-                "answer_loss": float(turn["category_losses"]["answer"].detach().cpu()) if "answer" in turn["category_losses"] else None,
-                "contrastive_loss": float(turn["category_losses"]["contrastive"].detach().cpu()) if "contrastive" in turn["category_losses"] else None,
-                "reconstruction_loss": float(turn["category_losses"]["reconstruction"].detach().cpu()) if "reconstruction" in turn["category_losses"] else None,
-                "qa_fact_ids": [row["id"] for row in turn["qa_rows"]],
-            }
-            for turn in supervised_turns
-        ]
-
-        if not torch.isfinite(loss):
-            bad_record = {
-                "step": step,
-                "loss": float(loss.detach().cpu()),
-                "answer_loss": float(answer_loss.detach().cpu()) if answer_loss is not None else None,
-                "contrastive_loss": float(contrastive_loss.detach().cpu()) if contrastive_loss is not None else None,
-                "reconstruction_loss": float(recon_loss.detach().cpu()) if recon_loss is not None else None,
-                "stream_id": stream.stream_id,
-                "source_kind": stream.source_kind,
-                "turn_ids": [turn.turn_id for turn in stream.turns],
-                "fact_ids_by_turn": [list(turn.fact_ids) for turn in stream.turns],
-                "turn_losses": turn_loss_log,
-                "nonfinite": True,
-                "lora_stats": lora_stats,
-                "memory_norms": memory_norms,
-                "memory_norms_by_turn": memory_norms_by_turn,
-            }
-            append_jsonl(log_path, bad_record)
-            raise FloatingPointError(
-                f"Non-finite loss at step {step}. "
-                "Try lowering --learning-rate, reducing --qa-per-context, or disabling/reweighting auxiliary losses."
-            )
-
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        if args.grad_clip_norm > 0:
-            trainable_params = [param for group in trainable.values() for param in group]
-            torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip_norm)
-        optimizer.step()
+        stream_logs = []
+        for micro_batch in range(args.batch_size):
+            stream = sample_training_stream(
+                train_data,
+                recurrent_steps=args.recurrent_steps,
+                fact_counts=args.fact_counts,
+                context_format=args.context_format,
+                ordered_stream_probability=args.ordered_stream_probability,
+                window_policy=args.stream_window_policy,
+                rng=rng,
+            )
+            local_error = None
+            stream_result = None
+            try:
+                stream_result = compute_stream_training_result(
+                    stream,
+                    args,
+                    metanetwork,
+                    metalora,
+                    tokenizer,
+                    cfg,
+                    device,
+                    rng,
+                    memory_position_offset,
+                )
+            except Exception as exc:  # Keep collective order aligned before propagating rank-local failures.
+                local_error = exc
+            if distributed_any(local_error is not None, device, distributed):
+                if local_error is not None:
+                    raise RuntimeError(
+                        f"rank={distributed.rank} step={step} micro_batch={micro_batch} failed"
+                    ) from local_error
+                raise RuntimeError(
+                    f"Another rank failed at step={step} micro_batch={micro_batch}; see the torchrun rank traceback."
+                )
 
+            local_nonfinite = not stream_result["finite"]
+            if distributed_any(local_nonfinite, device, distributed):
+                if distributed.is_main:
+                    append_jsonl(
+                        log_path,
+                        {
+                            "step": step,
+                            "micro_batch": micro_batch,
+                            "rank": distributed.rank,
+                            "nonfinite": True,
+                            "stream": stream_result["log"],
+                        },
+                    )
+                raise FloatingPointError(
+                    f"Non-finite loss or generated LoRA on at least one rank at step={step}, "
+                    f"micro_batch={micro_batch}."
+                )
+
+            local_backward_error = None
+            try:
+                (stream_result["loss"] / args.batch_size).backward()
+            except Exception as exc:  # Let healthy ranks leave the step instead of waiting in gradient all-reduce.
+                local_backward_error = exc
+            if distributed_any(local_backward_error is not None, device, distributed):
+                if local_backward_error is not None:
+                    raise RuntimeError(
+                        f"rank={distributed.rank} backward failed at step={step}, micro_batch={micro_batch}"
+                    ) from local_backward_error
+                raise RuntimeError(
+                    f"Another rank failed during backward at step={step}, micro_batch={micro_batch}."
+                )
+            stream_logs.append(stream_result["log"])
+            del stream_result
+
+        synchronize_gradients(
+            parameters,
+            device,
+            distributed,
+            bucket_size_mb=args.distributed_bucket_mb,
+        )
+        grad_norm = None
+        if args.grad_clip_norm > 0:
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(parameters, args.grad_clip_norm).detach().cpu())
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+        batch_log = aggregate_batch_logs(stream_logs)
         log_record = {
             "step": step,
-            "loss": float(loss.detach().cpu()),
-            "answer_loss": float(answer_loss.detach().cpu()) if answer_loss is not None else None,
-            "contrastive_loss": float(contrastive_loss.detach().cpu()) if contrastive_loss is not None else None,
-            "reconstruction_loss": float(recon_loss.detach().cpu()) if recon_loss is not None else None,
-            "stream_id": stream.stream_id,
-            "source_kind": stream.source_kind,
-            "turn_ids": [turn.turn_id for turn in stream.turns],
-            "fact_ids_by_turn": [list(turn.fact_ids) for turn in stream.turns],
-            "turn_losses": turn_loss_log,
-            "lora_stats": lora_stats,
-            "memory_norms": memory_norms,
-            "memory_norms_by_turn": memory_norms_by_turn,
+            "loss": distributed_mean(batch_log["loss"], device, distributed),
+            "answer_loss": distributed_mean_optional(batch_log["answer_loss"], device, distributed),
+            "contrastive_loss": distributed_mean_optional(batch_log["contrastive_loss"], device, distributed),
+            "reconstruction_loss": distributed_mean_optional(batch_log["reconstruction_loss"], device, distributed),
+            "grad_norm": grad_norm,
+            "batch_size_per_rank": args.batch_size,
+            "world_size": distributed.world_size,
+            "global_batch_size": args.batch_size * distributed.world_size,
+            "rank0_batch": batch_log,
         }
-        if tqdm is not None:
+        if tqdm is not None and distributed.is_main:
             postfix = {
                 "loss": f"{log_record['loss']:.4f}",
-                "lora_max": f"{lora_stats['max_abs']:.2f}",
-                "mem_v": f"{memory_norms.get('value_rms_mean', 0.0):.3f}",
+                "lora_max": f"{batch_log['lora_stats']['max_abs']:.2f}",
+                "mem_v": f"{batch_log['memory_norms'].get('value_rms_mean', 0.0):.3f}",
             }
-            if answer_loss is not None:
+            if log_record["answer_loss"] is not None:
                 postfix["answer"] = f"{log_record['answer_loss']:.4f}"
-            if contrastive_loss is not None:
+            if log_record["contrastive_loss"] is not None:
                 postfix["choice"] = f"{log_record['contrastive_loss']:.4f}"
-            if recon_loss is not None:
+            if log_record["reconstruction_loss"] is not None:
                 postfix["recon"] = f"{log_record['reconstruction_loss']:.4f}"
             train_progress.set_postfix(postfix)
-        if step % 10 == 0 or step == 1:
+        wandb_step_payload = {}
+        if distributed.is_main and (step % args.log_every == 0 or step == 1):
             append_jsonl(log_path, log_record)
             LOGGER.info(
-                "step=%s loss=%.6f answer=%s reconstruction=%s",
+                "step=%s loss=%.6f answer=%s reconstruction=%s grad_norm=%s global_batch=%s",
                 step,
                 log_record["loss"],
                 f"{log_record['answer_loss']:.6f}" if log_record["answer_loss"] is not None else "n/a",
                 f"{log_record['reconstruction_loss']:.6f}" if log_record["reconstruction_loss"] is not None else "n/a",
+                f"{grad_norm:.6f}" if grad_norm is not None else "n/a",
+                log_record["global_batch_size"],
             )
+            if wandb_run is not None:
+                wandb_payload = {
+                    "train/loss": log_record["loss"],
+                    "train/lora_max_abs_rank0": batch_log["lora_stats"]["max_abs"],
+                    "train/lora_mean_abs_rank0": batch_log["lora_stats"]["mean_abs"],
+                    "system/world_size": distributed.world_size,
+                    "system/batch_size_per_rank": args.batch_size,
+                    "system/global_batch_size": log_record["global_batch_size"],
+                }
+                if grad_norm is not None:
+                    wandb_payload["train/grad_norm"] = grad_norm
+                for category in ("answer", "contrastive", "reconstruction"):
+                    value = log_record[f"{category}_loss"]
+                    if value is not None:
+                        wandb_payload[f"train/{category}_loss"] = value
+                for name, value in batch_log["memory_norms"].items():
+                    wandb_payload[f"memory_rank0/{name}"] = value
+                wandb_step_payload.update(wandb_payload)
 
         eval_due = args.eval_every > 0 and (step % args.eval_every == 0 or step == args.max_steps)
         if eval_due:
-            val_summary = evaluate_current(metanetwork, metalora, tokenizer, cfg, val_data, args, runtime_args, device, rng)
-            log_record["val"] = val_summary
-            append_jsonl(log_path, log_record)
-            current_val_metric = (
-                val_summary["accuracy"] if best_metric_name == "qa_accuracy" else val_summary["reconstruction_loss"]
-            )
-            if not math.isfinite(current_val_metric):
-                raise FloatingPointError(
-                    f"Validation metric {best_metric_name} is non-finite: {current_val_metric}"
+            if distributed.is_main:
+                # Use the same samples at every checkpoint so the qualitative example is comparable.
+                eval_rng = random.Random(args.seed + 1_000_003)
+                val_summary = evaluate_current(
+                    metanetwork,
+                    metalora,
+                    tokenizer,
+                    cfg,
+                    val_data,
+                    args,
+                    runtime_args,
+                    device,
+                    eval_rng,
                 )
-            LOGGER.info(
-                "val step=%s objective=%s %s=%.6f",
-                step,
-                val_summary["objective"],
-                best_metric_name,
-                current_val_metric,
-            )
-            if tqdm is not None:
-                displayed_best = (
-                    max(best_val_metric, current_val_metric)
+                log_record["val"] = val_summary
+                append_jsonl(log_path, log_record)
+                current_val_metric = (
+                    val_summary["accuracy"]
+                    if best_metric_name == "qa_accuracy"
+                    else val_summary["reconstruction_loss"]
+                )
+                if not math.isfinite(current_val_metric):
+                    raise FloatingPointError(
+                        f"Validation metric {best_metric_name} is non-finite: {current_val_metric}"
+                    )
+                LOGGER.info(
+                    "val step=%s objective=%s %s=%.6f reconstruction_ppl=%s",
+                    step,
+                    val_summary["objective"],
+                    best_metric_name,
+                    current_val_metric,
+                    (
+                        f"{val_summary['reconstruction_perplexity']:.6f}"
+                        if "reconstruction_perplexity" in val_summary
+                        else "n/a"
+                    ),
+                )
+                example = val_summary.get("reconstruction_example")
+                if args.print_eval_example and example is not None:
+                    LOGGER.info(
+                        "val reconstruction example step=%s stream=%s turn=%s\n"
+                        "----- reference%s -----\n%s\n"
+                        "----- prediction%s -----\n%s\n"
+                        "----- end reconstruction example -----",
+                        step,
+                        example["stream_id"],
+                        example["turn_id"],
+                        " (truncated for log)" if example["reference_truncated"] else "",
+                        example["reference"],
+                        " (truncated for log)" if example["prediction_truncated"] else "",
+                        example["prediction"],
+                    )
+                if tqdm is not None:
+                    displayed_best = (
+                        max(best_val_metric, current_val_metric)
+                        if maximize_best_metric
+                        else min(best_val_metric, current_val_metric)
+                    )
+                    train_progress.set_postfix(
+                        {
+                            "loss": f"{log_record['loss']:.4f}",
+                            "val": f"{current_val_metric:.4f}",
+                            "best": f"{displayed_best:.4f}",
+                        }
+                    )
+                save_posttrain_checkpoint(
+                    output_dir / "latest",
+                    metanetwork,
+                    metalora,
+                    extra_state={"step": step, "val": val_summary, "config": vars(args)},
+                )
+                is_better = (
+                    current_val_metric > best_val_metric
                     if maximize_best_metric
-                    else min(best_val_metric, current_val_metric)
+                    else current_val_metric < best_val_metric
                 )
-                train_progress.set_postfix(
-                    {
-                        "loss": f"{log_record['loss']:.4f}",
-                        "val": f"{current_val_metric:.4f}",
-                        "best": f"{displayed_best:.4f}",
+                if is_better:
+                    best_val_metric = current_val_metric
+                    save_posttrain_checkpoint(
+                        output_dir / "best",
+                        metanetwork,
+                        metalora,
+                        extra_state={"step": step, "val": val_summary, "config": vars(args)},
+                    )
+                if wandb_run is not None:
+                    val_payload = {
+                        "val/best_metric": best_val_metric,
+                        f"val/{best_metric_name}": current_val_metric,
                     }
-                )
-            save_posttrain_checkpoint(output_dir / "latest", metanetwork, metalora, extra_state={"step": step, "val": val_summary, "config": vars(args)})
-            is_better = current_val_metric > best_val_metric if maximize_best_metric else current_val_metric < best_val_metric
-            if is_better:
-                best_val_metric = current_val_metric
-                save_posttrain_checkpoint(output_dir / "best", metanetwork, metalora, extra_state={"step": step, "val": val_summary, "config": vars(args)})
-        elif step == args.max_steps or (args.save_every > 0 and step % args.save_every == 0):
-            save_posttrain_checkpoint(output_dir / "latest", metanetwork, metalora, extra_state={"step": step, "config": vars(args)})
+                    for key in (
+                        "accuracy",
+                        "reconstruction_loss",
+                        "reconstruction_perplexity",
+                        "reconstruction_tokens",
+                        "reconstruction_readouts",
+                    ):
+                        if key in val_summary:
+                            val_payload[f"val/{key}"] = val_summary[key]
+                    if example is not None:
+                        val_payload["val/reconstruction_reference"] = example["reference"]
+                        val_payload["val/reconstruction_prediction"] = example["prediction"]
+                    wandb_step_payload.update(val_payload)
+            distributed_barrier(distributed)
+        else:
+            save_due = step == args.max_steps or (args.save_every > 0 and step % args.save_every == 0)
+            if save_due:
+                if distributed.is_main:
+                    save_posttrain_checkpoint(
+                        output_dir / "latest",
+                        metanetwork,
+                        metalora,
+                        extra_state={"step": step, "config": vars(args)},
+                    )
+                distributed_barrier(distributed)
+        if distributed.is_main and wandb_run is not None and wandb_step_payload:
+            wandb_run.log(wandb_step_payload, step=step)
         if args.empty_cache_every > 0 and step % args.empty_cache_every == 0 and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    final_summary = {
-        "best_val_metric": best_val_metric,
-        "best_metric_name": best_metric_name if args.eval_every > 0 else None,
-        "max_steps": args.max_steps,
-        "config": vars(args),
-    }
-    (output_dir / "summary.json").write_text(json.dumps(final_summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if distributed.is_main:
+        final_summary = {
+            "best_val_metric": best_val_metric,
+            "best_metric_name": best_metric_name if args.eval_every > 0 else None,
+            "max_steps": args.max_steps,
+            "world_size": distributed.world_size,
+            "batch_size_per_rank": args.batch_size,
+            "global_batch_size": args.batch_size * distributed.world_size,
+            "config": vars(args),
+        }
+        (output_dir / "summary.json").write_text(
+            json.dumps(final_summary, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        if wandb_run is not None:
+            wandb_run.summary.update(
+                {
+                    "best_val_metric": best_val_metric,
+                    "best_metric_name": best_metric_name if args.eval_every > 0 else None,
+                }
+            )
+            wandb_run.finish()
+    distributed_barrier(distributed)
     del metanetwork, metalora, tokenizer
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def main() -> None:
+    args = parse_args()
+    distributed = initialize_distributed(args)
+    logging.basicConfig(
+        level=logging.INFO if distributed.is_main else logging.WARNING,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    try:
+        run_training(args, distributed)
+    finally:
+        if distributed.enabled and dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

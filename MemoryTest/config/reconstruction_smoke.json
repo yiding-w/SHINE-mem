@@ -1,0 +1,58 @@
+{
+  "schema": "shine_recurrent_v1",
+  "streams": [
+    {
+      "stream_id": "smoke_alice",
+      "turns": [
+        {
+          "turn_id": "alice_1",
+          "text": "Alice likes tea."
+        },
+        {
+          "turn_id": "alice_2",
+          "text": "Alice lives in Paris."
+        }
+      ]
+    },
+    {
+      "stream_id": "smoke_bob",
+      "turns": [
+        {
+          "turn_id": "bob_1",
+          "text": "Bob likes coffee."
+        },
+        {
+          "turn_id": "bob_2",
+          "text": "Bob lives in Rome."
+        }
+      ]
+    },
+    {
+      "stream_id": "smoke_carol",
+      "turns": [
+        {
+          "turn_id": "carol_1",
+          "text": "Carol owns a cat."
+        },
+        {
+          "turn_id": "carol_2",
+          "text": "Carol works at a bank."
+        }
+      ]
+    },
+    {
+      "stream_id": "smoke_david",
+      "turns": [
+        {
+          "turn_id": "david_1",
+          "text": "David plays chess."
+        },
+        {
+          "turn_id": "david_2",
+          "text": "David studies physics."
+        }
+      ]
+    }
+  ],
+  "facts": []
+}
