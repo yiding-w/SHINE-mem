@@ -493,8 +493,18 @@ def load_shine_for_training(args: argparse.Namespace):
         metalora = cast_floating_tensors(metalora, dtype)
     if hasattr(metanetwork.metamodel, "config"):
         metanetwork.metamodel.config.use_cache = False
-    if hasattr(metanetwork.metamodel, "gradient_checkpointing_enable") and args.use_answer_gradient_checkpoint:
-        metanetwork.metamodel.gradient_checkpointing_enable()
+    # LoraQwen3Model already checkpoints decoder layers explicitly when its
+    # use_gradient_checkpoint argument is true.  Enabling Transformers' global
+    # GradientCheckpointingLayer wrapper as well nests a reentrant checkpoint
+    # around that explicit non-reentrant checkpoint.  A recurrent stream then
+    # reaches the first turn through both its own readout loss and the next
+    # turn's previous-memory K/V path, and the nested wrapper tries to reuse
+    # saved tensors that its first backward has freed.  Keep the global wrapper
+    # disabled; --use-gradient-checkpoint and
+    # --use-answer-gradient-checkpoint independently select the explicit
+    # non-reentrant path for context and supervised-answer forwards.
+    if hasattr(metanetwork.metamodel, "gradient_checkpointing_disable"):
+        metanetwork.metamodel.gradient_checkpointing_disable()
     metanetwork.train()
     trainable = set_posttrain_requires_grad(
         metanetwork,
