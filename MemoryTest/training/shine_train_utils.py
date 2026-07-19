@@ -263,7 +263,7 @@ def pack_supervised_tokens(
             f"(prompt={len(prompt_ids)}, target={len(answer_ids)}) but "
             f"--answer-max-length is {max_length}. Refusing to truncate the "
             "target silently. Increase --answer-max-length, reduce the ordered "
-            "stream window, or use --reconstruction-scope current."
+            "stream window, or use a shorter reconstruction target."
         )
     return prompt_ids + answer_ids, [-100] * len(prompt_ids) + answer_ids
 

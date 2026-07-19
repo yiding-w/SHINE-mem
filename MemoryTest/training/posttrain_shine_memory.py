@@ -16,7 +16,12 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
-from MemoryTest.prepare_data.prompt_templates import format_answer, question_prompt, reconstruction_prompt
+from MemoryTest.prepare_data.prompt_templates import (
+    completion_prompt,
+    format_answer,
+    question_prompt,
+    reconstruction_prompt,
+)
 from MemoryTest.evaluation.metrics import make_eval_row, summarize_examples
 from MemoryTest.training.lora_sft_utils import load_runtime_args
 from MemoryTest.training.recurrent_data import (
@@ -237,9 +242,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--reconstruction-scope",
-        choices=["current", "cumulative"],
+        choices=["current", "cumulative", "episodic"],
         default="current",
-        help="Whether <RECON> repeats the current chunk or all chunks observed so far.",
+        help=(
+            "current/cumulative use <RECON>. episodic uses <COMP>: after memory turn t, "
+            "give every observed session a random prefix and supervise the complete chronological history."
+        ),
+    )
+    parser.add_argument(
+        "--completion-prefix-min-ratio",
+        type=float,
+        default=0.1,
+        help="Minimum fraction of each session exposed as an episodic <COMP> prefix.",
+    )
+    parser.add_argument(
+        "--completion-prefix-max-ratio",
+        type=float,
+        default=0.5,
+        help="Maximum fraction of each session exposed as an episodic <COMP> prefix.",
     )
     parser.add_argument(
         "--qa-scope",
@@ -392,7 +412,8 @@ def build_training_records(
     qa_rows: list[dict],
     use_contrastive: bool,
     objective: str,
-    reconstruction_text: str,
+    reconstruction_text: str | None,
+    reconstruction_records: list[dict] | None = None,
 ) -> list[dict]:
     records = []
     include_qa = objective in {"qa", "both"}
@@ -433,15 +454,63 @@ def build_training_records(
                 }
             )
     if include_reconstruction:
-        records.append(
+        if reconstruction_records is not None:
+            records.extend(reconstruction_records)
+        else:
+            if reconstruction_text is None:
+                raise ValueError("reconstruction_text is required for <RECON> supervision")
+            records.append(
+                {
+                    "category": "reconstruction",
+                    "prompt": reconstruction_prompt(),
+                    # Official SHINE pretraining reconstructs evidence text after <RECON>.
+                    "answer": reconstruction_text,
+                }
+            )
+    return records
+
+
+def build_reconstruction_records(tokenizer, observed_turns, args, rng: random.Random) -> list[dict]:
+    """Build one readout whose target is the complete currently observed history."""
+    if args.reconstruction_scope != "episodic":
+        reconstruction_text = (
+            observed_turns[-1].text
+            if args.reconstruction_scope == "current"
+            else "\n".join(turn.text for turn in observed_turns)
+        )
+        return [
             {
                 "category": "reconstruction",
                 "prompt": reconstruction_prompt(),
-                # Official SHINE pretraining reconstructs evidence text after <RECON>.
                 "answer": reconstruction_text,
+                "reference": reconstruction_text,
+                "session_prefixes": [],
             }
+        ]
+
+    session_prefixes = []
+    for turn in observed_turns:
+        content_ids = tokenizer(turn.text, add_special_tokens=False)["input_ids"]
+        if not content_ids:
+            raise ValueError(
+                f"Episodic completion requires a non-empty session, but turn {turn.turn_id!r} is empty."
+            )
+        prefix_ratio = rng.uniform(
+            args.completion_prefix_min_ratio,
+            args.completion_prefix_max_ratio,
         )
-    return records
+        prefix_tokens = max(1, min(len(content_ids), round(len(content_ids) * prefix_ratio)))
+        session_prefixes.append(tokenizer.decode(content_ids[:prefix_tokens], skip_special_tokens=False))
+    complete_history = "\n".join(turn.text for turn in observed_turns)
+    return [
+        {
+            "category": "reconstruction",
+            "prompt": completion_prompt(session_prefixes),
+            "answer": complete_history,
+            "reference": complete_history,
+            "session_prefixes": session_prefixes,
+        }
+    ]
 
 
 def default_train_file() -> str:
@@ -643,9 +712,17 @@ def generate_answer(metanetwork, tokenizer, lora_dict, question: str, device, ma
     return answer, raw
 
 
-def generate_reconstruction(metanetwork, tokenizer, lora_dict, device, max_new_tokens: int) -> str:
+def generate_reconstruction(
+    metanetwork,
+    tokenizer,
+    lora_dict,
+    device,
+    max_new_tokens: int,
+    record: dict | None = None,
+) -> str:
+    record = record or {"prompt": reconstruction_prompt(), "answer": ""}
     enc = tokenizer.apply_chat_template(
-        [{"role": "user", "content": reconstruction_prompt()}],
+        [{"role": "user", "content": record["prompt"]}],
         add_generation_prompt=True,
         tokenize=True,
         return_tensors="pt",
@@ -756,17 +833,11 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                     )
                     lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
                     if evaluate_reconstruction:
-                        reconstruction_text = (
-                            turn.text
-                            if args.reconstruction_scope == "current"
-                            else "\n".join(item.text for item in observed_turns)
-                        )
-                        reconstruction_records = build_training_records(
-                            qa_candidates=[],
-                            qa_rows=[],
-                            use_contrastive=False,
-                            objective="reconstruction",
-                            reconstruction_text=reconstruction_text,
+                        reconstruction_records = build_reconstruction_records(
+                            tokenizer,
+                            observed_turns,
+                            args,
+                            rng,
                         )
                         reconstruction_losses, token_counts = compute_combined_lora_loss(
                             reconstruction_records,
@@ -787,23 +858,35 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                             trial == 0
                             and args.eval_example_max_new_tokens > 0
                         ):
+                            reconstruction_record = reconstruction_records[0]
                             prediction = generate_reconstruction(
                                 metanetwork,
                                 tokenizer,
                                 lora_dict,
                                 device,
                                 args.eval_example_max_new_tokens,
+                                record=reconstruction_record,
+                            )
+                            reference = reconstruction_record["reference"]
+                            prefix_display = "\n".join(
+                                f"session {index}: {prefix}"
+                                for index, prefix in enumerate(
+                                    reconstruction_record["session_prefixes"],
+                                    start=1,
+                                )
                             )
                             example = {
                                 "stream_id": stream.stream_id,
                                 "turn": turn_index + 1,
                                 "turn_id": turn.turn_id,
+                                "session_prefixes": prefix_display[: args.eval_example_max_chars],
+                                "prefixes_truncated": len(prefix_display) > args.eval_example_max_chars,
                                 "loss": readout_loss,
                                 "perplexity": math.exp(min(readout_loss, 20.0)),
                                 "target_tokens": token_count,
-                                "reference": reconstruction_text[: args.eval_example_max_chars],
+                                "reference": reference[: args.eval_example_max_chars],
                                 "prediction": prediction[: args.eval_example_max_chars],
-                                "reference_truncated": len(reconstruction_text) > args.eval_example_max_chars,
+                                "reference_truncated": len(reference) > args.eval_example_max_chars,
                                 "prediction_truncated": len(prediction) > args.eval_example_max_chars,
                             }
                             if args.diagnose_lora_application:
@@ -821,6 +904,7 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                                     None,
                                     device,
                                     args.eval_example_max_new_tokens,
+                                    record=reconstruction_record,
                                 )
                                 example["prediction_without_lora"] = base_prediction[
                                     : args.eval_example_max_chars
@@ -922,9 +1006,17 @@ def report_validation(step: int, val_summary: dict, best_metric_name: str, args:
                     f"{example.get('prediction_without_lora', '')}\n"
                     "----- end LoRA application diagnostic -----"
                 )
+            prefixes_text = ""
+            if example.get("session_prefixes"):
+                prefixes_text = (
+                    "\n----- supplied session prefixes"
+                    f"{' (truncated for log)' if example.get('prefixes_truncated') else ''} -----\n"
+                    f"{example['session_prefixes']}"
+                )
             LOGGER.info(
-                "val reconstruction example step=%s stream=%s turn=%s turn_id=%s "
+                "val reconstruction example step=%s stream=%s memory_turn=%s memory_turn_id=%s "
                 "loss=%.6f ppl=%.6f target_tokens=%s\n"
+                "%s\n"
                 "----- reference%s -----\n%s\n"
                 "----- prediction%s -----\n%s%s\n"
                 "----- end reconstruction example -----",
@@ -935,6 +1027,7 @@ def report_validation(step: int, val_summary: dict, best_metric_name: str, args:
                 example.get("loss", float("nan")),
                 example.get("perplexity", float("nan")),
                 example.get("target_tokens", "n/a"),
+                prefixes_text,
                 " (truncated for log)" if example["reference_truncated"] else "",
                 example["reference"],
                 " (truncated for log)" if example["prediction_truncated"] else "",
@@ -957,9 +1050,11 @@ def validation_wandb_payload(val_summary: dict, best_metric_name: str, current_m
             payload[f"val/{key}"] = val_summary[key]
     for example in val_summary.get("reconstruction_examples", []):
         turn = example.get("turn", len(payload))
-        prefix = f"val/reconstruction_turn_{turn}"
+        prefix = f"val/reconstruction_memory_turn_{turn}"
         payload[f"{prefix}_loss"] = example["loss"]
         payload[f"{prefix}_perplexity"] = example["perplexity"]
+        if example.get("session_prefixes"):
+            payload[f"{prefix}_session_prefixes"] = example["session_prefixes"]
         payload[f"{prefix}_reference"] = example["reference"]
         payload[f"{prefix}_prediction"] = example["prediction"]
     return payload
@@ -1009,17 +1104,18 @@ def compute_stream_training_result(
                         f"Stream {stream.stream_id!r} turn {current_turn.turn_id!r} selected "
                         f"{objective} supervision but no QA targets are available."
                     )
-            reconstruction_text = (
-                current_turn.text
-                if args.reconstruction_scope == "current"
-                else "\n".join(turn.text for turn in observed_turns)
+            reconstruction_records = (
+                build_reconstruction_records(tokenizer, observed_turns, args, rng)
+                if objective in {"reconstruction", "both"}
+                else None
             )
             training_records = build_training_records(
                 accumulated_qa(qa_source_turns),
                 qa_rows,
                 args.use_contrastive,
                 objective,
-                reconstruction_text=reconstruction_text,
+                reconstruction_text=None,
+                reconstruction_records=reconstruction_records,
             )
             category_losses = compute_combined_lora_loss(
                 training_records,
@@ -1150,6 +1246,11 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         raise ValueError("--qa-turn-prob must be between 0 and 1")
     if not 0.0 <= args.ordered_stream_probability <= 1.0:
         raise ValueError("--ordered-stream-probability must be between 0 and 1")
+    if not 0.0 < args.completion_prefix_min_ratio <= args.completion_prefix_max_ratio <= 1.0:
+        raise ValueError(
+            "Completion prefix ratios must satisfy 0 < --completion-prefix-min-ratio <= "
+            "--completion-prefix-max-ratio <= 1"
+        )
     if args.batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
     if args.max_steps < 1:
@@ -1208,6 +1309,12 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
             args.recurrent_steps,
             memory_position_offset,
             args.detach_recurrent_memory_every,
+        )
+        LOGGER.info(
+            "Readout: reconstruction_scope=%s completion_prefix_ratio=[%.3f, %.3f]",
+            args.reconstruction_scope,
+            args.completion_prefix_min_ratio,
+            args.completion_prefix_max_ratio,
         )
         LOGGER.info(
             "Synchronous data parallel: world_size=%s batch_per_rank=%s global_batch=%s",

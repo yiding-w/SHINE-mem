@@ -88,5 +88,17 @@ def reconstruction_prompt() -> str:
     return "<RECON>"
 
 
+def completion_prompt(session_prefixes: Iterable[str]) -> str:
+    """Ask SHINE to reconstruct full history from one prefix per session."""
+    blocks = [
+        "<COMP>",
+        "Reconstruct the complete history in chronological order from the "
+        "session prefixes below. Output only the complete history.",
+    ]
+    for index, prefix in enumerate(session_prefixes, start=1):
+        blocks.extend([f"[SESSION {index} PREFIX]", str(prefix)])
+    return "\n\n".join(blocks)
+
+
 def format_answer(answer: str) -> str:
     return str(answer).strip()
