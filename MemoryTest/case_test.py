@@ -39,7 +39,7 @@ MINIMAL_CHAT_TEMPLATE = """{%- for message in messages %}
 {%- endfor %}
 {%- if add_generation_prompt %}
 {{- '<|im_start|>assistant\n' }}
-{%- if enable_thinking is defined and not enable_thinking %}
+{%- if enable_thinking is not defined or enable_thinking != false %}
 {{- '<think>\n\n</think>\n\n' }}
 {%- endif %}
 {%- endif %}

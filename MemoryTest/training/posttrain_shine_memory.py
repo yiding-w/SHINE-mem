@@ -82,7 +82,7 @@ def initialize_distributed(args: argparse.Namespace) -> DistributedContext:
 
 def distributed_barrier(context: DistributedContext) -> None:
     if context.enabled:
-        dist.barrier()
+        dist.barrier(device_ids=[context.local_rank])
 
 
 def distributed_any(value: bool, device: torch.device, context: DistributedContext) -> bool:
@@ -267,6 +267,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--eval-every", type=int, default=500, help="Validation interval; 0 disables evaluation.")
+    parser.add_argument(
+        "--eval-at-start",
+        action="store_true",
+        help="Evaluate the untouched input checkpoint at step 0 before any optimizer update.",
+    )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Evaluate the untouched input checkpoint at step 0 and exit without training or saving weights.",
+    )
     parser.add_argument("--eval-trials", type=int, default=20)
     parser.add_argument("--eval-fact-counts", type=int, nargs="+", default=None)
     parser.add_argument("--eval-example-max-new-tokens", type=int, default=256)
@@ -275,7 +285,7 @@ def parse_args() -> argparse.Namespace:
         "--print-eval-example",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Print one deterministic validation reconstruction reference/prediction pair.",
+        help="Print deterministic reconstruction reference/prediction pairs for every supervised turn in one stream.",
     )
     parser.add_argument(
         "--eval-objective",
@@ -409,7 +419,7 @@ def build_training_records(
                 "category": "reconstruction",
                 "prompt": reconstruction_prompt(),
                 # Official SHINE pretraining reconstructs evidence text after <RECON>.
-                "answer": "\n" + reconstruction_text,
+                "answer": reconstruction_text,
             }
         )
     return records
@@ -621,7 +631,7 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
     reconstruction_loss_sum = 0.0
     reconstruction_tokens = 0
     reconstruction_readouts = 0
-    reconstruction_example = None
+    reconstruction_examples = []
     eval_objective = resolve_eval_objective(args)
     evaluate_qa = eval_objective in {"qa", "both"}
     evaluate_reconstruction = eval_objective in {"reconstruction", "both"}
@@ -687,15 +697,12 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                             return_token_counts=True,
                         )
                         token_count = token_counts["reconstruction"]
-                        reconstruction_loss_sum += float(
-                            reconstruction_losses["reconstruction"].detach().cpu()
-                        ) * token_count
+                        readout_loss = float(reconstruction_losses["reconstruction"].detach().cpu())
+                        reconstruction_loss_sum += readout_loss * token_count
                         reconstruction_tokens += token_count
                         reconstruction_readouts += 1
                         if (
-                            reconstruction_example is None
-                            and trial == 0
-                            and is_final_turn
+                            trial == 0
                             and args.eval_example_max_new_tokens > 0
                         ):
                             prediction = generate_reconstruction(
@@ -705,14 +712,18 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                                 device,
                                 args.eval_example_max_new_tokens,
                             )
-                            reconstruction_example = {
+                            reconstruction_examples.append({
                                 "stream_id": stream.stream_id,
+                                "turn": turn_index + 1,
                                 "turn_id": turn.turn_id,
+                                "loss": readout_loss,
+                                "perplexity": math.exp(min(readout_loss, 20.0)),
+                                "target_tokens": token_count,
                                 "reference": reconstruction_text[: args.eval_example_max_chars],
                                 "prediction": prediction[: args.eval_example_max_chars],
                                 "reference_truncated": len(reconstruction_text) > args.eval_example_max_chars,
                                 "prediction_truncated": len(prediction) > args.eval_example_max_chars,
-                            }
+                            })
                 else:
                     recurrent_memory = trainable_update_recurrent_memory(
                         turn.text,
@@ -760,9 +771,79 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                 "reconstruction_readouts": reconstruction_readouts,
             }
         )
-        if reconstruction_example is not None:
-            summary["reconstruction_example"] = reconstruction_example
+        if reconstruction_examples:
+            summary["reconstruction_examples"] = reconstruction_examples
+            # Compatibility with older log consumers that expected one final-turn example.
+            summary["reconstruction_example"] = reconstruction_examples[-1]
     return summary
+
+
+def validation_metric(val_summary: dict, best_metric_name: str) -> float:
+    value = val_summary["accuracy"] if best_metric_name == "qa_accuracy" else val_summary["reconstruction_loss"]
+    if not math.isfinite(value):
+        raise FloatingPointError(f"Validation metric {best_metric_name} is non-finite: {value}")
+    return value
+
+
+def report_validation(step: int, val_summary: dict, best_metric_name: str, args: argparse.Namespace) -> float:
+    current_metric = validation_metric(val_summary, best_metric_name)
+    LOGGER.info(
+        "val step=%s objective=%s %s=%.6f reconstruction_ppl=%s",
+        step,
+        val_summary["objective"],
+        best_metric_name,
+        current_metric,
+        (
+            f"{val_summary['reconstruction_perplexity']:.6f}"
+            if "reconstruction_perplexity" in val_summary
+            else "n/a"
+        ),
+    )
+    if args.print_eval_example:
+        examples = val_summary.get("reconstruction_examples", [])
+        if not examples and val_summary.get("reconstruction_example") is not None:
+            examples = [val_summary["reconstruction_example"]]
+        for example in examples:
+            LOGGER.info(
+                "val reconstruction example step=%s stream=%s turn=%s turn_id=%s "
+                "loss=%.6f ppl=%.6f target_tokens=%s\n"
+                "----- reference%s -----\n%s\n"
+                "----- prediction%s -----\n%s\n"
+                "----- end reconstruction example -----",
+                step,
+                example["stream_id"],
+                example.get("turn", "n/a"),
+                example["turn_id"],
+                example.get("loss", float("nan")),
+                example.get("perplexity", float("nan")),
+                example.get("target_tokens", "n/a"),
+                " (truncated for log)" if example["reference_truncated"] else "",
+                example["reference"],
+                " (truncated for log)" if example["prediction_truncated"] else "",
+                example["prediction"],
+            )
+    return current_metric
+
+
+def validation_wandb_payload(val_summary: dict, best_metric_name: str, current_metric: float) -> dict:
+    payload = {f"val/{best_metric_name}": current_metric}
+    for key in (
+        "accuracy",
+        "reconstruction_loss",
+        "reconstruction_perplexity",
+        "reconstruction_tokens",
+        "reconstruction_readouts",
+    ):
+        if key in val_summary:
+            payload[f"val/{key}"] = val_summary[key]
+    for example in val_summary.get("reconstruction_examples", []):
+        turn = example.get("turn", len(payload))
+        prefix = f"val/reconstruction_turn_{turn}"
+        payload[f"{prefix}_loss"] = example["loss"]
+        payload[f"{prefix}_perplexity"] = example["perplexity"]
+        payload[f"{prefix}_reference"] = example["reference"]
+        payload[f"{prefix}_prediction"] = example["prediction"]
+    return payload
 
 
 def compute_stream_training_result(
@@ -958,7 +1039,8 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         raise ValueError("--log-every must be at least 1")
     if args.eval_every < 0:
         raise ValueError("--eval-every must be non-negative")
-    if args.eval_trials < 1 and args.eval_every > 0:
+    evaluation_enabled = args.eval_every > 0 or args.eval_at_start or args.eval_only
+    if args.eval_trials < 1 and evaluation_enabled:
         raise ValueError("--eval-trials must be at least 1 when evaluation is enabled")
     if args.eval_example_max_new_tokens < 0:
         raise ValueError("--eval-example-max-new-tokens must be non-negative")
@@ -971,7 +1053,7 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
     if not args.train_file:
         args.train_file = default_train_file()
     train_data = load_recurrent_dataset(resolve_path(args.train_file))
-    val_data = load_recurrent_dataset(resolve_path(args.val_file)) if args.eval_every > 0 else None
+    val_data = load_recurrent_dataset(resolve_path(args.val_file)) if evaluation_enabled else None
     output_dir = resolve_path(args.output_dir)
     log_path = output_dir / "shine_posttrain_train_log.jsonl"
     if distributed.is_main:
@@ -1021,11 +1103,47 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         )
     optimizer = build_optimizer(trainable, args)
     parameters = trainable_parameters(trainable)
-    best_val_metric = (-float("inf") if maximize_best_metric else float("inf")) if args.eval_every > 0 else None
+    best_val_metric = (-float("inf") if maximize_best_metric else float("inf")) if evaluation_enabled else None
     wandb_run = init_wandb(args, distributed)
 
+    initial_val_summary = None
+    if args.eval_at_start or args.eval_only:
+        if distributed.is_main:
+            eval_rng = random.Random(args.seed + 1_000_003)
+            initial_val_summary = evaluate_current(
+                metanetwork,
+                metalora,
+                tokenizer,
+                cfg,
+                val_data,
+                args,
+                runtime_args,
+                device,
+                eval_rng,
+            )
+            initial_metric = report_validation(0, initial_val_summary, best_metric_name, args)
+            best_val_metric = initial_metric
+            append_jsonl(log_path, {"step": 0, "val": initial_val_summary, "config": vars(args)})
+            if args.eval_at_start and not args.eval_only:
+                save_posttrain_checkpoint(
+                    output_dir / "best",
+                    metanetwork,
+                    metalora,
+                    extra_state={"step": 0, "val": initial_val_summary, "config": vars(args)},
+                )
+            if wandb_run is not None:
+                initial_payload = validation_wandb_payload(
+                    initial_val_summary,
+                    best_metric_name,
+                    initial_metric,
+                )
+                initial_payload["val/best_metric"] = best_val_metric
+                wandb_run.log(initial_payload, step=0)
+        distributed_barrier(distributed)
+
+    training_steps = 0 if args.eval_only else args.max_steps
     train_progress = tqdm(
-        range(1, args.max_steps + 1),
+        range(1, training_steps + 1),
         desc="SHINE posttrain",
         dynamic_ncols=True,
         leave=True,
@@ -1172,7 +1290,7 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                     wandb_payload[f"memory_rank0/{name}"] = value
                 wandb_step_payload.update(wandb_payload)
 
-        eval_due = args.eval_every > 0 and (step % args.eval_every == 0 or step == args.max_steps)
+        eval_due = args.eval_every > 0 and (step % args.eval_every == 0 or step == training_steps)
         if eval_due:
             if distributed.is_main:
                 # Use the same samples at every checkpoint so the qualitative example is comparable.
@@ -1190,42 +1308,7 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                 )
                 log_record["val"] = val_summary
                 append_jsonl(log_path, log_record)
-                current_val_metric = (
-                    val_summary["accuracy"]
-                    if best_metric_name == "qa_accuracy"
-                    else val_summary["reconstruction_loss"]
-                )
-                if not math.isfinite(current_val_metric):
-                    raise FloatingPointError(
-                        f"Validation metric {best_metric_name} is non-finite: {current_val_metric}"
-                    )
-                LOGGER.info(
-                    "val step=%s objective=%s %s=%.6f reconstruction_ppl=%s",
-                    step,
-                    val_summary["objective"],
-                    best_metric_name,
-                    current_val_metric,
-                    (
-                        f"{val_summary['reconstruction_perplexity']:.6f}"
-                        if "reconstruction_perplexity" in val_summary
-                        else "n/a"
-                    ),
-                )
-                example = val_summary.get("reconstruction_example")
-                if args.print_eval_example and example is not None:
-                    LOGGER.info(
-                        "val reconstruction example step=%s stream=%s turn=%s\n"
-                        "----- reference%s -----\n%s\n"
-                        "----- prediction%s -----\n%s\n"
-                        "----- end reconstruction example -----",
-                        step,
-                        example["stream_id"],
-                        example["turn_id"],
-                        " (truncated for log)" if example["reference_truncated"] else "",
-                        example["reference"],
-                        " (truncated for log)" if example["prediction_truncated"] else "",
-                        example["prediction"],
-                    )
+                current_val_metric = report_validation(step, val_summary, best_metric_name, args)
                 if tqdm is not None:
                     displayed_best = (
                         max(best_val_metric, current_val_metric)
@@ -1259,26 +1342,16 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                         extra_state={"step": step, "val": val_summary, "config": vars(args)},
                     )
                 if wandb_run is not None:
-                    val_payload = {
-                        "val/best_metric": best_val_metric,
-                        f"val/{best_metric_name}": current_val_metric,
-                    }
-                    for key in (
-                        "accuracy",
-                        "reconstruction_loss",
-                        "reconstruction_perplexity",
-                        "reconstruction_tokens",
-                        "reconstruction_readouts",
-                    ):
-                        if key in val_summary:
-                            val_payload[f"val/{key}"] = val_summary[key]
-                    if example is not None:
-                        val_payload["val/reconstruction_reference"] = example["reference"]
-                        val_payload["val/reconstruction_prediction"] = example["prediction"]
+                    val_payload = validation_wandb_payload(
+                        val_summary,
+                        best_metric_name,
+                        current_val_metric,
+                    )
+                    val_payload["val/best_metric"] = best_val_metric
                     wandb_step_payload.update(val_payload)
             distributed_barrier(distributed)
         else:
-            save_due = step == args.max_steps or (args.save_every > 0 and step % args.save_every == 0)
+            save_due = step == training_steps or (args.save_every > 0 and step % args.save_every == 0)
             if save_due:
                 if distributed.is_main:
                     save_posttrain_checkpoint(
@@ -1296,8 +1369,9 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
     if distributed.is_main:
         final_summary = {
             "best_val_metric": best_val_metric,
-            "best_metric_name": best_metric_name if args.eval_every > 0 else None,
-            "max_steps": args.max_steps,
+            "best_metric_name": best_metric_name if evaluation_enabled else None,
+            "initial_val": initial_val_summary,
+            "max_steps": training_steps,
             "world_size": distributed.world_size,
             "batch_size_per_rank": args.batch_size,
             "global_batch_size": args.batch_size * distributed.world_size,
@@ -1311,7 +1385,7 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
             wandb_run.summary.update(
                 {
                     "best_val_metric": best_val_metric,
-                    "best_metric_name": best_metric_name if args.eval_every > 0 else None,
+                    "best_metric_name": best_metric_name if evaluation_enabled else None,
                 }
             )
             wandb_run.finish()

@@ -273,16 +273,25 @@ def encode_supervised_records(tokenizer, records: list[dict], max_length: int, d
     label_rows = []
     categories = []
     for record in records:
+        prompt_messages = [{"role": "user", "content": record["prompt"]}]
         prompt_ids = tokenizer.apply_chat_template(
-            [{"role": "user", "content": record["prompt"]}],
+            prompt_messages,
             add_generation_prompt=True,
             tokenize=True,
             enable_thinking=False,
         )
-        answer_text = record["answer"]
-        if tokenizer.eos_token and not answer_text.endswith(tokenizer.eos_token):
-            answer_text += tokenizer.eos_token
-        answer_ids = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
+        full_ids = tokenizer.apply_chat_template(
+            prompt_messages + [{"role": "assistant", "content": record["answer"]}],
+            add_generation_prompt=False,
+            tokenize=True,
+            enable_thinking=False,
+        )
+        if full_ids[: len(prompt_ids)] != prompt_ids:
+            raise ValueError(
+                "The generation prompt is not a prefix of the supervised chat template; "
+                "the tokenizer template is incompatible with SHINE supervision."
+            )
+        answer_ids = full_ids[len(prompt_ids) :]
         input_ids, labels = pack_supervised_tokens(
             prompt_ids,
             answer_ids,
