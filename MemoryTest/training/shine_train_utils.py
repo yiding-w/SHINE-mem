@@ -340,6 +340,35 @@ def category_token_losses(logits: torch.Tensor, labels: torch.Tensor, categories
     return losses
 
 
+def supervised_record_metrics(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    categories: list[str],
+) -> list[dict[str, float | int | str]]:
+    """Compute teacher-forced loss and target count separately for each record."""
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+    token_losses = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.shape[-1]),
+        shift_labels.view(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).view_as(shift_labels)
+    target_mask = shift_labels.ne(-100)
+    metrics = []
+    for row_index, category in enumerate(categories):
+        row_mask = target_mask[row_index]
+        row_loss = token_losses[row_index][row_mask].mean()
+        metrics.append(
+            {
+                "category": str(category),
+                "loss": float(row_loss.detach().cpu()),
+                "token_count": int(row_mask.sum().detach().cpu()),
+            }
+        )
+    return metrics
+
+
 def compute_combined_lora_loss(
     records,
     lora_dict,
@@ -349,6 +378,7 @@ def compute_combined_lora_loss(
     max_length,
     use_gradient_checkpoint: bool = False,
     return_token_counts: bool = False,
+    return_record_metrics: bool = False,
 ):
     batch = encode_supervised_records(tokenizer, records, max_length=max_length, device=device)
     outputs = metanetwork.metamodel(
@@ -360,7 +390,7 @@ def compute_combined_lora_loss(
         use_gradient_checkpoint=use_gradient_checkpoint,
     )
     losses = category_token_losses(outputs.logits, batch["labels"], batch["categories"])
-    if not return_token_counts:
+    if not return_token_counts and not return_record_metrics:
         return losses
     shifted_labels = batch["labels"][:, 1:]
     token_counts = {}
@@ -371,7 +401,13 @@ def compute_combined_lora_loss(
             dtype=torch.bool,
         )
         token_counts[category] = int(shifted_labels[row_mask].ne(-100).sum().detach().cpu())
-    return losses, token_counts
+    if not return_record_metrics:
+        return losses, token_counts
+    return losses, token_counts, supervised_record_metrics(
+        outputs.logits,
+        batch["labels"],
+        batch["categories"],
+    )
 
 
 def encode_reconstruction(tokenizer, context_rows: list[dict], max_length: int, device):

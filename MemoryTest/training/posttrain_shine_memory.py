@@ -246,7 +246,7 @@ def parse_args() -> argparse.Namespace:
         default="current",
         help=(
             "current/cumulative use <RECON>. episodic uses <COMP>: after memory turn t, "
-            "give every observed session a random prefix and supervise the complete chronological history."
+            "each source session gets a random prefix and a full target from that session through turn t."
         ),
     )
     parser.add_argument(
@@ -471,7 +471,7 @@ def build_training_records(
 
 
 def build_reconstruction_records(tokenizer, observed_turns, args, rng: random.Random) -> list[dict]:
-    """Build one readout whose target is the complete currently observed history."""
+    """Build one addressable readout for every observed source session."""
     if args.reconstruction_scope != "episodic":
         reconstruction_text = (
             observed_turns[-1].text
@@ -484,12 +484,15 @@ def build_reconstruction_records(tokenizer, observed_turns, args, rng: random.Ra
                 "prompt": reconstruction_prompt(),
                 "answer": reconstruction_text,
                 "reference": reconstruction_text,
-                "session_prefixes": [],
+                "session_prefix": "",
+                "source_turn": len(observed_turns),
+                "source_turn_id": observed_turns[-1].turn_id,
             }
         ]
 
-    session_prefixes = []
-    for turn in observed_turns:
+    records = []
+    observed_sessions = len(observed_turns)
+    for source_index, turn in enumerate(observed_turns):
         content_ids = tokenizer(turn.text, add_special_tokens=False)["input_ids"]
         if not content_ids:
             raise ValueError(
@@ -500,17 +503,23 @@ def build_reconstruction_records(tokenizer, observed_turns, args, rng: random.Ra
             args.completion_prefix_max_ratio,
         )
         prefix_tokens = max(1, min(len(content_ids), round(len(content_ids) * prefix_ratio)))
-        session_prefixes.append(tokenizer.decode(content_ids[:prefix_tokens], skip_special_tokens=False))
-    complete_history = "\n".join(turn.text for turn in observed_turns)
-    return [
-        {
-            "category": "reconstruction",
-            "prompt": completion_prompt(session_prefixes),
-            "answer": complete_history,
-            "reference": complete_history,
-            "session_prefixes": session_prefixes,
-        }
-    ]
+        session_prefix = tokenizer.decode(content_ids[:prefix_tokens], skip_special_tokens=False)
+        history_tail = "\n".join(item.text for item in observed_turns[source_index:])
+        source_turn = source_index + 1
+        records.append(
+            {
+                "category": "reconstruction",
+                "prompt": completion_prompt(session_prefix, source_turn, observed_sessions),
+                # Prefix is a user-side address. The complete source session is
+                # still in the assistant target, so none of its tokens are masked.
+                "answer": history_tail,
+                "reference": history_tail,
+                "session_prefix": session_prefix,
+                "source_turn": source_turn,
+                "source_turn_id": turn.turn_id,
+            }
+        )
+    return records
 
 
 def default_train_file() -> str:
@@ -839,7 +848,7 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                             args,
                             rng,
                         )
-                        reconstruction_losses, token_counts = compute_combined_lora_loss(
+                        reconstruction_losses, token_counts, record_metrics = compute_combined_lora_loss(
                             reconstruction_records,
                             lora_dict,
                             metanetwork,
@@ -848,68 +857,68 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                             args.answer_max_length,
                             use_gradient_checkpoint=False,
                             return_token_counts=True,
+                            return_record_metrics=True,
                         )
                         token_count = token_counts["reconstruction"]
                         readout_loss = float(reconstruction_losses["reconstruction"].detach().cpu())
                         reconstruction_loss_sum += readout_loss * token_count
                         reconstruction_tokens += token_count
-                        reconstruction_readouts += 1
+                        reconstruction_readouts += len(reconstruction_records)
                         if (
                             trial == 0
                             and args.eval_example_max_new_tokens > 0
                         ):
-                            reconstruction_record = reconstruction_records[0]
-                            prediction = generate_reconstruction(
-                                metanetwork,
-                                tokenizer,
-                                lora_dict,
-                                device,
-                                args.eval_example_max_new_tokens,
-                                record=reconstruction_record,
-                            )
-                            reference = reconstruction_record["reference"]
-                            prefix_display = "\n".join(
-                                f"session {index}: {prefix}"
-                                for index, prefix in enumerate(
-                                    reconstruction_record["session_prefixes"],
-                                    start=1,
-                                )
-                            )
-                            example = {
-                                "stream_id": stream.stream_id,
-                                "turn": turn_index + 1,
-                                "turn_id": turn.turn_id,
-                                "session_prefixes": prefix_display[: args.eval_example_max_chars],
-                                "prefixes_truncated": len(prefix_display) > args.eval_example_max_chars,
-                                "loss": readout_loss,
-                                "perplexity": math.exp(min(readout_loss, 20.0)),
-                                "target_tokens": token_count,
-                                "reference": reference[: args.eval_example_max_chars],
-                                "prediction": prediction[: args.eval_example_max_chars],
-                                "reference_truncated": len(reference) > args.eval_example_max_chars,
-                                "prediction_truncated": len(prediction) > args.eval_example_max_chars,
-                            }
-                            if args.diagnose_lora_application:
-                                example["lora_diagnostic"] = diagnose_lora_application(
-                                    reconstruction_records,
+                            for reconstruction_record, record_metric in zip(
+                                reconstruction_records,
+                                record_metrics,
+                            ):
+                                prediction = generate_reconstruction(
+                                    metanetwork,
+                                    tokenizer,
                                     lora_dict,
-                                    metanetwork,
-                                    tokenizer,
-                                    device,
-                                    args.answer_max_length,
-                                )
-                                base_prediction = generate_reconstruction(
-                                    metanetwork,
-                                    tokenizer,
-                                    None,
                                     device,
                                     args.eval_example_max_new_tokens,
                                     record=reconstruction_record,
                                 )
-                                example["prediction_without_lora"] = base_prediction[
-                                    : args.eval_example_max_chars
-                                ]
-                            reconstruction_examples.append(example)
+                                reference = reconstruction_record["reference"]
+                                session_prefix = reconstruction_record["session_prefix"]
+                                example = {
+                                    "stream_id": stream.stream_id,
+                                    "turn": turn_index + 1,
+                                    "turn_id": turn.turn_id,
+                                    "source_turn": reconstruction_record["source_turn"],
+                                    "source_turn_id": reconstruction_record["source_turn_id"],
+                                    "session_prefix": session_prefix[: args.eval_example_max_chars],
+                                    "prefix_truncated": len(session_prefix) > args.eval_example_max_chars,
+                                    "loss": record_metric["loss"],
+                                    "perplexity": math.exp(min(record_metric["loss"], 20.0)),
+                                    "target_tokens": record_metric["token_count"],
+                                    "reference": reference[: args.eval_example_max_chars],
+                                    "prediction": prediction[: args.eval_example_max_chars],
+                                    "reference_truncated": len(reference) > args.eval_example_max_chars,
+                                    "prediction_truncated": len(prediction) > args.eval_example_max_chars,
+                                }
+                                if args.diagnose_lora_application:
+                                    example["lora_diagnostic"] = diagnose_lora_application(
+                                        [reconstruction_record],
+                                        lora_dict,
+                                        metanetwork,
+                                        tokenizer,
+                                        device,
+                                        args.answer_max_length,
+                                    )
+                                    base_prediction = generate_reconstruction(
+                                        metanetwork,
+                                        tokenizer,
+                                        None,
+                                        device,
+                                        args.eval_example_max_new_tokens,
+                                        record=reconstruction_record,
+                                    )
+                                    example["prediction_without_lora"] = base_prediction[
+                                        : args.eval_example_max_chars
+                                    ]
+                                reconstruction_examples.append(example)
                 else:
                     recurrent_memory = trainable_update_recurrent_memory(
                         turn.text,
@@ -1006,15 +1015,16 @@ def report_validation(step: int, val_summary: dict, best_metric_name: str, args:
                     f"{example.get('prediction_without_lora', '')}\n"
                     "----- end LoRA application diagnostic -----"
                 )
-            prefixes_text = ""
-            if example.get("session_prefixes"):
-                prefixes_text = (
-                    "\n----- supplied session prefixes"
-                    f"{' (truncated for log)' if example.get('prefixes_truncated') else ''} -----\n"
-                    f"{example['session_prefixes']}"
+            prefix_text = ""
+            if example.get("session_prefix"):
+                prefix_text = (
+                    "\n----- supplied source-session prefix"
+                    f"{' (truncated for log)' if example.get('prefix_truncated') else ''} -----\n"
+                    f"{example['session_prefix']}"
                 )
             LOGGER.info(
                 "val reconstruction example step=%s stream=%s memory_turn=%s memory_turn_id=%s "
+                "source_turn=%s source_turn_id=%s "
                 "loss=%.6f ppl=%.6f target_tokens=%s\n"
                 "%s\n"
                 "----- reference%s -----\n%s\n"
@@ -1024,10 +1034,12 @@ def report_validation(step: int, val_summary: dict, best_metric_name: str, args:
                 example["stream_id"],
                 example.get("turn", "n/a"),
                 example["turn_id"],
+                example.get("source_turn", "n/a"),
+                example.get("source_turn_id", "n/a"),
                 example.get("loss", float("nan")),
                 example.get("perplexity", float("nan")),
                 example.get("target_tokens", "n/a"),
-                prefixes_text,
+                prefix_text,
                 " (truncated for log)" if example["reference_truncated"] else "",
                 example["reference"],
                 " (truncated for log)" if example["prediction_truncated"] else "",
@@ -1050,11 +1062,12 @@ def validation_wandb_payload(val_summary: dict, best_metric_name: str, current_m
             payload[f"val/{key}"] = val_summary[key]
     for example in val_summary.get("reconstruction_examples", []):
         turn = example.get("turn", len(payload))
-        prefix = f"val/reconstruction_memory_turn_{turn}"
+        source_turn = example.get("source_turn", turn)
+        prefix = f"val/reconstruction_memory_turn_{turn}_source_turn_{source_turn}"
         payload[f"{prefix}_loss"] = example["loss"]
         payload[f"{prefix}_perplexity"] = example["perplexity"]
-        if example.get("session_prefixes"):
-            payload[f"{prefix}_session_prefixes"] = example["session_prefixes"]
+        if example.get("session_prefix"):
+            payload[f"{prefix}_session_prefix"] = example["session_prefix"]
         payload[f"{prefix}_reference"] = example["reference"]
         payload[f"{prefix}_prediction"] = example["prediction"]
     return payload
