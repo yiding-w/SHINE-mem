@@ -47,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Post-train SHINE by aligning generated LoRA with offline teacher LoRA targets.")
     parser.add_argument("--runtime-config", "--config", dest="runtime_config", type=str, default="MemoryTest/config/case_test.yaml")
     parser.add_argument("--checkpoint-dir", type=str, required=True)
+    parser.add_argument(
+        "--checkpoint-profile",
+        choices=["auto", "pretrain", "ift"],
+        default="auto",
+    )
     parser.add_argument("--teacher-bank-dir", type=str, required=True)
     parser.add_argument("--val-file", type=str, default="MemoryTest/json_data/splits/semantic_val.json")
     parser.add_argument("--output-dir", type=str, default="MemoryTest/checkpoints/shine_teacher_lora_posttrain")

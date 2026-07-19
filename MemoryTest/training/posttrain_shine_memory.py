@@ -190,6 +190,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Post-train SHINE on MemoryTest semantic facts.")
     parser.add_argument("--runtime-config", "--config", dest="runtime_config", type=str, default="MemoryTest/config/case_test.yaml")
     parser.add_argument("--checkpoint-dir", type=str, required=True)
+    parser.add_argument(
+        "--checkpoint-profile",
+        choices=["auto", "pretrain", "ift"],
+        default="auto",
+        help=(
+            "Construction profile for the input SHINE checkpoint. pretrain exactly follows "
+            "test_pretrain.py; ift follows inference.ipynb; auto infers from the path."
+        ),
+    )
     parser.add_argument("--train-file", type=str, default="")
     parser.add_argument("--val-file", type=str, default="MemoryTest/json_data/splits/semantic_val.json")
     parser.add_argument("--test-file", type=str, default="MemoryTest/json_data/splits/semantic_test.json")
@@ -433,9 +442,19 @@ def default_train_file() -> str:
 
 
 def load_shine_for_training(args: argparse.Namespace):
-    from MemoryTest.case_test import build_cfg, load_runtime, resolve_device, resolve_torch_dtype
+    from MemoryTest.case_test import (
+        build_cfg,
+        load_runtime,
+        resolve_checkpoint_profile,
+        resolve_device,
+        resolve_torch_dtype,
+    )
 
     runtime_args = load_runtime_args(args.runtime_config)
+    checkpoint_profile = resolve_checkpoint_profile(
+        args.checkpoint_dir,
+        getattr(args, "checkpoint_profile", "auto"),
+    )
     checkpoint_dir = args.checkpoint_dir
     latest_dir = resolve_path(args.output_dir) / "latest"
     if args.resume and latest_dir.exists():
@@ -452,7 +471,12 @@ def load_shine_for_training(args: argparse.Namespace):
     device = resolve_device(runtime_args.device, runtime_args.gpu_id)
     cfg = build_cfg(runtime_args)
     cfg.model.torch_dtype = args.torch_dtype
-    metanetwork, metalora, tokenizer = load_runtime(cfg, runtime_args.checkpoint_dir, device)
+    metanetwork, metalora, tokenizer = load_runtime(
+        cfg,
+        runtime_args.checkpoint_dir,
+        device,
+        checkpoint_profile=checkpoint_profile,
+    )
     dtype = resolve_torch_dtype(args.torch_dtype)
     if isinstance(dtype, torch.dtype):
         metanetwork.to(device=device, dtype=dtype)

@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 import argparse
+import ast
 import gc
+import hashlib
 import logging
 import os
 import re
@@ -27,23 +29,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 torch.backends.cuda.matmul.allow_tf32 = True
 
 LOGGER = logging.getLogger("case_test")
-
-MINIMAL_CHAT_TEMPLATE = """{%- for message in messages %}
-{%- if message.role == \"system\" %}
-{{- '<|im_start|>system\n' + message.content + '<|im_end|>\n' }}
-{%- elif message.role == \"user\" %}
-{{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' }}
-{%- elif message.role == \"assistant\" %}
-{{- '<|im_start|>assistant\n' + message.content + '<|im_end|>\n' }}
-{%- endif %}
-{%- endfor %}
-{%- if add_generation_prompt %}
-{{- '<|im_start|>assistant\n' }}
-{%- if enable_thinking is not defined or enable_thinking != false %}
-{{- '<think>\n\n</think>\n\n' }}
-{%- endif %}
-{%- endif %}
-"""
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant. Answer the question directly and output nothing else."
@@ -107,6 +92,15 @@ def parse_args() -> argparse.Namespace:
         type=str,
         config_key="checkpoint_dir",
         help="Path to the SHINE checkpoint directory containing metanetwork.pth and metalora.pth.",
+    )
+    parser.add_argument(
+        "--checkpoint-profile",
+        choices=["auto", "pretrain", "ift"],
+        default=str(defaults.get("checkpoint_profile", "auto")),
+        help=(
+            "SHINE checkpoint construction profile. pretrain reproduces test_pretrain.py "
+            "(full temporary model and two added tokens); ift reproduces inference.ipynb."
+        ),
     )
     _add_configurable_argument(
         parser,
@@ -257,12 +251,57 @@ def resolve_device(device_name: str, gpu_id: int) -> torch.device:
     return torch.device("cpu")
 
 
-def load_tokenizer(cfg):
+def resolve_checkpoint_profile(checkpoint_dir: str, requested: str = "auto") -> str:
+    if requested not in {"auto", "pretrain", "ift"}:
+        raise ValueError(f"Unknown SHINE checkpoint profile: {requested}")
+    if requested != "auto":
+        return requested
+    checkpoint_name = str(checkpoint_dir).lower()
+    if "pretrain" in checkpoint_name:
+        return "pretrain"
+    if "ift" in checkpoint_name:
+        return "ift"
+    LOGGER.warning(
+        "Could not infer SHINE checkpoint profile from %s; defaulting to ift. "
+        "Pass --checkpoint-profile explicitly for renamed/local checkpoints.",
+        checkpoint_dir,
+    )
+    return "ift"
+
+
+def load_official_shine_chat_template() -> str:
+    """Return the literal template used by the checked-in official test_pretrain.py."""
+    official_source = SHINE_ROOT / "test_pretrain.py"
+    tree = ast.parse(official_source.read_text(encoding="utf-8"), filename=str(official_source))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Attribute) and target.attr == "chat_template":
+                if isinstance(node.value.value, str):
+                    return node.value.value
+    raise RuntimeError(f"Could not find official tokenizer.chat_template literal in {official_source}")
+
+
+def load_tokenizer(cfg, checkpoint_profile: str = "ift"):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.tokenizer_from, padding_side="left", use_fast=True)
-    tokenizer.add_tokens(["<RECON>", "<COMP>", "<NOTHING>"])
-    tokenizer.chat_template = MINIMAL_CHAT_TEMPLATE
+    added_tokens = ["<RECON>", "<COMP>"]
+    if checkpoint_profile == "ift":
+        added_tokens.append("<NOTHING>")
+    tokenizer.add_tokens(added_tokens)
+    # Use the exact checked-in literal instead of assuming tokenizer_config.json
+    # contains a byte-identical version.
+    tokenizer.chat_template = load_official_shine_chat_template()
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
+    template_sha = hashlib.sha256(tokenizer.chat_template.encode("utf-8")).hexdigest()[:12]
+    LOGGER.info(
+        "Tokenizer profile=%s added_tokens=%s token_ids=%s chat_template_sha256=%s",
+        checkpoint_profile,
+        added_tokens,
+        {token: tokenizer.convert_tokens_to_ids(token) for token in added_tokens},
+        template_sha,
+    )
     return tokenizer
 
 
@@ -283,8 +322,15 @@ def resolve_torch_dtype(dtype_name: str | None):
     raise ValueError(f"Unsupported torch dtype: {dtype_name}")
 
 
-def load_runtime(cfg, checkpoint_dir: str, device: torch.device):
+def load_runtime(
+    cfg,
+    checkpoint_dir: str,
+    device: torch.device,
+    checkpoint_profile: str = "auto",
+):
     set_seed(int(cfg.run.seed))
+    checkpoint_profile = resolve_checkpoint_profile(checkpoint_dir, checkpoint_profile)
+    LOGGER.info("Using SHINE checkpoint profile=%s", checkpoint_profile)
     MetaModelCls = _import_class(cfg.model.metamodel_class_path)
     ConfigCls = _import_class(cfg.model.config_class_path)
 
@@ -294,9 +340,17 @@ def load_runtime(cfg, checkpoint_dir: str, device: torch.device):
     cfg.hidden_size = config.hidden_size
     cfg.num_layers = config.num_hidden_layers
 
-    LOGGER.info("Calculating num_mem_token")
-    with torch.device("meta"):
-        tmp_model = MetaModelCls(config)
+    LOGGER.info("Calculating num_mem_token with profile=%s", checkpoint_profile)
+    if checkpoint_profile == "pretrain":
+        # Deliberately match test_pretrain.py line for line. Constructing and
+        # loading the full temporary model is expensive, but it preserves the
+        # RNG state used before resize_token_embeddings initializes <RECON>.
+        tmp_model = MetaModelCls.from_pretrained(cfg.model.model_from, config=config)
+    else:
+        # MuLabPKU/SHINE inference.ipynb uses a meta-device temporary model for
+        # instruction-finetuned checkpoints.
+        with torch.device("meta"):
+            tmp_model = MetaModelCls(config)
     lora_params = tmp_model.lora_params_numel(cfg.model.lora_r)
     base_params = cfg.hidden_size * cfg.num_layers
     if lora_params % base_params != 0:
@@ -308,11 +362,15 @@ def load_runtime(cfg, checkpoint_dir: str, device: torch.device):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    tokenizer = load_tokenizer(cfg)
+    tokenizer = load_tokenizer(cfg, checkpoint_profile=checkpoint_profile)
 
     dtype = resolve_torch_dtype(getattr(cfg.model, "torch_dtype", None))
     model_kwargs = {}
-    if dtype is not None:
+    if checkpoint_profile == "pretrain":
+        # test_pretrain.py does not pass torch_dtype. Load/resize in FP32 first;
+        # callers may cast the fully restored runtime afterwards for training.
+        LOGGER.info("Loading main model from %s with official pretrain FP32 construction", cfg.model.model_from)
+    elif dtype is not None:
         model_kwargs["torch_dtype"] = dtype
         LOGGER.info("Loading main model from %s with torch_dtype=%s", cfg.model.model_from, dtype)
     else:
@@ -330,6 +388,16 @@ def load_runtime(cfg, checkpoint_dir: str, device: torch.device):
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
     LOGGER.info("Loading checkpoint from %s", checkpoint_dir)
     metanetwork, metalora, _ = load_checkpoint(metanetwork, checkpoint_dir, device)
+    mem_tokens = metanetwork.metamodel.model.mem_tokens.detach().float()
+    first_metanetwork_parameter = next(metanetwork.metanetwork.parameters()).detach().float()
+    LOGGER.info(
+        "Loaded SHINE checkpoint profile=%s num_mem_token=%s mem_tokens_rms=%.8f "
+        "metanetwork_first_parameter_rms=%.8f",
+        checkpoint_profile,
+        cfg.num_mem_token,
+        float(mem_tokens.square().mean().sqrt().cpu()),
+        float(first_metanetwork_parameter.square().mean().sqrt().cpu()),
+    )
     metanetwork.eval()
     return metanetwork, metalora, tokenizer
 
@@ -449,7 +517,12 @@ def main():
     cfg = build_cfg(args)
     context = resolve_context(args)
 
-    metanetwork, metalora, tokenizer = load_runtime(cfg, args.checkpoint_dir, device)
+    metanetwork, metalora, tokenizer = load_runtime(
+        cfg,
+        args.checkpoint_dir,
+        device,
+        checkpoint_profile=args.checkpoint_profile,
+    )
 
     if args.load_lora_path:
         LOGGER.info("Loading generated LoRA from %s", args.load_lora_path)

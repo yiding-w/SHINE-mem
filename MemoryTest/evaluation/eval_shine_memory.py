@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate SHINE memory behavior on MemoryTest semantic facts.")
     parser.add_argument("--runtime-config", "--config", dest="runtime_config", type=str, default="MemoryTest/config/case_test.yaml")
     parser.add_argument("--checkpoint-dir", type=str, default="")
+    parser.add_argument("--checkpoint-profile", choices=["auto", "pretrain", "ift"], default="auto")
     parser.add_argument("--baseline-checkpoint-dir", type=str, default="")
     parser.add_argument("--test-file", "--eval-file", dest="test_file", type=str, default="MemoryTest/json_data/splits/semantic_test.json")
     parser.add_argument("--output", type=str, default="MemoryTest/results/shine_memory_eval.json")
@@ -51,7 +52,14 @@ def cast_lora_to_model_dtype(lora_dict, metanetwork):
     return cast_floating_tensors(lora_dict, model_lora_dtype(metanetwork))
 
 
-def load_shine(runtime_config_path: str, checkpoint_dir: str, device_name: str | None, gpu_id: int | None, torch_dtype: str):
+def load_shine(
+    runtime_config_path: str,
+    checkpoint_dir: str,
+    checkpoint_profile: str,
+    device_name: str | None,
+    gpu_id: int | None,
+    torch_dtype: str,
+):
     from MemoryTest.case_test import build_cfg, load_runtime, resolve_device, resolve_torch_dtype
 
     runtime_args = load_runtime_args(runtime_config_path)
@@ -64,7 +72,12 @@ def load_shine(runtime_config_path: str, checkpoint_dir: str, device_name: str |
     device = resolve_device(runtime_args.device, runtime_args.gpu_id)
     cfg = build_cfg(runtime_args)
     cfg.model.torch_dtype = torch_dtype
-    metanetwork, metalora, tokenizer = load_runtime(cfg, runtime_args.checkpoint_dir, device)
+    metanetwork, metalora, tokenizer = load_runtime(
+        cfg,
+        runtime_args.checkpoint_dir,
+        device,
+        checkpoint_profile=checkpoint_profile,
+    )
     dtype = resolve_torch_dtype(torch_dtype)
     if isinstance(dtype, torch.dtype):
         metanetwork.to(device=device, dtype=dtype)
@@ -136,6 +149,7 @@ def evaluate_checkpoint(label: str, args: argparse.Namespace, checkpoint_dir: st
     runtime_args, cfg, device, metanetwork, metalora, tokenizer = load_shine(
         args.runtime_config,
         checkpoint_dir,
+        args.checkpoint_profile,
         args.device,
         args.gpu_id,
         args.torch_dtype,

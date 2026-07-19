@@ -50,6 +50,7 @@ def make_runtime_args(defaults: dict) -> Namespace:
     return Namespace(
         model_path=defaults["model_path"],
         checkpoint_dir=defaults["checkpoint_dir"],
+        checkpoint_profile=str(defaults.get("checkpoint_profile", "auto")),
         device=defaults.get("device", "cuda"),
         gpu_id=int(defaults.get("gpu_id", 0)),
         seed=int(defaults.get("seed", 42)),
@@ -87,7 +88,12 @@ def bootstrap_runtime(runtime_config_path: str):
     runtime_args = make_runtime_args(load_yaml_defaults(runtime_config_path))
     device = resolve_device(runtime_args.device, runtime_args.gpu_id)
     cfg = build_cfg(runtime_args)
-    metanetwork, metalora, tokenizer = load_runtime(cfg, runtime_args.checkpoint_dir, device)
+    metanetwork, metalora, tokenizer = load_runtime(
+        cfg,
+        runtime_args.checkpoint_dir,
+        device,
+        checkpoint_profile=runtime_args.checkpoint_profile,
+    )
     return runtime_args, device, cfg, metanetwork, metalora, tokenizer
 
 
