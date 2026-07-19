@@ -1,0 +1,28 @@
+{
+  "schema": "shine_recurrent_v1",
+  "dataset": "Multi-Session Chat v0.1 single-stream overfit",
+  "streams": [
+    {
+      "stream_id": "train:ordered_3345",
+      "turns": [
+        {
+          "turn_id": "train:ordered_3345:session:0:chunk:0",
+          "text": "Speaker 1: Good morning off to basketball game\nSpeaker 2: Morning. I'm off shopping with friends after brunch.\nSpeaker 1: Eggs are the best for brunch\nSpeaker 2: They truly are. One of these days, I'm going to have to learn how to cook.\nSpeaker 1: Yes what is your food would you like to cook\nSpeaker 2: I do not cook at all, so I'll start with the basics.\nSpeaker 1: Maybe a simple meal like a small brunch.\nSpeaker 2: Oh, I don't know. I'm more interested in getting my bmw paid off right now.\nSpeaker 1: Yes I want to purchase a new car a different color than black\nSpeaker 2: Mine is purple. Next time, I'm getting a pink maclaren.\nSpeaker 1: That seem nice that car seem to be nice in black\nSpeaker 2: I like mine to have original colors."
+        },
+        {
+          "turn_id": "train:ordered_3345:session:1:chunk:0",
+          "text": "Speaker 1: I went to the basketball game that I mentioned, it was very thrilling.\nSpeaker 2: Awesome. Who were the teams?\nSpeaker 1: It was a couple of high school teams from the area. They're really good for such young players.\nSpeaker 2: Oh that's fun. I've been to a few high school basketball games. How is your car?\nSpeaker 1: It purrs like a kitten! Spent a lot of time on the body work as well\nSpeaker 2: Nice! My BMW is getting a bit old, thinking of buying a new car soon.\nSpeaker 1: Sweet! What are you thinking of getting?\nSpeaker 2: Maybe an SUV? I'd like something different. Any recommendations?\nSpeaker 1: The Range Rover Sport is pretty slick! Though it depends on your price range really.\nSpeaker 2: Range Rovers are a bit pricey, but I'll have to check them out. What make/model is your car?\nSpeaker 1: Got me an older mustang\nSpeaker 2: Oh love those cars! I really wanted a mustang convertible as a kid."
+        },
+        {
+          "turn_id": "train:ordered_3345:session:2:chunk:0",
+          "text": "Speaker 1: I got work done on my older mustang.\nSpeaker 2: That is so exciting. What work did you get done?\nSpeaker 1: I had to put it back in driving condition; new engine, fixed the brakes etc. cost me a fortune.\nSpeaker 2: I bet, what else needs to be done to it?\nSpeaker 1: Need to change the tires, and fix the blown motor; just too much but worth it. Have you made up your mind on what SUV you want to get?\nSpeaker 2: I haven't decided yet but am considering a Nissan Kicks.\nSpeaker 1: That's a good car and not really expensive. Is it fuel efficient though?\nSpeaker 2: It is not bad, the average is 36mpg.\nSpeaker 1: Not bad at all; I hear it is very roomy-spacious; you should really consider.\nSpeaker 2: Yeah, I think I will. How was the basketball game that you went to?\nSpeaker 1: It was okay; my team did not win so I was a little disappointed.\nSpeaker 2: Oh, do you have plans to go to another one?"
+        },
+        {
+          "turn_id": "train:ordered_3345:session:3:chunk:0",
+          "text": "Speaker 1: Just got the invoice for the rest of the work that needs to be done on my car... so expensive!\nSpeaker 2: Ouch? How much? Do you have the money to pay for it?\nSpeaker 1: $2000 for the front exterior. I have it, but just barely. I know its a lot, but I know it will pay off in the end.\nSpeaker 2: That is a lot. Pretty painful, but you love that car!\nSpeaker 1: I do and its not that bad considering its an original 1964. Not too many of those around any more.\nSpeaker 2: Certainly not. It is a very unique. Do you show it in car shows?\nSpeaker 1: Not yet, but I certainly plan on it. If I spend as much as I think its gonna cost, someone's gonna see it lol. Are you still considering a Nissan Kicks?\nSpeaker 2: I will come see if you show it off! I am liking the Kicks. What do you think of it?\nSpeaker 1: I think they're nice. Can you get one with a convertible top?\nSpeaker 2: I haven't looked into that. I don't generally like convertibles because they mess up your hair.\nSpeaker 1: Isn't that the truth! I don't think you can go wrong with a Nissan. They're very dependable. What color do you like?\nSpeaker 2: I like to be wild. I need something cool to match my purple bmw."
+        }
+      ]
+    }
+  ],
+  "facts": []
+}
