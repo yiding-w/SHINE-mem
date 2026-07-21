@@ -272,6 +272,7 @@ def encode_supervised_records(tokenizer, records: list[dict], max_length: int, d
     input_rows = []
     label_rows = []
     categories = []
+    loss_reductions = []
     for record in records:
         prompt_messages = [{"role": "user", "content": record["prompt"]}]
         prompt_ids = tokenizer.apply_chat_template(
@@ -301,6 +302,7 @@ def encode_supervised_records(tokenizer, records: list[dict], max_length: int, d
         input_rows.append(input_ids)
         label_rows.append(labels)
         categories.append(record["category"])
+        loss_reductions.append(record.get("loss_reduction", "token_mean"))
 
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     max_len = max(len(row) for row in input_rows)
@@ -318,10 +320,16 @@ def encode_supervised_records(tokenizer, records: list[dict], max_length: int, d
         "attention_mask": torch.tensor(attention_mask, dtype=torch.long, device=device),
         "labels": torch.tensor(padded_labels, dtype=torch.long, device=device),
         "categories": categories,
+        "loss_reductions": loss_reductions,
     }
 
 
-def category_token_losses(logits: torch.Tensor, labels: torch.Tensor, categories: list[str]) -> dict[str, torch.Tensor]:
+def category_token_losses(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    categories: list[str],
+    loss_reductions: list[str] | None = None,
+) -> dict[str, torch.Tensor]:
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = labels[:, 1:].contiguous()
     token_losses = F.cross_entropy(
@@ -331,12 +339,38 @@ def category_token_losses(logits: torch.Tensor, labels: torch.Tensor, categories
         reduction="none",
     ).view_as(shift_labels)
     mask = shift_labels.ne(-100)
+    if loss_reductions is None:
+        loss_reductions = ["token_mean"] * len(categories)
+    if len(loss_reductions) != len(categories):
+        raise ValueError("loss_reductions must have one entry per supervised record")
     losses = {}
     for category in sorted(set(categories)):
         row_mask = torch.tensor([item == category for item in categories], device=labels.device, dtype=torch.bool)
         category_mask = mask[row_mask]
-        if category_mask.any():
+        if not category_mask.any():
+            continue
+        reductions = {
+            reduction
+            for reduction, selected in zip(loss_reductions, row_mask.tolist())
+            if selected
+        }
+        if len(reductions) != 1:
+            raise ValueError(
+                f"Category {category!r} mixes incompatible loss reductions: {sorted(reductions)}"
+            )
+        reduction = reductions.pop()
+        if reduction == "token_mean":
             losses[category] = token_losses[row_mask][category_mask].mean()
+        elif reduction == "record_mean":
+            selected_losses = token_losses[row_mask]
+            row_losses = [
+                selected_losses[index][row_target_mask].mean()
+                for index, row_target_mask in enumerate(category_mask)
+                if row_target_mask.any()
+            ]
+            losses[category] = torch.stack(row_losses).mean()
+        else:
+            raise ValueError(f"Unsupported loss reduction {reduction!r}")
     return losses
 
 
@@ -389,7 +423,12 @@ def compute_combined_lora_loss(
         ignore_mem_token=True,
         use_gradient_checkpoint=use_gradient_checkpoint,
     )
-    losses = category_token_losses(outputs.logits, batch["labels"], batch["categories"])
+    losses = category_token_losses(
+        outputs.logits,
+        batch["labels"],
+        batch["categories"],
+        batch["loss_reductions"],
+    )
     if not return_token_counts and not return_record_metrics:
         return losses
     shifted_labels = batch["labels"][:, 1:]

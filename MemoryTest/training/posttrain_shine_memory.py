@@ -42,7 +42,10 @@ from MemoryTest.training.recurrent_data import (
     sample_training_stream,
     sample_turn_qa,
 )
-from MemoryTest.training.reconstruction_records import build_prefix_cumulative_record
+from MemoryTest.training.reconstruction_records import (
+    build_prefix_cumulative_record,
+    build_single_session_retention_records,
+)
 from MemoryTest.training.shine_train_utils import (
     append_jsonl,
     category_token_losses,
@@ -255,11 +258,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--reconstruction-scope",
-        choices=["current", "cumulative", "prefix_cumulative", "episodic"],
+        choices=["current", "cumulative", "prefix_cumulative", "single_session", "episodic"],
         default="current",
         help=(
             "current/cumulative use <RECON>. prefix_cumulative uses one short prefix from "
             "the beginning of session 1 and predicts its unseen suffix through turn t. "
+            "single_session gives every observed session an equal-weight prefix-to-suffix "
+            "retention readout. "
             "episodic gives every source session a prefix and a full tail through turn t."
         ),
     )
@@ -560,6 +565,8 @@ def build_reconstruction_records(tokenizer, observed_turns, args, rng: random.Ra
     """Build reconstruction readouts for the selected recurrent-memory objective."""
     if args.reconstruction_scope == "prefix_cumulative":
         return [build_prefix_cumulative_record(tokenizer, observed_turns, args, rng)]
+    if args.reconstruction_scope == "single_session":
+        return build_single_session_retention_records(tokenizer, observed_turns, args, rng)
 
     if args.reconstruction_scope != "episodic":
         reconstruction_text = (
@@ -866,8 +873,18 @@ def diagnose_lora_application(
     }
     with_lora = metanetwork.metamodel(loradict=lora_dict, **common).logits
     without_lora = metanetwork.metamodel(loradict=None, **common).logits
-    lora_losses = category_token_losses(with_lora, batch["labels"], batch["categories"])
-    base_losses = category_token_losses(without_lora, batch["labels"], batch["categories"])
+    lora_losses = category_token_losses(
+        with_lora,
+        batch["labels"],
+        batch["categories"],
+        batch["loss_reductions"],
+    )
+    base_losses = category_token_losses(
+        without_lora,
+        batch["labels"],
+        batch["categories"],
+        batch["loss_reductions"],
+    )
     target_mask = batch["labels"][:, 1:].ne(-100)
     target_delta = (with_lora[:, :-1] - without_lora[:, :-1])[target_mask].float()
     stats = lora_tensor_stats(lora_dict)
@@ -889,6 +906,7 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
     metanetwork.eval()
     eval_rows = []
     reconstruction_loss_sum = 0.0
+    reconstruction_loss_weight = 0
     reconstruction_tokens = 0
     reconstruction_readouts = 0
     reconstruction_examples = []
@@ -953,7 +971,14 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                         )
                         token_count = token_counts["reconstruction"]
                         readout_loss = float(reconstruction_losses["reconstruction"].detach().cpu())
-                        reconstruction_loss_sum += readout_loss * token_count
+                        if args.reconstruction_scope == "single_session":
+                            # The readout is already an equal mean over sessions. Average
+                            # those per-memory-turn means without reintroducing length bias.
+                            reconstruction_loss_sum += readout_loss
+                            reconstruction_loss_weight += 1
+                        else:
+                            reconstruction_loss_sum += readout_loss * token_count
+                            reconstruction_loss_weight += token_count
                         reconstruction_tokens += token_count
                         reconstruction_readouts += len(reconstruction_records)
                         if (
@@ -1046,15 +1071,19 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                 if evaluate_qa:
                     qa_summary = summarize_examples(eval_rows)
                     postfix.update({"acc": f"{qa_summary['accuracy']:.4f}", "qa_n": qa_summary["total"]})
-                if evaluate_reconstruction and reconstruction_tokens:
-                    postfix.update({"recon": f"{reconstruction_loss_sum / reconstruction_tokens:.4f}"})
+                if evaluate_reconstruction and reconstruction_loss_weight:
+                    postfix.update({"recon": f"{reconstruction_loss_sum / reconstruction_loss_weight:.4f}"})
                 progress.set_postfix(postfix)
     metanetwork.train()
     summary = {"objective": eval_objective}
     if evaluate_qa:
         summary.update(summarize_examples(eval_rows))
     if evaluate_reconstruction:
-        reconstruction_loss = reconstruction_loss_sum / reconstruction_tokens if reconstruction_tokens else float("nan")
+        reconstruction_loss = (
+            reconstruction_loss_sum / reconstruction_loss_weight
+            if reconstruction_loss_weight
+            else float("nan")
+        )
         summary.update(
             {
                 "reconstruction_loss": reconstruction_loss,

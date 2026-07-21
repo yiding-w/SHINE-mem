@@ -111,5 +111,22 @@ def cumulative_completion_prompt(history_prefix: str, observed_sessions: int) ->
     )
 
 
+def single_session_completion_prompt(
+    session_prefix: str,
+    source_session: int,
+    observed_sessions: int,
+) -> str:
+    """Address one observed session and request only that session's unseen suffix."""
+    return (
+        "<COMP>\n\n"
+        f"The prefix is the beginning of session {source_session} of "
+        f"{observed_sessions}. Continue immediately after the supplied prefix and "
+        "reconstruct only the remainder of that same session. Do not include any "
+        "earlier or later session, and do not repeat the supplied prefix. Output only "
+        "the continuation.\n\n"
+        f"[SESSION {source_session} PREFIX]\n{session_prefix}"
+    )
+
+
 def format_answer(answer: str) -> str:
     return str(answer).strip()

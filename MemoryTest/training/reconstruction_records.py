@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from MemoryTest.prepare_data.prompt_templates import cumulative_completion_prompt
+from MemoryTest.prepare_data.prompt_templates import (
+    cumulative_completion_prompt,
+    single_session_completion_prompt,
+)
 
 
 def build_prefix_cumulative_record(tokenizer, observed_turns, args, rng) -> dict:
@@ -41,3 +44,51 @@ def build_prefix_cumulative_record(tokenizer, observed_turns, args, rng) -> dict
         "source_turn": 1,
         "source_turn_id": first_turn.turn_id,
     }
+
+
+def build_single_session_retention_records(tokenizer, observed_turns, args, rng) -> list[dict]:
+    """Build equally weighted, suffix-only readouts for every observed session."""
+    records = []
+    observed_sessions = len(observed_turns)
+    decode_kwargs = {
+        "skip_special_tokens": False,
+        "clean_up_tokenization_spaces": False,
+    }
+    for source_index, turn in enumerate(observed_turns):
+        content_ids = tokenizer(turn.text, add_special_tokens=False)["input_ids"]
+        if not content_ids:
+            raise ValueError(
+                "Single-session retention requires a non-empty session, "
+                f"but turn {turn.turn_id!r} is empty."
+            )
+        prefix_ratio = rng.uniform(
+            args.completion_prefix_min_ratio,
+            args.completion_prefix_max_ratio,
+        )
+        # Always leave at least one source token for reconstruction supervision.
+        prefix_tokens = max(1, round(len(content_ids) * prefix_ratio))
+        prefix_tokens = min(prefix_tokens, max(0, len(content_ids) - 1))
+        session_prefix = tokenizer.decode(content_ids[:prefix_tokens], **decode_kwargs)
+        target_suffix = tokenizer.decode(content_ids[prefix_tokens:], **decode_kwargs)
+        source_turn = source_index + 1
+        records.append(
+            {
+                "category": "reconstruction",
+                "prompt": single_session_completion_prompt(
+                    session_prefix,
+                    source_turn,
+                    observed_sessions,
+                ),
+                "answer": target_suffix,
+                "reference": turn.text,
+                "session_prefix": session_prefix,
+                "prediction_prefix": session_prefix,
+                "preserve_generation_whitespace": True,
+                "source_turn": source_turn,
+                "source_turn_id": turn.turn_id,
+                # Each session first receives its own token mean; those row means
+                # are then averaged, so neither length nor tail overlap changes its weight.
+                "loss_reduction": "record_mean",
+            }
+        )
+    return records

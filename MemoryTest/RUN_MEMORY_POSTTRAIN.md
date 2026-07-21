@@ -412,6 +412,29 @@ validation reconstruction loss. The metrics are teacher-forced. In addition, the
 fixed validation reconstruction and prints its reference/prediction pair at every evaluation. Control that preview
 with `--eval-example-max-new-tokens`, `--eval-example-max-chars`, and `--no-print-eval-example`.
 
+### Equal-weight single-session retention
+
+Use `--reconstruction-scope single_session` to train every recurrent state to retain each observed session without
+the triangular tail duplication of `episodic`. At memory turn `t`, the trainer constructs one prefix-to-suffix
+readout for every source session `S_j`, but each target contains only the unseen suffix of `S_j`, not `S_j...S_t`.
+The loss first averages target tokens within each session and then averages session losses equally. Validation uses
+the same per-memory-turn equal-session reduction. Prefix lengths are controlled by
+`--completion-prefix-min-ratio` and `--completion-prefix-max-ratio`.
+
+For an official MSC tree whose parent contains `msc_dialogue/`, first create recurrent JSON files:
+
+```bash
+python -m MemoryTest.prepare_data.prepare_msc_recurrent \
+  --input-dir /data/yidingw/msc \
+  --output-dir /data/yidingw/msc/processed/msc_recurrent_1141 \
+  --tokenizer /home/wangyiding/SHINE-mem/models/Qwen3-8B \
+  --max-turn-tokens 1141 \
+  --qa-tasks next_turn persona_extraction persona_summary
+```
+
+This writes `msc_train.json`, `msc_valid.json`, `msc_test.json`, and `manifest.json` under the output directory.
+Pass those JSON files, rather than the raw `session_*` directories, to the recurrent trainer.
+
 ### Four-GPU data parallel, larger batches, and W&B
 
 Install and authenticate W&B once in the training environment:
