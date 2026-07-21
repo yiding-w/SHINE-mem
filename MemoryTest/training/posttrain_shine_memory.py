@@ -23,6 +23,18 @@ from MemoryTest.prepare_data.prompt_templates import (
     reconstruction_prompt,
 )
 from MemoryTest.evaluation.metrics import make_eval_row, summarize_examples
+from MemoryTest.evaluation.locomo_probe import (
+    CATEGORY_NAMES as LOCOMO_CATEGORY_NAMES,
+    load_locomo_sample,
+    select_probe_questions,
+    select_probe_session_window,
+)
+from MemoryTest.evaluation.locomo_runtime import (
+    evaluate_locomo_probe,
+    locomo_wandb_payload,
+    report_locomo_probe,
+    save_locomo_probe,
+)
 from MemoryTest.training.lora_sft_utils import load_runtime_args
 from MemoryTest.training.recurrent_data import (
     accumulated_qa,
@@ -312,6 +324,60 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-fact-counts", type=int, nargs="+", default=None)
     parser.add_argument("--eval-example-max-new-tokens", type=int, default=256)
     parser.add_argument("--eval-example-max-chars", type=int, default=2000)
+    parser.add_argument(
+        "--locomo-eval-file",
+        type=str,
+        default="",
+        help=(
+            "Optional LoCoMo JSON file. When set, run a deterministic one-conversation "
+            "memory-only QA probe at every validation checkpoint."
+        ),
+    )
+    parser.add_argument(
+        "--locomo-eval-sample-index",
+        type=int,
+        default=0,
+        help="Conversation index selected from --locomo-eval-file.",
+    )
+    parser.add_argument(
+        "--locomo-eval-categories",
+        type=int,
+        nargs="+",
+        default=[1, 2, 3, 4],
+        help="LoCoMo question categories included in the training-time probe.",
+    )
+    parser.add_argument(
+        "--locomo-eval-max-sessions",
+        type=int,
+        default=5,
+        help=(
+            "Maximum contiguous LoCoMo sessions ingested by the training-time probe. "
+            "The window with the best category-balanced evidence coverage is selected."
+        ),
+    )
+    parser.add_argument(
+        "--locomo-eval-questions-per-category",
+        type=int,
+        default=0,
+        help="Fixed questions sampled per category; 0 evaluates every matching question.",
+    )
+    parser.add_argument("--locomo-eval-max-new-tokens", type=int, default=50)
+    parser.add_argument("--locomo-eval-question-max-length", type=int, default=512)
+    parser.add_argument(
+        "--locomo-eval-last-session-ablation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Also answer the same questions from a LoRA generated using only the final "
+            "session, isolating the contribution of recurrent history."
+        ),
+    )
+    parser.add_argument(
+        "--locomo-print-examples",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Print one fixed LoCoMo prediction per selected category.",
+    )
     parser.add_argument(
         "--diagnose-lora-application",
         action="store_true",
@@ -1279,6 +1345,21 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         raise ValueError("--eval-example-max-new-tokens must be non-negative")
     if args.eval_example_max_chars < 1:
         raise ValueError("--eval-example-max-chars must be at least 1")
+    if args.locomo_eval_questions_per_category < 0:
+        raise ValueError("--locomo-eval-questions-per-category must be non-negative")
+    if args.locomo_eval_max_sessions < 1:
+        raise ValueError("--locomo-eval-max-sessions must be at least 1")
+    if args.locomo_eval_max_new_tokens < 1:
+        raise ValueError("--locomo-eval-max-new-tokens must be at least 1")
+    if args.locomo_eval_question_max_length < 1:
+        raise ValueError("--locomo-eval-question-max-length must be at least 1")
+    invalid_locomo_categories = sorted(set(args.locomo_eval_categories) - set(LOCOMO_CATEGORY_NAMES))
+    if invalid_locomo_categories:
+        raise ValueError(f"Unsupported LoCoMo categories: {invalid_locomo_categories}")
+    if args.locomo_eval_file and not evaluation_enabled:
+        raise ValueError(
+            "--locomo-eval-file requires --eval-every > 0, --eval-at-start, or --eval-only"
+        )
     if args.distributed_bucket_mb < 1:
         raise ValueError("--distributed-bucket-mb must be at least 1")
     eval_objective = resolve_eval_objective(args)
@@ -1287,6 +1368,31 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         args.train_file = default_train_file()
     train_data = load_recurrent_dataset(resolve_path(args.train_file))
     val_data = load_recurrent_dataset(resolve_path(args.val_file)) if evaluation_enabled else None
+    locomo_sample = None
+    locomo_questions = None
+    locomo_session_window = None
+    if args.locomo_eval_file:
+        locomo_path = resolve_path(args.locomo_eval_file)
+        if not locomo_path.is_file():
+            raise FileNotFoundError(f"LoCoMo evaluation file not found: {locomo_path}")
+        locomo_sample = load_locomo_sample(locomo_path, args.locomo_eval_sample_index)
+        locomo_session_window = select_probe_session_window(
+            locomo_sample,
+            args.locomo_eval_categories,
+            args.locomo_eval_max_sessions,
+        )
+        locomo_questions = select_probe_questions(
+            locomo_sample,
+            args.locomo_eval_categories,
+            args.locomo_eval_questions_per_category,
+            args.seed,
+            allowed_session_numbers=set(locomo_session_window),
+        )
+        if not locomo_questions:
+            raise ValueError(
+                f"No LoCoMo questions matched categories {args.locomo_eval_categories} "
+                f"in sample {locomo_sample['sample_id']!r}"
+            )
     output_dir = resolve_path(args.output_dir)
     log_path = output_dir / "shine_posttrain_train_log.jsonl"
     if distributed.is_main:
@@ -1340,12 +1446,25 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
             bool(trainable["metanetwork"]),
             bool(trainable["metalora"]),
         )
+        if locomo_sample is not None:
+            LOGGER.info(
+                "LoCoMo training-time probe: sample=%s index=%s session_window=%s "
+                "questions=%s categories=%s "
+                "last_session_ablation=%s",
+                locomo_sample["sample_id"],
+                args.locomo_eval_sample_index,
+                locomo_session_window,
+                len(locomo_questions),
+                args.locomo_eval_categories,
+                args.locomo_eval_last_session_ablation,
+            )
     optimizer = build_optimizer(trainable, args)
     parameters = trainable_parameters(trainable)
     best_val_metric = (-float("inf") if maximize_best_metric else float("inf")) if evaluation_enabled else None
     wandb_run = init_wandb(args, distributed)
 
     initial_val_summary = None
+    locomo_step0_score = None
     if args.eval_at_start or args.eval_only:
         if distributed.is_main:
             eval_rng = random.Random(args.seed + 1_000_003)
@@ -1360,6 +1479,27 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                 device,
                 eval_rng,
             )
+            if locomo_sample is not None:
+                initial_val_summary["locomo"] = evaluate_locomo_probe(
+                    metanetwork,
+                    metalora,
+                    tokenizer,
+                    cfg,
+                    args,
+                    device,
+                    locomo_sample,
+                    locomo_questions,
+                    locomo_session_window,
+                )
+                locomo_step0_score = initial_val_summary["locomo"]["conditions"]["recurrent"][
+                    "overall_score"
+                ]
+                report_locomo_probe(
+                    0,
+                    initial_val_summary["locomo"],
+                    args.locomo_print_examples,
+                )
+                save_locomo_probe(output_dir, 0, initial_val_summary["locomo"])
             initial_metric = report_validation(0, initial_val_summary, best_metric_name, args)
             best_val_metric = initial_metric
             append_jsonl(log_path, {"step": 0, "val": initial_val_summary, "config": vars(args)})
@@ -1377,6 +1517,8 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                     initial_metric,
                 )
                 initial_payload["val/best_metric"] = best_val_metric
+                if "locomo" in initial_val_summary:
+                    initial_payload.update(locomo_wandb_payload(initial_val_summary["locomo"]))
                 wandb_run.log(initial_payload, step=0)
         distributed_barrier(distributed)
 
@@ -1545,6 +1687,29 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                     device,
                     eval_rng,
                 )
+                if locomo_sample is not None:
+                    val_summary["locomo"] = evaluate_locomo_probe(
+                        metanetwork,
+                        metalora,
+                        tokenizer,
+                        cfg,
+                        args,
+                        device,
+                        locomo_sample,
+                        locomo_questions,
+                        locomo_session_window,
+                    )
+                    if locomo_step0_score is not None:
+                        val_summary["locomo"]["recurrent_gain_from_step0"] = (
+                            val_summary["locomo"]["conditions"]["recurrent"]["overall_score"]
+                            - locomo_step0_score
+                        )
+                    report_locomo_probe(
+                        step,
+                        val_summary["locomo"],
+                        args.locomo_print_examples,
+                    )
+                    save_locomo_probe(output_dir, step, val_summary["locomo"])
                 log_record["val"] = val_summary
                 append_jsonl(log_path, log_record)
                 current_val_metric = report_validation(step, val_summary, best_metric_name, args)
@@ -1587,6 +1752,8 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                         current_val_metric,
                     )
                     val_payload["val/best_metric"] = best_val_metric
+                    if "locomo" in val_summary:
+                        val_payload.update(locomo_wandb_payload(val_summary["locomo"]))
                     wandb_step_payload.update(val_payload)
             distributed_barrier(distributed)
         else:
