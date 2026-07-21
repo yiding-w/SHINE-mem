@@ -99,5 +99,17 @@ def completion_prompt(session_prefix: str, source_session: int, observed_session
     )
 
 
+def cumulative_completion_prompt(history_prefix: str, observed_sessions: int) -> str:
+    """Request the complete accumulated history after a short opening prefix."""
+    return (
+        "<COMP>\n\n"
+        f"The prefix is the beginning of a {observed_sessions}-session conversation history. "
+        "Continue immediately after the supplied prefix and reconstruct every remaining "
+        "session through the current session in chronological order. Do not repeat the "
+        "supplied prefix. Output only the continuation.\n\n"
+        f"[HISTORY PREFIX]\n{history_prefix}"
+    )
+
+
 def format_answer(answer: str) -> str:
     return str(answer).strip()

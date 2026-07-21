@@ -42,6 +42,7 @@ from MemoryTest.training.recurrent_data import (
     sample_training_stream,
     sample_turn_qa,
 )
+from MemoryTest.training.reconstruction_records import build_prefix_cumulative_record
 from MemoryTest.training.shine_train_utils import (
     append_jsonl,
     category_token_losses,
@@ -254,11 +255,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--reconstruction-scope",
-        choices=["current", "cumulative", "episodic"],
+        choices=["current", "cumulative", "prefix_cumulative", "episodic"],
         default="current",
         help=(
-            "current/cumulative use <RECON>. episodic uses <COMP>: after memory turn t, "
-            "each source session gets a random prefix and a full target from that session through turn t."
+            "current/cumulative use <RECON>. prefix_cumulative uses one short prefix from "
+            "the beginning of session 1 and predicts its unseen suffix through turn t. "
+            "episodic gives every source session a prefix and a full tail through turn t."
+        ),
+    )
+    parser.add_argument(
+        "--prefix-cumulative-empty-probability",
+        type=float,
+        default=0.25,
+        help=(
+            "Probability that prefix_cumulative exposes no history tokens and therefore "
+            "requires complete reconstruction from the beginning."
+        ),
+    )
+    parser.add_argument(
+        "--prefix-cumulative-max-prefix-ratio",
+        type=float,
+        default=0.05,
+        help=(
+            "Maximum fraction of session 1 exposed by prefix_cumulative when the prefix "
+            "is non-empty; the fraction is sampled uniformly from zero to this value."
         ),
     )
     parser.add_argument(
@@ -537,7 +557,10 @@ def build_training_records(
 
 
 def build_reconstruction_records(tokenizer, observed_turns, args, rng: random.Random) -> list[dict]:
-    """Build one addressable readout for every observed source session."""
+    """Build reconstruction readouts for the selected recurrent-memory objective."""
+    if args.reconstruction_scope == "prefix_cumulative":
+        return [build_prefix_cumulative_record(tokenizer, observed_turns, args, rng)]
+
     if args.reconstruction_scope != "episodic":
         reconstruction_text = (
             observed_turns[-1].text
@@ -818,7 +841,10 @@ def generate_reconstruction(
             ignore_mem_token=True,
             loradict=lora_dict,
         )
-    return tokenizer.decode(outputs[0, input_ids.shape[1] :], skip_special_tokens=True).strip()
+    decoded = tokenizer.decode(outputs[0, input_ids.shape[1] :], skip_special_tokens=True)
+    if record.get("preserve_generation_whitespace", False):
+        return decoded
+    return decoded.strip()
 
 
 def diagnose_lora_application(
@@ -946,6 +972,7 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                                     args.eval_example_max_new_tokens,
                                     record=reconstruction_record,
                                 )
+                                prediction = reconstruction_record.get("prediction_prefix", "") + prediction
                                 reference = reconstruction_record["reference"]
                                 session_prefix = reconstruction_record["session_prefix"]
                                 example = {
@@ -980,6 +1007,10 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                                         device,
                                         args.eval_example_max_new_tokens,
                                         record=reconstruction_record,
+                                    )
+                                    base_prediction = (
+                                        reconstruction_record.get("prediction_prefix", "")
+                                        + base_prediction
                                     )
                                     example["prediction_without_lora"] = base_prediction[
                                         : args.eval_example_max_chars
@@ -1330,6 +1361,10 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
             "Completion prefix ratios must satisfy 0 < --completion-prefix-min-ratio <= "
             "--completion-prefix-max-ratio <= 1"
         )
+    if not 0.0 <= args.prefix_cumulative_empty_probability <= 1.0:
+        raise ValueError("--prefix-cumulative-empty-probability must be between 0 and 1")
+    if not 0.0 <= args.prefix_cumulative_max_prefix_ratio < 1.0:
+        raise ValueError("--prefix-cumulative-max-prefix-ratio must be in [0, 1)")
     if args.batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
     if args.max_steps < 1:
@@ -1435,6 +1470,12 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
             args.completion_prefix_min_ratio,
             args.completion_prefix_max_ratio,
         )
+        if args.reconstruction_scope == "prefix_cumulative":
+            LOGGER.info(
+                "Prefix-cumulative readout: empty_probability=%.3f max_prefix_ratio=%.3f",
+                args.prefix_cumulative_empty_probability,
+                args.prefix_cumulative_max_prefix_ratio,
+            )
         LOGGER.info(
             "Synchronous data parallel: world_size=%s batch_per_rank=%s global_batch=%s",
             distributed.world_size,
