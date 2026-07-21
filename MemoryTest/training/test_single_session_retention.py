@@ -57,6 +57,7 @@ class SingleSessionRetentionTest(unittest.TestCase):
         self.assertEqual(records[1]["answer"], "DEFGHIJ")
         self.assertEqual(records[1]["reference"], "ABCDEFGHIJ")
         self.assertTrue(all(record["loss_reduction"] == "record_mean" for record in records))
+        self.assertTrue(all(record["pack_answer_separately"] for record in records))
         self.assertTrue(all("only the remainder of that same session" in record["prompt"] for record in records))
         self.assertEqual(rng.asserted_bounds, (0.2, 0.4))
 

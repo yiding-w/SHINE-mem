@@ -59,6 +59,7 @@ class PrefixCumulativeRecordsTest(unittest.TestCase):
         self.assertEqual(record["answer"], "bcdefghijklmnopqrst\nSECOND SESSION")
         self.assertEqual(record["reference"], "abcdefghijklmnopqrst\nSECOND SESSION")
         self.assertEqual(record["prediction_prefix"], "a")
+        self.assertTrue(record["pack_answer_separately"])
         self.assertNotIn("a" * 2, record["answer"][:2])
         self.assertIn("Do not repeat the supplied prefix", record["prompt"])
         self.assertEqual(rng.asserted_bounds, (0.0, 0.05))

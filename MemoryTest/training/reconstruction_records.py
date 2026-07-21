@@ -41,6 +41,10 @@ def build_prefix_cumulative_record(tokenizer, observed_turns, args, rng) -> dict
         "session_prefix": history_prefix,
         "prediction_prefix": history_prefix,
         "preserve_generation_whitespace": True,
+        # The target begins at an arbitrary token boundary inside session 1.
+        # Pack it after the generation prompt directly so BPE cannot merge the
+        # prompt's trailing newline with the first suffix token.
+        "pack_answer_separately": True,
         "source_turn": 1,
         "source_turn_id": first_turn.turn_id,
     }
@@ -84,6 +88,7 @@ def build_single_session_retention_records(tokenizer, observed_turns, args, rng)
                 "session_prefix": session_prefix,
                 "prediction_prefix": session_prefix,
                 "preserve_generation_whitespace": True,
+                "pack_answer_separately": True,
                 "source_turn": source_turn,
                 "source_turn_id": turn.turn_id,
                 # Each session first receives its own token mean; those row means
