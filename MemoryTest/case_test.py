@@ -327,6 +327,7 @@ def load_runtime(
     checkpoint_dir: str,
     device: torch.device,
     checkpoint_profile: str = "auto",
+    expand_checkpoint_rank: bool = False,
 ):
     set_seed(int(cfg.run.seed))
     checkpoint_profile = resolve_checkpoint_profile(checkpoint_dir, checkpoint_profile)
@@ -387,7 +388,14 @@ def load_runtime(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
     LOGGER.info("Loading checkpoint from %s", checkpoint_dir)
-    metanetwork, metalora, _ = load_checkpoint(metanetwork, checkpoint_dir, device)
+    if expand_checkpoint_rank:
+        from utils.mysaveload import load_checkpoint_rank_expanded
+
+        metanetwork, metalora, _ = load_checkpoint_rank_expanded(
+            metanetwork, checkpoint_dir, device
+        )
+    else:
+        metanetwork, metalora, _ = load_checkpoint(metanetwork, checkpoint_dir, device)
     mem_tokens = metanetwork.metamodel.model.mem_tokens.detach().float()
     first_metanetwork_parameter = next(metanetwork.metanetwork.parameters()).detach().float()
     LOGGER.info(

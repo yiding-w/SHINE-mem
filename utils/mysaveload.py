@@ -48,6 +48,76 @@ def load_checkpoint(metanetwork, in_dir, device: str, load_ift_additional_metalo
             freeze_loradict(metalora)
     return metanetwork, metalora, ift_additional_metalora if (load_ift_additional_metalora and not zero_ift_additional_metalora) else None
 
+
+def load_checkpoint_rank_expanded(metanetwork, in_dir: str, device: str):
+    """Load a smaller-memory SHINE checkpoint into a larger generated-LoRA rank.
+
+    Only the zero memory-token table and metanetwork token positional table are
+    resized.  All shape-compatible metanetwork weights and the independent
+    Metalora (whose rank is configured separately) are restored exactly.
+    """
+    metanetwork.to("cpu")
+
+    saved_mem_tokens = torch.load(
+        os.path.join(in_dir, "mem_tokens.pt"), map_location="cpu", weights_only=False
+    )
+    target_mem_tokens = metanetwork.metamodel.model.mem_tokens.detach().cpu()
+    if saved_mem_tokens.ndim != 2 or target_mem_tokens.ndim != 2:
+        raise ValueError("Rank expansion expects 2D memory-token tensors")
+    if saved_mem_tokens.shape[1] != target_mem_tokens.shape[1]:
+        raise ValueError(
+            f"Memory hidden-size mismatch: {saved_mem_tokens.shape} -> {target_mem_tokens.shape}"
+        )
+    if saved_mem_tokens.shape[0] >= target_mem_tokens.shape[0]:
+        raise ValueError(
+            "Rank-expanded loading requires more target memory tokens than the checkpoint: "
+            f"{saved_mem_tokens.shape[0]} -> {target_mem_tokens.shape[0]}"
+        )
+    expanded_mem_tokens = target_mem_tokens.clone()
+    expanded_mem_tokens[: saved_mem_tokens.shape[0]].copy_(saved_mem_tokens)
+    metanetwork.metamodel.model.mem_tokens = torch.nn.Parameter(
+        expanded_mem_tokens,
+        requires_grad=metanetwork.metamodel.model.mem_tokens.requires_grad,
+    )
+
+    saved_state = torch.load(
+        os.path.join(in_dir, "metanetwork.pth"), map_location="cpu", weights_only=False
+    )
+    target_state = metanetwork.metanetwork.state_dict()
+    migrated_state = {}
+    for name, target in target_state.items():
+        if name not in saved_state:
+            raise KeyError(f"Expanded checkpoint is missing metanetwork parameter {name!r}")
+        source = saved_state[name]
+        if source.shape == target.shape:
+            migrated_state[name] = source
+            continue
+        if name == "token_pe" and source.ndim == 2 and target.ndim == 2:
+            if source.shape[1] != target.shape[1] or source.shape[0] >= target.shape[0]:
+                raise ValueError(f"Unsupported token_pe expansion: {source.shape} -> {target.shape}")
+            # Repeat the checkpoint token-position pattern into the new slots.
+            # Existing slots are copied bit-for-bit; no random initialization is
+            # used, so all distributed ranks construct identical parameters.
+            repeats = (target.shape[0] + source.shape[0] - 1) // source.shape[0]
+            expanded = source.repeat((repeats, 1))[: target.shape[0]].clone()
+            expanded[: source.shape[0]].copy_(source)
+            migrated_state[name] = expanded
+            continue
+        raise ValueError(
+            f"Unsupported metanetwork shape change for {name}: {source.shape} -> {target.shape}"
+        )
+    unexpected = sorted(set(saved_state) - set(target_state))
+    if unexpected:
+        raise ValueError(f"Unexpected metanetwork parameters during rank expansion: {unexpected}")
+    metanetwork.metanetwork.load_state_dict(migrated_state, strict=True)
+
+    metalora = torch.load(
+        os.path.join(in_dir, "metalora.pth"), map_location="cpu", weights_only=False
+    )
+    metanetwork.to(device)
+    metalora = move_to_device_and_change_into_leaf(metalora, device)
+    return metanetwork, metalora, None
+
 def _rng_state_dict():
     state = {
         "python_random": random.getstate(),

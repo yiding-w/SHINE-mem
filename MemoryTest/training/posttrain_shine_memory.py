@@ -231,6 +231,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-format", choices=["natural", "structured", "mixed"], default="mixed")
     parser.add_argument("--recurrent-steps", type=int, default=4, help="Number of context chunks in one memory stream.")
     parser.add_argument(
+        "--expanded-lora-rank",
+        type=int,
+        default=0,
+        help=(
+            "Optionally construct a larger generated-LoRA rank and migrate the input checkpoint. "
+            "Zero preserves the checkpoint's native rank and strict loading path."
+        ),
+    )
+    parser.add_argument(
         "--recurrent-memory-policy",
         choices=["replace", "append"],
         default="replace",
@@ -669,12 +678,24 @@ def load_shine_for_training(args: argparse.Namespace):
         runtime_args.conversation_max_length = args.conversation_max_length
     device = resolve_device(runtime_args.device, runtime_args.gpu_id)
     cfg = build_cfg(runtime_args)
+    checkpoint_lora_rank = int(cfg.model.lora_r)
+    expand_checkpoint_rank = False
+    if args.expanded_lora_rank:
+        if args.expanded_lora_rank <= checkpoint_lora_rank:
+            raise ValueError(
+                f"--expanded-lora-rank must exceed checkpoint rank {checkpoint_lora_rank}, "
+                f"got {args.expanded_lora_rank}"
+            )
+        cfg.model.lora_r = int(args.expanded_lora_rank)
+        # A resumed checkpoint was already saved with the expanded shapes.
+        expand_checkpoint_rank = not (args.resume and latest_dir.exists())
     cfg.model.torch_dtype = args.torch_dtype
     metanetwork, metalora, tokenizer = load_runtime(
         cfg,
         runtime_args.checkpoint_dir,
         device,
         checkpoint_profile=checkpoint_profile,
+        expand_checkpoint_rank=expand_checkpoint_rank,
     )
     dtype = resolve_torch_dtype(args.torch_dtype)
     if isinstance(dtype, torch.dtype):
@@ -1419,6 +1440,8 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         raise ValueError("--prefix-cumulative-max-prefix-ratio must be in [0, 1)")
     if args.batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
+    if args.expanded_lora_rank < 0:
+        raise ValueError("--expanded-lora-rank must be non-negative")
     if args.recurrent_memory_max_banks < 1:
         raise ValueError("--recurrent-memory-max-banks must be at least 1")
     if args.max_steps < 1:
@@ -1520,6 +1543,12 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
             args.detach_recurrent_memory_every,
             args.recurrent_memory_policy,
             args.recurrent_memory_max_banks,
+        )
+        LOGGER.info(
+            "Generated LoRA capacity: rank=%s num_mem_token=%s expanded_from_checkpoint=%s",
+            cfg.model.lora_r,
+            cfg.num_mem_token,
+            bool(args.expanded_lora_rank and not args.resume),
         )
         LOGGER.info(
             "Readout: reconstruction_scope=%s completion_prefix_ratio=[%.3f, %.3f]",
