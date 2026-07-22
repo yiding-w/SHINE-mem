@@ -23,6 +23,55 @@ class RecurrentMemoryState:
             norms=self.norms,
         )
 
+
+def update_recurrent_memory_bank(
+    previous: Optional[RecurrentMemoryState],
+    current: RecurrentMemoryState,
+    policy: str = "replace",
+    max_banks: int = 1,
+) -> RecurrentMemoryState:
+    """Combine recurrent K/V states without changing the SHINE readout width.
+
+    ``replace`` is the original recurrent path. ``append`` keeps whole banks of
+    RoPE-applied K/V entries and evicts the oldest entries once ``max_banks``
+    current-sized banks have been retained.  The current 148-token memory state
+    is still the only state passed to the pretrained metanetwork readout.
+    """
+    if policy not in {"replace", "append"}:
+        raise ValueError(f"Unknown recurrent memory bank policy: {policy}")
+    if max_banks < 1:
+        raise ValueError("recurrent memory max_banks must be at least 1")
+    if policy == "replace" or previous is None:
+        return current
+    if len(previous.key_values) != len(current.key_values):
+        raise ValueError(
+            "Cannot append recurrent memory states with different layer counts: "
+            f"{len(previous.key_values)} != {len(current.key_values)}"
+        )
+
+    current_length = current.attention_mask.shape[-1]
+    capacity = max_banks * current_length
+    key_values = []
+    for layer_index, ((previous_key, previous_value), (current_key, current_value)) in enumerate(
+        zip(previous.key_values, current.key_values)
+    ):
+        if previous_key.shape[-2] != previous_value.shape[-2]:
+            raise ValueError(f"Previous recurrent K/V length mismatch at layer {layer_index}")
+        if current_key.shape[-2] != current_value.shape[-2]:
+            raise ValueError(f"Current recurrent K/V length mismatch at layer {layer_index}")
+        key = torch.cat((previous_key, current_key), dim=-2)
+        value = torch.cat((previous_value, current_value), dim=-2)
+        key_values.append((key[..., -capacity:, :], value[..., -capacity:, :]))
+
+    attention_mask = torch.cat((previous.attention_mask, current.attention_mask), dim=-1)
+    attention_mask = attention_mask[:, -capacity:]
+    return RecurrentMemoryState(
+        key_values=tuple(key_values),
+        attention_mask=attention_mask,
+        # Norms describe the newly written bank, matching the original logging.
+        norms=current.norms,
+    )
+
 def generate_couple_mask(idx_range, couple_hidden_size, couple_num_tokens):
     mask = torch.ones((couple_num_tokens, couple_num_tokens), dtype=torch.bool)
     assert idx_range[-1] == couple_num_tokens * couple_hidden_size, "idx_range does not match couple_num_tokens and couple_hidden_size"
@@ -189,6 +238,8 @@ class Metanetwork(nn.Module):
         recurrent_memory: Optional[RecurrentMemoryState] = None,
         return_recurrent_state=False,
         memory_position_offset: Optional[int] = None,
+        recurrent_memory_policy: str = "replace",
+        recurrent_memory_max_banks: int = 1,
     ) -> dict:
         memory_states, recurrent_state = self.encode_context_memory(
             evidence_ids,
@@ -197,6 +248,8 @@ class Metanetwork(nn.Module):
             use_gradient_checkpoint=use_gradient_checkpoint,
             recurrent_memory=recurrent_memory,
             memory_position_offset=memory_position_offset,
+            recurrent_memory_policy=recurrent_memory_policy,
+            recurrent_memory_max_banks=recurrent_memory_max_banks,
         )
         loradict, plain_output = self.readout_memory_lora(memory_states)
         result = [loradict]
@@ -214,6 +267,8 @@ class Metanetwork(nn.Module):
         use_gradient_checkpoint=False,
         recurrent_memory: Optional[RecurrentMemoryState] = None,
         memory_position_offset: Optional[int] = None,
+        recurrent_memory_policy: str = "replace",
+        recurrent_memory_max_banks: int = 1,
     ) -> tuple[torch.Tensor, RecurrentMemoryState]:
         outputs = self.metamodel(
             input_ids=evidence_ids,
@@ -229,7 +284,7 @@ class Metanetwork(nn.Module):
         if memory_states.dtype != target_dtype:
             memory_states = memory_states.to(dtype=target_dtype)
         memory_length = outputs.memory_key_values[0][0].shape[-2]
-        recurrent_state = RecurrentMemoryState(
+        current_recurrent_state = RecurrentMemoryState(
             key_values=outputs.memory_key_values,
             attention_mask=torch.ones(
                 (evidence_ids.shape[0], memory_length),
@@ -237,6 +292,12 @@ class Metanetwork(nn.Module):
                 device=evidence_ids.device,
             ),
             norms=outputs.memory_norms,
+        )
+        recurrent_state = update_recurrent_memory_bank(
+            recurrent_memory,
+            current_recurrent_state,
+            policy=recurrent_memory_policy,
+            max_banks=recurrent_memory_max_banks,
         )
         return memory_states, recurrent_state
 

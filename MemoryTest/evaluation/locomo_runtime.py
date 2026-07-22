@@ -119,6 +119,8 @@ def evaluate_locomo_probe(
                 recurrent_memory=recurrent_memory,
                 return_recurrent_state=True,
                 memory_position_offset=memory_position_offset,
+                recurrent_memory_policy=args.recurrent_memory_policy,
+                recurrent_memory_max_banks=args.recurrent_memory_max_banks,
             )
             recurrent_lora = clamp_lora_tensors(recurrent_lora, args.generated_lora_clamp)
         else:
@@ -131,6 +133,8 @@ def evaluate_locomo_probe(
                 device,
                 recurrent_memory=recurrent_memory,
                 memory_position_offset=memory_position_offset,
+                recurrent_memory_policy=args.recurrent_memory_policy,
+                recurrent_memory_max_banks=args.recurrent_memory_max_banks,
             )
 
     condition_loras = {"recurrent": recurrent_lora}

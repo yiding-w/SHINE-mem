@@ -772,3 +772,27 @@ python -m MemoryTest.comparisons.compare_baselines
 ```
 
 Important: `metanetwork.transformer_cfg.num_layers=4` is the number of layers in the M2P/meta-network transformer, not the number of Qwen decoder layers receiving LoRA. The generated LoRA is applied to every Qwen decoder layer at q/k/v/o and gate/up/down projections.
+# Optional recurrent KV bank (repeated RoPE positions)
+
+The default recurrent path remains unchanged and replaces the previous 148-token
+state on every turn:
+
+```bash
+--recurrent-memory-policy replace \
+--recurrent-memory-max-banks 1
+```
+
+To run the checkpoint-compatible capacity ablation that appends whole historical
+K/V banks while keeping the original 148-token SHINE readout, LoRA rank, and
+memory positions, use:
+
+```bash
+--recurrent-memory-policy append \
+--recurrent-memory-max-banks 5
+```
+
+With a 148-token checkpoint, the retained bank grows as 148, 296, 444, 592, and
+740 K/V entries across five turns. Once full, the oldest complete bank is evicted
+(FIFO). All banks intentionally retain the checkpoint-aligned repeated RoPE
+positions for this ablation. Console logs expose `bank_tokens`, and W&B records
+`memory_rank0/bank_tokens`, so the effective capacity can be checked.

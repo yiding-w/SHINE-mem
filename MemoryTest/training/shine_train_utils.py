@@ -105,9 +105,11 @@ def lora_tensor_stats(obj: Any) -> dict[str, float]:
 
 def recurrent_memory_norm_stats(recurrent_memory) -> dict[str, float]:
     """Reduce per-layer recurrent-memory RMS tensors into JSON-friendly metrics."""
-    if recurrent_memory is None or recurrent_memory.norms is None:
+    if recurrent_memory is None:
         return {}
-    stats = {}
+    stats = {"bank_tokens": float(recurrent_memory.attention_mask.shape[-1])}
+    if recurrent_memory.norms is None:
+        return stats
     for name, values in recurrent_memory.norms.items():
         values = values.detach().float()
         stats[f"{name}_mean"] = float(values.mean().cpu())
@@ -156,6 +158,8 @@ def trainable_generate_context_lora(
     recurrent_memory=None,
     return_recurrent_state: bool = False,
     memory_position_offset: int | None = None,
+    recurrent_memory_policy: str = "replace",
+    recurrent_memory_max_banks: int = 1,
 ):
     evidence_ids, evidence_mask = encode_context(tokenizer, context, cfg.test.context_max_length, device)
     return metanetwork.generate_lora_dict(
@@ -166,6 +170,8 @@ def trainable_generate_context_lora(
         recurrent_memory=recurrent_memory,
         return_recurrent_state=return_recurrent_state,
         memory_position_offset=memory_position_offset,
+        recurrent_memory_policy=recurrent_memory_policy,
+        recurrent_memory_max_banks=recurrent_memory_max_banks,
     )
 
 
@@ -179,6 +185,8 @@ def trainable_update_recurrent_memory(
     use_gradient_checkpoint: bool = False,
     recurrent_memory=None,
     memory_position_offset: int | None = None,
+    recurrent_memory_policy: str = "replace",
+    recurrent_memory_max_banks: int = 1,
 ):
     """Encode one non-final stream chunk without running the expensive LoRA readout."""
     evidence_ids, evidence_mask = encode_context(tokenizer, context, cfg.test.context_max_length, device)
@@ -189,6 +197,8 @@ def trainable_update_recurrent_memory(
         use_gradient_checkpoint=use_gradient_checkpoint,
         recurrent_memory=recurrent_memory,
         memory_position_offset=memory_position_offset,
+        recurrent_memory_policy=recurrent_memory_policy,
+        recurrent_memory_max_banks=recurrent_memory_max_banks,
     )
     return recurrent_state
 

@@ -231,6 +231,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-format", choices=["natural", "structured", "mixed"], default="mixed")
     parser.add_argument("--recurrent-steps", type=int, default=4, help="Number of context chunks in one memory stream.")
     parser.add_argument(
+        "--recurrent-memory-policy",
+        choices=["replace", "append"],
+        default="replace",
+        help=(
+            "replace preserves the original recurrent path. append retains whole historical "
+            "K/V banks, with unchanged/repeated memory RoPE positions, up to max-banks."
+        ),
+    )
+    parser.add_argument(
+        "--recurrent-memory-max-banks",
+        type=int,
+        default=1,
+        help="Maximum number of current-sized recurrent K/V banks retained by append policy.",
+    )
+    parser.add_argument(
         "--ordered-stream-probability",
         "--ordered-stream-prob",
         dest="ordered_stream_probability",
@@ -949,6 +964,8 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                         recurrent_memory=recurrent_memory,
                         return_recurrent_state=True,
                         memory_position_offset=memory_position_offset,
+                        recurrent_memory_policy=args.recurrent_memory_policy,
+                        recurrent_memory_max_banks=args.recurrent_memory_max_banks,
                     )
                     lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
                     if evaluate_reconstruction:
@@ -1051,6 +1068,8 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                         device,
                         recurrent_memory=recurrent_memory,
                         memory_position_offset=memory_position_offset,
+                        recurrent_memory_policy=args.recurrent_memory_policy,
+                        recurrent_memory_max_banks=args.recurrent_memory_max_banks,
                     )
                 if supervise_turn and evaluate_qa:
                     qa_source_turns = [turn] if args.qa_scope == "current" else observed_turns
@@ -1230,6 +1249,8 @@ def compute_stream_training_result(
                 recurrent_memory=recurrent_memory,
                 return_recurrent_state=True,
                 memory_position_offset=memory_position_offset,
+                recurrent_memory_policy=args.recurrent_memory_policy,
+                recurrent_memory_max_banks=args.recurrent_memory_max_banks,
             )
             lora_dict = clamp_lora_tensors(lora_dict, args.generated_lora_clamp)
             objective = resolve_turn_objective(args, rng)
@@ -1295,6 +1316,8 @@ def compute_stream_training_result(
                 use_gradient_checkpoint=args.use_gradient_checkpoint,
                 recurrent_memory=recurrent_memory,
                 memory_position_offset=memory_position_offset,
+                recurrent_memory_policy=args.recurrent_memory_policy,
+                recurrent_memory_max_banks=args.recurrent_memory_max_banks,
             )
         memory_norms_by_turn.append(
             {
@@ -1396,6 +1419,8 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         raise ValueError("--prefix-cumulative-max-prefix-ratio must be in [0, 1)")
     if args.batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
+    if args.recurrent_memory_max_banks < 1:
+        raise ValueError("--recurrent-memory-max-banks must be at least 1")
     if args.max_steps < 1:
         raise ValueError("--max-steps must be at least 1")
     if args.log_every < 1:
@@ -1488,10 +1513,13 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         )
     if distributed.is_main:
         LOGGER.info(
-            "Recurrent SHINE: steps=%s fixed_memory_position_offset=%s detach_every=%s",
+            "Recurrent SHINE: steps=%s fixed_memory_position_offset=%s detach_every=%s "
+            "memory_policy=%s max_banks=%s",
             args.recurrent_steps,
             memory_position_offset,
             args.detach_recurrent_memory_every,
+            args.recurrent_memory_policy,
+            args.recurrent_memory_max_banks,
         )
         LOGGER.info(
             "Readout: reconstruction_scope=%s completion_prefix_ratio=[%.3f, %.3f]",
@@ -1702,6 +1730,7 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                 "loss": f"{log_record['loss']:.4f}",
                 "lora_max": f"{batch_log['lora_stats']['max_abs']:.2f}",
                 "mem_v": f"{batch_log['memory_norms'].get('value_rms_mean', 0.0):.3f}",
+                "bank": f"{batch_log['memory_norms'].get('bank_tokens', 0.0):.0f}",
             }
             if log_record["answer_loss"] is not None:
                 postfix["answer"] = f"{log_record['answer_loss']:.4f}"
@@ -1714,13 +1743,15 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         if distributed.is_main and (step % args.log_every == 0 or step == 1):
             append_jsonl(log_path, log_record)
             LOGGER.info(
-                "step=%s loss=%.6f answer=%s reconstruction=%s grad_norm=%s global_batch=%s",
+                "step=%s loss=%.6f answer=%s reconstruction=%s grad_norm=%s "
+                "global_batch=%s bank_tokens=%.0f",
                 step,
                 log_record["loss"],
                 f"{log_record['answer_loss']:.6f}" if log_record["answer_loss"] is not None else "n/a",
                 f"{log_record['reconstruction_loss']:.6f}" if log_record["reconstruction_loss"] is not None else "n/a",
                 f"{grad_norm:.6f}" if grad_norm is not None else "n/a",
                 log_record["global_batch_size"],
+                batch_log["memory_norms"].get("bank_tokens", 0.0),
             )
             if wandb_run is not None:
                 wandb_payload = {
