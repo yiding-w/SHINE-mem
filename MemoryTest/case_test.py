@@ -328,6 +328,7 @@ def load_runtime(
     device: torch.device,
     checkpoint_profile: str = "auto",
     expand_checkpoint_rank: bool = False,
+    rank_expansion_base_rank: int = 0,
 ):
     set_seed(int(cfg.run.seed))
     checkpoint_profile = resolve_checkpoint_profile(checkpoint_dir, checkpoint_profile)
@@ -380,7 +381,13 @@ def load_runtime(
     metamodel.reset_mem_tokens()
     metamodel.resize_token_embeddings(len(tokenizer))
 
-    metanetwork = Metanetwork(metamodel, cfg, metamodel.lora_params_numel(cfg.model.lora_r))
+    if rank_expansion_base_rank:
+        from metanetwork_family import ResidualRankExpandedMetanetwork
+        metanetwork = ResidualRankExpandedMetanetwork(
+            metamodel, cfg, base_lora_r=rank_expansion_base_rank
+        )
+    else:
+        metanetwork = Metanetwork(metamodel, cfg, metamodel.lora_params_numel(cfg.model.lora_r))
     metanetwork.to(device)
     freeze(metamodel)
 

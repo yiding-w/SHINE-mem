@@ -696,6 +696,7 @@ def load_shine_for_training(args: argparse.Namespace):
         device,
         checkpoint_profile=checkpoint_profile,
         expand_checkpoint_rank=expand_checkpoint_rank,
+        rank_expansion_base_rank=checkpoint_lora_rank if args.expanded_lora_rank else 0,
     )
     dtype = resolve_torch_dtype(args.torch_dtype)
     if isinstance(dtype, torch.dtype):
@@ -1550,6 +1551,16 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
             cfg.num_mem_token,
             bool(args.expanded_lora_rank and not args.resume),
         )
+        if hasattr(metanetwork, "base_lora_r"):
+            LOGGER.info(
+                "Residual rank expansion: base_rank=%s base_tokens=%s "
+                "residual_rank=%s residual_tokens=%s residual_gate=%.8f",
+                metanetwork.base_lora_r,
+                metanetwork.base_num_mem_token,
+                metanetwork.residual_lora_r,
+                metanetwork.residual_num_mem_token,
+                float(metanetwork.metanetwork["gate"].value.detach().float().cpu()),
+            )
         LOGGER.info(
             "Readout: reconstruction_scope=%s completion_prefix_ratio=[%.3f, %.3f]",
             args.reconstruction_scope,

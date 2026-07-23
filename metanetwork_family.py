@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import weakref
 import os
+import copy
 from dataclasses import dataclass
 from typing import Optional
 from utils.myddp import is_main_process, barrier
@@ -305,6 +306,102 @@ class Metanetwork(nn.Module):
         plain_output = self.metanetwork(memory_states)  # (batch_size, output_dim)
         loradict = self.metamodel.generate_lora_dict(self.lora_r, scale=self.scale, plain_tensor=plain_output)
         return loradict, plain_output
+
+
+def _merge_rank_loradicts(base, residual, residual_gate):
+    """Concatenate two structurally identical LoRA dictionaries by rank."""
+    if isinstance(base, dict) and "A" in base and "B" in base:
+        merged = {
+            "A": torch.cat((base["A"], residual["A"]), dim=-1),
+            # Gate only B so the residual delta is exactly zero initially while
+            # the gate itself still receives a useful first-step gradient.
+            "B": torch.cat((base["B"], residual["B"] * residual_gate), dim=-2),
+            "C": base.get("C"),
+        }
+        return merged
+    if isinstance(base, dict):
+        if set(base) != set(residual):
+            raise ValueError("Base and residual LoRA dictionaries have different structures")
+        return {
+            key: _merge_rank_loradicts(base[key], residual[key], residual_gate)
+            for key in base
+        }
+    raise TypeError(f"Unsupported LoRA dictionary node: {type(base)!r}")
+
+
+class _ZeroInitializedResidualGate(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.value = nn.Parameter(torch.zeros((), dtype=torch.float32))
+
+
+class ResidualRankExpandedMetanetwork(Metanetwork):
+    """Checkpoint-preserving Rank-R + zero-delta Rank-K SHINE readout.
+
+    Context is encoded once with old memory tokens first and new tokens last.
+    Causal attention guarantees that the old token states are unaffected by the
+    appended tokens. Separate readouts generate Rank-R and Rank-K LoRAs, which
+    are concatenated along their rank axes.
+    """
+
+    def __init__(self, metamodel: nn.Module, cfg, base_lora_r: int):
+        nn.Module.__init__(self)
+        self.metamodel = metamodel
+        self.lora_r = int(cfg.model.lora_r)
+        self.base_lora_r = int(base_lora_r)
+        self.residual_lora_r = self.lora_r - self.base_lora_r
+        if self.residual_lora_r <= 0:
+            raise ValueError("Expanded LoRA rank must exceed the checkpoint rank")
+        self.adapter_reg = cfg.optim.adapter_reg if hasattr(cfg, "optim") else 0.0
+        self.method = cfg.metanetwork.method
+        self.metamodel.set_generate_func(self.method)
+        self.scale = cfg.metanetwork.transformer_cfg.scale
+
+        base_numel = self.metamodel.lora_params_numel(self.base_lora_r)
+        residual_numel = self.metamodel.lora_params_numel(self.residual_lora_r)
+        denominator = int(cfg.hidden_size) * int(cfg.num_layers)
+        if base_numel % denominator or residual_numel % denominator:
+            raise ValueError("Rank split does not map to an integral number of memory tokens")
+        self.base_num_mem_token = base_numel // denominator
+        self.residual_num_mem_token = residual_numel // denominator
+        if self.base_num_mem_token + self.residual_num_mem_token != int(cfg.num_mem_token):
+            raise ValueError("Expanded memory-token count does not match the rank split")
+
+        base_cfg = copy.deepcopy(cfg)
+        base_cfg.model.lora_r = self.base_lora_r
+        base_cfg.num_mem_token = self.base_num_mem_token
+        residual_cfg = copy.deepcopy(cfg)
+        residual_cfg.model.lora_r = self.residual_lora_r
+        residual_cfg.num_mem_token = self.residual_num_mem_token
+
+        if cfg.metanetwork.type != "transformer":
+            raise ValueError("Residual rank expansion currently supports transformer metanetworks")
+        base_idx, base_end = self.metamodel.divide_idx(self.base_lora_r, 0)
+        base_idx.append(base_end)
+        residual_idx, residual_end = self.metamodel.divide_idx(self.residual_lora_r, 0)
+        residual_idx.append(residual_end)
+        self.metanetwork = nn.ModuleDict({
+            "base": MetanetworkTransformer(base_cfg, base_idx),
+            "residual": MetanetworkTransformer(residual_cfg, residual_idx),
+            "gate": _ZeroInitializedResidualGate(),
+        })
+        self.output_dim = base_numel + residual_numel
+
+    def readout_memory_lora(self, memory_states: torch.Tensor) -> tuple[dict, torch.Tensor]:
+        base_states = memory_states[:, :, : self.base_num_mem_token, :]
+        residual_states = memory_states[:, :, self.base_num_mem_token :, :]
+        base_plain = self.metanetwork["base"](base_states)
+        residual_plain = self.metanetwork["residual"](residual_states)
+        base_lora = self.metamodel.generate_lora_dict(
+            self.base_lora_r, scale=self.scale, plain_tensor=base_plain
+        )
+        residual_lora = self.metamodel.generate_lora_dict(
+            self.residual_lora_r, scale=self.scale, plain_tensor=residual_plain
+        )
+        loradict = _merge_rank_loradicts(
+            base_lora, residual_lora, self.metanetwork["gate"].value
+        )
+        return loradict, torch.cat((base_plain, residual_plain), dim=-1)
     
     
     

@@ -86,27 +86,31 @@ def load_checkpoint_rank_expanded(metanetwork, in_dir: str, device: str):
     target_state = metanetwork.metanetwork.state_dict()
     migrated_state = {}
     for name, target in target_state.items():
-        if name not in saved_state:
-            raise KeyError(f"Expanded checkpoint is missing metanetwork parameter {name!r}")
-        source = saved_state[name]
+        if name.startswith("base."):
+            source_name = name[len("base."):]
+            if source_name not in saved_state:
+                raise KeyError(f"Expanded checkpoint is missing metanetwork parameter {source_name!r}")
+            source = saved_state[source_name]
+        elif name.startswith("residual."):
+            # The residual readout is intentionally new. Keep deterministic
+            # construction initialization; its contribution is gated to zero.
+            migrated_state[name] = target
+            continue
+        elif name == "gate.value":
+            migrated_state[name] = target
+            continue
+        else:
+            raise ValueError(f"Unexpected expanded metanetwork parameter {name!r}")
         if source.shape == target.shape:
             migrated_state[name] = source
-            continue
-        if name == "token_pe" and source.ndim == 2 and target.ndim == 2:
-            if source.shape[1] != target.shape[1] or source.shape[0] >= target.shape[0]:
-                raise ValueError(f"Unsupported token_pe expansion: {source.shape} -> {target.shape}")
-            # Repeat the checkpoint token-position pattern into the new slots.
-            # Existing slots are copied bit-for-bit; no random initialization is
-            # used, so all distributed ranks construct identical parameters.
-            repeats = (target.shape[0] + source.shape[0] - 1) // source.shape[0]
-            expanded = source.repeat((repeats, 1))[: target.shape[0]].clone()
-            expanded[: source.shape[0]].copy_(source)
-            migrated_state[name] = expanded
             continue
         raise ValueError(
             f"Unsupported metanetwork shape change for {name}: {source.shape} -> {target.shape}"
         )
-    unexpected = sorted(set(saved_state) - set(target_state))
+    base_source_names = {
+        name[len("base."):] for name in target_state if name.startswith("base.")
+    }
+    unexpected = sorted(set(saved_state) - base_source_names)
     if unexpected:
         raise ValueError(f"Unexpected metanetwork parameters during rank expansion: {unexpected}")
     metanetwork.metanetwork.load_state_dict(migrated_state, strict=True)

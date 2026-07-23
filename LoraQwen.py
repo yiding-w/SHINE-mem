@@ -128,12 +128,16 @@ class LoraLinear(nn.Linear):
     
     def lora_params_numel(self, r):
         if not hasattr(self, "lora_params_numel_cache"):
-            self.lora_params_numel_cache = (
+            self.lora_params_numel_cache = {}
+        if not isinstance(self.lora_params_numel_cache, dict):
+            self.lora_params_numel_cache = {}
+        if r not in self.lora_params_numel_cache:
+            self.lora_params_numel_cache[r] = (
                 self.in_features * r
                 + self.out_features * r
                 + (self.out_features if self.bias is not None else 0)
             )
-        return self.lora_params_numel_cache
+        return self.lora_params_numel_cache[r]
 
     def set_generate_func(self, method):
         if method == "rl":
@@ -305,9 +309,11 @@ class LoraQwen3MLP(Qwen3MLP):
         return down_proj
     
     def lora_params_numel(self, r):
-        if not hasattr(self, "lora_params_numel_cache"):
-            self.lora_params_numel_cache = self.gate_proj.lora_params_numel(r) + self.up_proj.lora_params_numel(r) + self.down_proj.lora_params_numel(r)
-        return self.lora_params_numel_cache
+        if not hasattr(self, "lora_params_numel_cache") or not isinstance(self.lora_params_numel_cache, dict):
+            self.lora_params_numel_cache = {}
+        if r not in self.lora_params_numel_cache:
+            self.lora_params_numel_cache[r] = self.gate_proj.lora_params_numel(r) + self.up_proj.lora_params_numel(r) + self.down_proj.lora_params_numel(r)
+        return self.lora_params_numel_cache[r]
     
     def set_generate_func(self, method):
         self.gate_proj.set_generate_func(method)
@@ -433,13 +439,16 @@ class LoraQwen3Attention(Qwen3Attention):
         return attn_output, attn_weights, memory_key_states, memory_value_states
 
     def lora_params_numel(self, r):
-        if not hasattr(self, "lora_params_numel_cache"):
-            self.lora_params_numel_cache = 0
-            self.lora_params_numel_cache += self.q_proj.lora_params_numel(r)
-            self.lora_params_numel_cache += self.k_proj.lora_params_numel(r)
-            self.lora_params_numel_cache += self.v_proj.lora_params_numel(r)
-            self.lora_params_numel_cache += self.o_proj.lora_params_numel(r)
-        return self.lora_params_numel_cache
+        if not hasattr(self, "lora_params_numel_cache") or not isinstance(self.lora_params_numel_cache, dict):
+            self.lora_params_numel_cache = {}
+        if r not in self.lora_params_numel_cache:
+            self.lora_params_numel_cache[r] = (
+                self.q_proj.lora_params_numel(r)
+                + self.k_proj.lora_params_numel(r)
+                + self.v_proj.lora_params_numel(r)
+                + self.o_proj.lora_params_numel(r)
+            )
+        return self.lora_params_numel_cache[r]
     
     def set_generate_func(self, method):
         self.q_proj.set_generate_func(method)
@@ -577,11 +586,13 @@ class LoraQwen3DecoderLayer(Qwen3DecoderLayer):
         return hidden_states
 
     def lora_params_numel(self, r):
-        if not hasattr(self, "lora_params_numel_cache"):
-            self.lora_params_numel_cache = 0
-            self.lora_params_numel_cache += self.self_attn.lora_params_numel(r)
-            self.lora_params_numel_cache += self.mlp.lora_params_numel(r)
-        return self.lora_params_numel_cache
+        if not hasattr(self, "lora_params_numel_cache") or not isinstance(self.lora_params_numel_cache, dict):
+            self.lora_params_numel_cache = {}
+        if r not in self.lora_params_numel_cache:
+            self.lora_params_numel_cache[r] = (
+                self.self_attn.lora_params_numel(r) + self.mlp.lora_params_numel(r)
+            )
+        return self.lora_params_numel_cache[r]
     
     def set_generate_func(self, method):
         self.self_attn.set_generate_func(method)
@@ -881,11 +892,13 @@ class LoraQwen3Model(Qwen3PreTrainedModel):
         )
     
     def lora_params_numel(self, r):
-        if not hasattr(self, "lora_params_numel_cache"):
-            self.lora_params_numel_cache = 0
-            for layer in self.layers:
-                self.lora_params_numel_cache += layer.lora_params_numel(r)
-        return self.lora_params_numel_cache
+        if not hasattr(self, "lora_params_numel_cache") or not isinstance(self.lora_params_numel_cache, dict):
+            self.lora_params_numel_cache = {}
+        if r not in self.lora_params_numel_cache:
+            self.lora_params_numel_cache[r] = sum(
+                layer.lora_params_numel(r) for layer in self.layers
+            )
+        return self.lora_params_numel_cache[r]
 
     def set_generate_func(self, method):
         for layer in self.layers:
