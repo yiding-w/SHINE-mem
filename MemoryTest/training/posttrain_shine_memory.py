@@ -946,6 +946,8 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
     reconstruction_loss_weight = 0
     reconstruction_tokens = 0
     reconstruction_readouts = 0
+    residual_ablation_loss_sum = 0.0
+    residual_ablation_loss_weight = 0
     reconstruction_examples = []
     eval_objective = resolve_eval_objective(args)
     evaluate_qa = eval_objective in {"qa", "both"}
@@ -1020,6 +1022,26 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                             reconstruction_loss_weight += token_count
                         reconstruction_tokens += token_count
                         reconstruction_readouts += len(reconstruction_records)
+                        if hasattr(metanetwork, "ablate_residual_lora"):
+                            ablated_lora = metanetwork.ablate_residual_lora(lora_dict)
+                            ablated_losses = compute_combined_lora_loss(
+                                reconstruction_records,
+                                ablated_lora,
+                                metanetwork,
+                                tokenizer,
+                                device,
+                                args.answer_max_length,
+                                use_gradient_checkpoint=False,
+                            )
+                            ablated_loss = float(
+                                ablated_losses["reconstruction"].detach().cpu()
+                            )
+                            if args.reconstruction_scope == "single_session":
+                                residual_ablation_loss_sum += ablated_loss
+                                residual_ablation_loss_weight += 1
+                            else:
+                                residual_ablation_loss_sum += ablated_loss * token_count
+                                residual_ablation_loss_weight += token_count
                         if (
                             trial == 0
                             and args.eval_example_max_new_tokens > 0
@@ -1133,6 +1155,20 @@ def evaluate_current(metanetwork, metalora, tokenizer, cfg, data, args, runtime_
                 "reconstruction_readouts": reconstruction_readouts,
             }
         )
+        if residual_ablation_loss_weight:
+            residual_ablation_loss = (
+                residual_ablation_loss_sum / residual_ablation_loss_weight
+            )
+            summary.update(
+                {
+                    "residual_ablation_loss": residual_ablation_loss,
+                    "residual_ablation_perplexity": math.exp(
+                        min(residual_ablation_loss, 20.0)
+                    ),
+                    # Positive means the learned residual improves validation.
+                    "residual_gain": residual_ablation_loss - reconstruction_loss,
+                }
+            )
         if reconstruction_examples:
             summary["reconstruction_examples"] = reconstruction_examples
             # Compatibility with older log consumers that expected one final-turn example.
@@ -1161,6 +1197,16 @@ def report_validation(step: int, val_summary: dict, best_metric_name: str, args:
             else "n/a"
         ),
     )
+    if "residual_ablation_loss" in val_summary:
+        LOGGER.info(
+            "val residual ablation step=%s full_loss=%.6f gate0_loss=%.6f "
+            "residual_gain=%.6f gate0_ppl=%.6f",
+            step,
+            val_summary["reconstruction_loss"],
+            val_summary["residual_ablation_loss"],
+            val_summary["residual_gain"],
+            val_summary["residual_ablation_perplexity"],
+        )
     if args.print_eval_example:
         examples = val_summary.get("reconstruction_examples", [])
         if not examples and val_summary.get("reconstruction_example") is not None:
@@ -1224,6 +1270,9 @@ def validation_wandb_payload(val_summary: dict, best_metric_name: str, current_m
         "reconstruction_perplexity",
         "reconstruction_tokens",
         "reconstruction_readouts",
+        "residual_ablation_loss",
+        "residual_ablation_perplexity",
+        "residual_gain",
     ):
         if key in val_summary:
             payload[f"val/{key}"] = val_summary[key]
@@ -1362,6 +1411,11 @@ def compute_stream_training_result(
     contrastive_loss = mean_category_loss("contrastive")
     recon_loss = mean_category_loss("reconstruction")
     lora_stats = lora_tensor_stats(lora_dict)
+    residual_rank_stats = (
+        metanetwork.residual_rank_diagnostics(lora_dict)
+        if hasattr(metanetwork, "residual_rank_diagnostics")
+        else None
+    )
     memory_norms = memory_norms_by_turn[-1]["norms"]
     turn_loss_log = [
         {
@@ -1387,6 +1441,7 @@ def compute_stream_training_result(
         "fact_ids_by_turn": [list(turn.fact_ids) for turn in stream.turns],
         "turn_losses": turn_loss_log,
         "lora_stats": lora_stats,
+        "residual_rank_stats": residual_rank_stats,
         "memory_norms": memory_norms,
         "memory_norms_by_turn": memory_norms_by_turn,
     }
@@ -1421,6 +1476,23 @@ def aggregate_batch_logs(stream_logs: list[dict]) -> dict:
             "mean_abs": sum(row["lora_stats"]["mean_abs"] for row in stream_logs) / len(stream_logs),
             "finite": min(row["lora_stats"]["finite"] for row in stream_logs),
         },
+        "residual_rank_stats": (
+            {
+                key: sum(
+                    row["residual_rank_stats"][key]
+                    for row in stream_logs
+                    if row["residual_rank_stats"] is not None
+                )
+                / sum(1 for row in stream_logs if row["residual_rank_stats"] is not None)
+                for key in next(
+                    row["residual_rank_stats"]
+                    for row in stream_logs
+                    if row["residual_rank_stats"] is not None
+                )
+            }
+            if any(row["residual_rank_stats"] is not None for row in stream_logs)
+            else None
+        ),
         "memory_norms": memory_norms,
     }
 
@@ -1778,6 +1850,11 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                 postfix["choice"] = f"{log_record['contrastive_loss']:.4f}"
             if log_record["reconstruction_loss"] is not None:
                 postfix["recon"] = f"{log_record['reconstruction_loss']:.4f}"
+            if batch_log["residual_rank_stats"] is not None:
+                postfix["res_gate"] = f"{batch_log['residual_rank_stats']['residual_gate']:.3g}"
+                postfix["res/base"] = (
+                    f"{batch_log['residual_rank_stats']['residual_to_base_ratio']:.3g}"
+                )
             train_progress.set_postfix(postfix)
         wandb_step_payload = {}
         if distributed.is_main and (step % args.log_every == 0 or step == 1):
@@ -1793,6 +1870,17 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                 log_record["global_batch_size"],
                 batch_log["memory_norms"].get("bank_tokens", 0.0),
             )
+            if batch_log["residual_rank_stats"] is not None:
+                residual_stats = batch_log["residual_rank_stats"]
+                LOGGER.info(
+                    "step=%s residual_gate=%.8f base_delta_rms=%.8f "
+                    "residual_delta_rms=%.8f residual_to_base_ratio=%.8f",
+                    step,
+                    residual_stats["residual_gate"],
+                    residual_stats["base_delta_rms"],
+                    residual_stats["residual_delta_rms"],
+                    residual_stats["residual_to_base_ratio"],
+                )
             if wandb_run is not None:
                 wandb_payload = {
                     "train/loss": log_record["loss"],
@@ -1810,6 +1898,9 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                         wandb_payload[f"train/{category}_loss"] = value
                 for name, value in batch_log["memory_norms"].items():
                     wandb_payload[f"memory_rank0/{name}"] = value
+                if batch_log["residual_rank_stats"] is not None:
+                    for name, value in batch_log["residual_rank_stats"].items():
+                        wandb_payload[f"rank_expansion/{name}"] = value
                 wandb_step_payload.update(wandb_payload)
 
         eval_due = args.eval_every > 0 and (step % args.eval_every == 0 or step == training_steps)

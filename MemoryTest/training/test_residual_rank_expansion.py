@@ -4,7 +4,11 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from LoraQwen import LoraLinear
-from metanetwork_family import _merge_rank_loradicts
+from metanetwork_family import (
+    _ablate_loradict_rank_suffix,
+    _merge_rank_loradicts,
+    _rank_delta_diagnostics,
+)
 
 
 def test_lora_numel_cache_is_rank_aware():
@@ -58,3 +62,24 @@ def test_nested_loradict_concatenates_only_rank_dimensions():
     )
     assert merged[0]["attention"]["q"]["A"].shape == (1, 3, 7)
     assert merged[0]["attention"]["q"]["B"].shape == (1, 7, 4)
+
+
+def test_ablation_zeroes_only_residual_b_and_diagnostics_measure_effective_delta():
+    base = {
+        "A": torch.randn(1, 3, 2),
+        "B": torch.randn(1, 2, 4),
+        "C": None,
+    }
+    residual = {
+        "A": torch.randn(1, 3, 5),
+        "B": torch.randn(1, 5, 4),
+        "C": None,
+    }
+    merged = _merge_rank_loradicts(base, residual, torch.ones(()))
+    stats = _rank_delta_diagnostics(merged, 2, 5, torch.ones(()))
+    assert stats["base_delta_rms"] > 0
+    assert stats["residual_delta_rms"] > 0
+
+    ablated = _ablate_loradict_rank_suffix(merged, 2)
+    torch.testing.assert_close(ablated["B"][:, :2], merged["B"][:, :2])
+    assert torch.count_nonzero(ablated["B"][:, 2:]) == 0

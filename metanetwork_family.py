@@ -329,6 +329,70 @@ def _merge_rank_loradicts(base, residual, residual_gate):
     raise TypeError(f"Unsupported LoRA dictionary node: {type(base)!r}")
 
 
+def _ablate_loradict_rank_suffix(node, base_rank: int):
+    if isinstance(node, dict) and "A" in node and "B" in node:
+        result = dict(node)
+        result["B"] = torch.cat(
+            (node["B"][..., :base_rank, :], torch.zeros_like(node["B"][..., base_rank:, :])),
+            dim=-2,
+        )
+        return result
+    if isinstance(node, dict):
+        return {
+            key: _ablate_loradict_rank_suffix(value, base_rank)
+            for key, value in node.items()
+        }
+    return node
+
+
+def _rank_delta_diagnostics(node, base_rank: int, residual_rank: int, gate: torch.Tensor):
+    """Compute exact Frobenius RMS of AB without materializing large AB matrices."""
+    base_squared = None
+    residual_squared = None
+    matrix_elements = 0
+
+    def visit(current):
+        nonlocal base_squared, residual_squared, matrix_elements
+        if isinstance(current, dict) and "A" in current and "B" in current:
+            a = current["A"].detach().float()
+            b = current["B"].detach().float()
+            base_a, residual_a = a.split((base_rank, residual_rank), dim=-1)
+            base_b, residual_b = b.split((base_rank, residual_rank), dim=-2)
+
+            def product_frobenius_squared(left, right):
+                left_gram = left.transpose(-1, -2) @ left
+                right_gram = right @ right.transpose(-1, -2)
+                return (left_gram * right_gram).sum()
+
+            base_value = product_frobenius_squared(base_a, base_b)
+            residual_value = product_frobenius_squared(residual_a, residual_b)
+            base_squared = base_value if base_squared is None else base_squared + base_value
+            residual_squared = (
+                residual_value
+                if residual_squared is None
+                else residual_squared + residual_value
+            )
+            matrix_elements += a.shape[0] * a.shape[1] * b.shape[-1]
+            return
+        if isinstance(current, dict):
+            for value in current.values():
+                visit(value)
+
+    visit(node)
+    if matrix_elements == 0:
+        raise ValueError("No LoRA A/B leaves found for residual diagnostics")
+    base_rms = (base_squared / matrix_elements).sqrt()
+    residual_rms = (residual_squared / matrix_elements).sqrt()
+    return {
+        "residual_gate": float(gate.detach().float().cpu()),
+        "base_delta_rms": float(base_rms.cpu()),
+        "residual_delta_rms": float(residual_rms.cpu()),
+        "residual_to_base_ratio": float(
+            (residual_rms / base_rms.clamp_min(torch.finfo(base_rms.dtype).tiny)).cpu()
+        ),
+    }
+
+
 class _ZeroInitializedResidualGate(nn.Module):
     def __init__(self):
         super().__init__()
@@ -402,6 +466,17 @@ class ResidualRankExpandedMetanetwork(Metanetwork):
             base_lora, residual_lora, self.metanetwork["gate"].value
         )
         return loradict, torch.cat((base_plain, residual_plain), dim=-1)
+
+    def ablate_residual_lora(self, loradict):
+        return _ablate_loradict_rank_suffix(loradict, self.base_lora_r)
+
+    def residual_rank_diagnostics(self, loradict):
+        return _rank_delta_diagnostics(
+            loradict,
+            self.base_lora_r,
+            self.residual_lora_r,
+            self.metanetwork["gate"].value,
+        )
     
     
     
