@@ -19,7 +19,7 @@ def test_lora_numel_cache_is_rank_aware():
     assert layer.lora_params_numel(8) == 96
 
 
-def test_zero_gated_residual_is_function_preserving_and_has_gate_gradient():
+def test_zero_gated_residual_is_function_preserving():
     base = {
         "A": torch.randn(2, 5, 8),
         "B": torch.randn(2, 8, 7),
@@ -30,7 +30,7 @@ def test_zero_gated_residual_is_function_preserving_and_has_gate_gradient():
         "B": torch.randn(2, 24, 7),
         "C": None,
     }
-    gate = torch.zeros((), requires_grad=True)
+    gate = torch.zeros(())
     merged = _merge_rank_loradicts(base, residual, gate)
     inputs = torch.randn(2, 3, 5)
 
@@ -38,10 +38,9 @@ def test_zero_gated_residual_is_function_preserving_and_has_gate_gradient():
     actual = torch.matmul(torch.matmul(inputs, merged["A"]), merged["B"])
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-    actual.sum().backward()
-    assert gate.grad is not None
-    assert torch.isfinite(gate.grad)
-    assert gate.grad.abs() > 0
+    enabled = _merge_rank_loradicts(base, residual, torch.ones(()))
+    enabled_output = torch.matmul(torch.matmul(inputs, enabled["A"]), enabled["B"])
+    assert not torch.equal(enabled_output, expected)
 
 
 def test_nested_loradict_concatenates_only_rank_dimensions():

@@ -240,6 +240,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--residual-rank-warmup-steps",
+        type=int,
+        default=500,
+        help=(
+            "For residual rank expansion, linearly increase the new-rank coefficient "
+            "from 0 to 1 over this many optimizer steps. Zero enables it fully at step 1."
+        ),
+    )
+    parser.add_argument(
         "--recurrent-memory-policy",
         choices=["replace", "append"],
         default="replace",
@@ -1515,6 +1524,8 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         raise ValueError("--batch-size must be at least 1")
     if args.expanded_lora_rank < 0:
         raise ValueError("--expanded-lora-rank must be non-negative")
+    if args.residual_rank_warmup_steps < 0:
+        raise ValueError("--residual-rank-warmup-steps must be non-negative")
     if args.recurrent_memory_max_banks < 1:
         raise ValueError("--recurrent-memory-max-banks must be at least 1")
     if args.max_steps < 1:
@@ -1626,12 +1637,13 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         if hasattr(metanetwork, "base_lora_r"):
             LOGGER.info(
                 "Residual rank expansion: base_rank=%s base_tokens=%s "
-                "residual_rank=%s residual_tokens=%s residual_gate=%.8f",
+                "residual_rank=%s residual_tokens=%s residual_alpha=%.8f warmup_steps=%s",
                 metanetwork.base_lora_r,
                 metanetwork.base_num_mem_token,
                 metanetwork.residual_lora_r,
                 metanetwork.residual_num_mem_token,
                 float(metanetwork.metanetwork["gate"].value.detach().float().cpu()),
+                args.residual_rank_warmup_steps,
             )
         LOGGER.info(
             "Readout: reconstruction_scope=%s completion_prefix_ratio=[%.3f, %.3f]",
@@ -1741,6 +1753,10 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
     ) if tqdm is not None and distributed.is_main else range(1, args.max_steps + 1)
 
     for step in train_progress:
+        if hasattr(metanetwork, "set_residual_warmup_step"):
+            metanetwork.set_residual_warmup_step(
+                step, args.residual_rank_warmup_steps
+            )
         optimizer.zero_grad(set_to_none=True)
         stream_logs = []
         for micro_batch in range(args.batch_size):

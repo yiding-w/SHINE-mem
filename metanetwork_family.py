@@ -396,7 +396,9 @@ def _rank_delta_diagnostics(node, base_rank: int, residual_rank: int, gate: torc
 class _ZeroInitializedResidualGate(nn.Module):
     def __init__(self):
         super().__init__()
-        self.value = nn.Parameter(torch.zeros((), dtype=torch.float32))
+        # Persistent so a resumed checkpoint retains its warmup progress, but
+        # deliberately not a Parameter: this coefficient follows a schedule.
+        self.register_buffer("value", torch.zeros((), dtype=torch.float32), persistent=True)
 
 
 class ResidualRankExpandedMetanetwork(Metanetwork):
@@ -477,6 +479,15 @@ class ResidualRankExpandedMetanetwork(Metanetwork):
             self.residual_lora_r,
             self.metanetwork["gate"].value,
         )
+
+    def set_residual_warmup_step(self, step: int, warmup_steps: int):
+        if step < 0 or warmup_steps < 0:
+            raise ValueError("Residual warmup step counts must be non-negative")
+        alpha = 1.0 if warmup_steps == 0 else min(float(step) / warmup_steps, 1.0)
+        # max() preserves progress when a saved run is resumed while its local
+        # training loop restarts its displayed step counter.
+        current = float(self.metanetwork["gate"].value.detach().float().cpu())
+        self.metanetwork["gate"].value.fill_(max(current, alpha))
     
     
     
