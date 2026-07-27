@@ -30,6 +30,7 @@ from MemoryTest.evaluation.locomo_probe import (
     select_probe_session_window,
 )
 from MemoryTest.evaluation.locomo_runtime import (
+    LOCOMO_CONDITIONS,
     evaluate_locomo_probe,
     locomo_wandb_payload,
     report_locomo_probe,
@@ -421,6 +422,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--locomo-eval-max-new-tokens", type=int, default=50)
     parser.add_argument("--locomo-eval-question-max-length", type=int, default=512)
+    parser.add_argument(
+        "--locomo-eval-direct-context-max-length",
+        type=int,
+        default=0,
+        help=(
+            "Maximum tokenized prompt length for the direct-context baseline. "
+            "0 uses context-max-length + locomo-eval-question-max-length."
+        ),
+    )
+    parser.add_argument(
+        "--locomo-eval-conditions",
+        nargs="+",
+        choices=LOCOMO_CONDITIONS,
+        default=["recurrent", "last_session_only"],
+        help=(
+            "LoCoMo diagnostic paths to run. Training defaults preserve the prior "
+            "recurrent/last-session probe; request direct_context single_write "
+            "recurrent for the A/B/C diagnostic."
+        ),
+    )
     parser.add_argument(
         "--locomo-eval-last-session-ablation",
         action=argparse.BooleanOptionalAction,
@@ -1549,6 +1570,8 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
         raise ValueError("--locomo-eval-max-new-tokens must be at least 1")
     if args.locomo_eval_question_max_length < 1:
         raise ValueError("--locomo-eval-question-max-length must be at least 1")
+    if args.locomo_eval_direct_context_max_length < 0:
+        raise ValueError("--locomo-eval-direct-context-max-length must be non-negative")
     invalid_locomo_categories = sorted(set(args.locomo_eval_categories) - set(LOCOMO_CATEGORY_NAMES))
     if invalid_locomo_categories:
         raise ValueError(f"Unsupported LoCoMo categories: {invalid_locomo_categories}")
@@ -1713,9 +1736,11 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                     locomo_questions,
                     locomo_session_window,
                 )
-                locomo_step0_score = initial_val_summary["locomo"]["conditions"]["recurrent"][
-                    "overall_score"
-                ]
+                recurrent_condition = initial_val_summary["locomo"]["conditions"].get(
+                    "recurrent"
+                )
+                if recurrent_condition is not None:
+                    locomo_step0_score = recurrent_condition["overall_score"]
                 report_locomo_probe(
                     0,
                     initial_val_summary["locomo"],
@@ -1947,10 +1972,12 @@ def run_training(args: argparse.Namespace, distributed: DistributedContext) -> N
                         locomo_questions,
                         locomo_session_window,
                     )
-                    if locomo_step0_score is not None:
+                    recurrent_condition = val_summary["locomo"]["conditions"].get(
+                        "recurrent"
+                    )
+                    if locomo_step0_score is not None and recurrent_condition is not None:
                         val_summary["locomo"]["recurrent_gain_from_step0"] = (
-                            val_summary["locomo"]["conditions"]["recurrent"]["overall_score"]
-                            - locomo_step0_score
+                            recurrent_condition["overall_score"] - locomo_step0_score
                         )
                     report_locomo_probe(
                         step,
