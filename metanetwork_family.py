@@ -275,6 +275,10 @@ class Metanetwork(nn.Module):
             input_ids=evidence_ids,
             attention_mask=evidence_attention_mask,
             loradict=metalora,
+            # Recurrent memory supplies its own per-layer K/V.  The ordinary
+            # autoregressive cache is both unnecessary for full-context
+            # encoding and mutually exclusive with previous_memory_key_values.
+            use_cache=False,
             use_gradient_checkpoint=use_gradient_checkpoint,
             previous_memory_key_values=recurrent_memory.key_values if recurrent_memory is not None else None,
             previous_memory_attention_mask=recurrent_memory.attention_mask if recurrent_memory is not None else None,

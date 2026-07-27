@@ -199,6 +199,10 @@ def main() -> None:
     if isinstance(dtype, torch.dtype):
         metanetwork.to(device=device, dtype=dtype)
         metalora = cast_floating_tensors(metalora, dtype)
+    if hasattr(metanetwork.metamodel, "config"):
+        # Context encoding uses SHINE recurrent K/V rather than Transformers'
+        # ordinary autoregressive cache. Generation overrides this explicitly.
+        metanetwork.metamodel.config.use_cache = False
     metanetwork.eval()
 
     eval_args = argparse.Namespace(
