@@ -55,7 +55,13 @@ def _generate_from_messages(
         return_dict=True,
         max_length=max_length,
         truncation=True,
-        enable_thinking=False,
+        # SHINE uses the checked-in Qwen3 template from test_pretrain.py.
+        # In that template enable_thinking=True pre-fills an empty, already
+        # closed <think>...</think> block before generation.  Passing False
+        # leaves the assistant prefix bare, so the base Qwen model often
+        # spends the entire short-answer budget producing an unclosed think
+        # trace.  Use the same closed-think prefill for every condition.
+        enable_thinking=True,
     )
     input_ids = enc["input_ids"].to(device)
     attention_mask = enc["attention_mask"].to(device)
