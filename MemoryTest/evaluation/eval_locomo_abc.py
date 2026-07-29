@@ -152,6 +152,16 @@ def _aggregate(per_sample: list[dict], condition_names: list[str]) -> dict:
             conditions["direct_context"]["overall_score"]
             - conditions["single_write"]["overall_score"]
         )
+    if "direct_context" in conditions and "evidence_write" in conditions:
+        result["evidence_write_gap"] = (
+            conditions["direct_context"]["overall_score"]
+            - conditions["evidence_write"]["overall_score"]
+        )
+    if "evidence_write" in conditions and "single_write" in conditions:
+        result["long_context_interference_gap"] = (
+            conditions["evidence_write"]["overall_score"]
+            - conditions["single_write"]["overall_score"]
+        )
     if "single_write" in conditions and "recurrent" in conditions:
         result["recurrent_gap"] = (
             conditions["single_write"]["overall_score"]

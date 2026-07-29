@@ -47,6 +47,7 @@ OFFICIAL_QA_PROMPT = (
 
 _STEMMER = PorterStemmer() if PorterStemmer is not None else None
 _EVIDENCE_SESSION_RE = re.compile(r"^[dD](\d+):")
+_EVIDENCE_TURN_RE = re.compile(r"^[dD](\d+):(\d+)$")
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,53 @@ def build_session_texts(sample: dict) -> list[dict]:
     if not sessions:
         raise ValueError(f"LoCoMo sample {sample.get('sample_id')!r} has no non-empty sessions")
     return sessions
+
+
+def build_evidence_text(sample: dict, question: dict) -> str:
+    """Render only the LoCoMo turns annotated as evidence for one question."""
+    conversation = sample["conversation"]
+    references = []
+    for raw_reference in question.get("evidence", []):
+        reference = str(raw_reference)
+        match = _EVIDENCE_TURN_RE.fullmatch(reference)
+        if match is None:
+            raise ValueError(f"Unsupported LoCoMo evidence reference: {reference!r}")
+        references.append((int(match.group(1)), int(match.group(2)), reference))
+    if not references:
+        raise ValueError(
+            f"LoCoMo question has no evidence references: {question.get('question')!r}"
+        )
+
+    rendered_sessions = []
+    for session_num in sorted({session_num for session_num, _, _ in references}):
+        session_key = f"session_{session_num}"
+        date_key = f"{session_key}_date_time"
+        if session_key not in conversation or date_key not in conversation:
+            raise KeyError(
+                f"Evidence refers to missing LoCoMo session/date: D{session_num}"
+            )
+        dialogs = conversation[session_key]
+        selected_turns = sorted(
+            {
+                turn_num
+                for referenced_session, turn_num, _ in references
+                if referenced_session == session_num
+            }
+        )
+        rendered_turns = []
+        for turn_num in selected_turns:
+            if turn_num < 1 or turn_num > len(dialogs):
+                raise IndexError(
+                    f"Evidence D{session_num}:{turn_num} is outside a session with "
+                    f"{len(dialogs)} turns"
+                )
+            rendered_turns.append(render_turn(dialogs[turn_num - 1]).rstrip())
+        rendered_sessions.append(
+            f"DATE: {conversation[date_key]}\n"
+            f"CONVERSATION:\n"
+            + "\n".join(rendered_turns)
+        )
+    return "\n\n".join(rendered_sessions)
 
 
 def _stable_seed(base_seed: int, sample_id: str, category: int) -> int:
