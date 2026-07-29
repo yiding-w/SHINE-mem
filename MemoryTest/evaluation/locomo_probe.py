@@ -160,6 +160,27 @@ def build_evidence_text(sample: dict, question: dict) -> str:
     return "\n\n".join(rendered_sessions)
 
 
+def build_evidence_session_text(sample: dict, question: dict) -> str:
+    """Render every complete session containing annotated evidence."""
+    evidence_sessions = sorted(set(_question_evidence_sessions(question)))
+    if not evidence_sessions:
+        raise ValueError(
+            f"LoCoMo question has no evidence sessions: {question.get('question')!r}"
+        )
+    sessions_by_number = {
+        session["session_number"]: session["text"]
+        for session in build_session_texts(sample)
+    }
+    missing = [
+        session_num
+        for session_num in evidence_sessions
+        if session_num not in sessions_by_number
+    ]
+    if missing:
+        raise KeyError(f"Evidence refers to missing LoCoMo sessions: {missing}")
+    return "\n\n".join(sessions_by_number[session_num] for session_num in evidence_sessions)
+
+
 def _stable_seed(base_seed: int, sample_id: str, category: int) -> int:
     digest = hashlib.sha256(f"{base_seed}|{sample_id}|{category}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=False)

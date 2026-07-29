@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from MemoryTest.evaluation.locomo_probe import (
+    build_evidence_session_text,
     build_evidence_text,
     build_session_texts,
     distance_bucket,
@@ -91,6 +92,12 @@ class LoCoMoProbeTest(unittest.TestCase):
             evidence_text.index("DATE: 1 January 2024"),
             evidence_text.index("DATE: 2 January 2024"),
         )
+
+        session_text = build_evidence_session_text(self.sample, question)
+        self.assertIn("I moved to Paris", session_text)
+        self.assertIn("unrelated turn must be excluded", session_text)
+        self.assertIn("How is Paris", session_text)
+        self.assertEqual(session_text.count("DATE: 1 January 2024"), 1)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import torch
 
 from MemoryTest.evaluation.locomo_probe import (
     CATEGORY_NAMES,
+    build_evidence_session_text,
     build_evidence_text,
     build_question_messages,
     build_session_texts,
@@ -32,6 +33,7 @@ LOGGER = logging.getLogger("posttrain_shine_memory")
 LOCOMO_CONDITIONS = (
     "direct_context",
     "evidence_write",
+    "evidence_session_write",
     "single_write",
     "recurrent",
     "last_session_only",
@@ -321,8 +323,56 @@ def evaluate_locomo_probe(
                 "raw_prediction": raw,
                 "score": score_prediction(question, prediction),
             }
+        if "evidence_session_write" in selected_conditions:
+            evidence_session_context = build_evidence_session_text(sample, question)
+            evidence_session_context_tokens = len(
+                tokenizer(
+                    evidence_session_context,
+                    add_special_tokens=True,
+                )["input_ids"]
+            )
+            evidence_session_lora = trainable_generate_context_lora(
+                evidence_session_context,
+                metanetwork,
+                tokenizer,
+                metalora,
+                cfg,
+                device,
+                recurrent_memory=None,
+                return_recurrent_state=False,
+                memory_position_offset=memory_position_offset,
+            )
+            evidence_session_lora = clamp_lora_tensors(
+                evidence_session_lora,
+                args.generated_lora_clamp,
+            )
+            answer, raw = _generate_from_messages(
+                metanetwork,
+                tokenizer,
+                evidence_session_lora,
+                messages,
+                device,
+                args.locomo_eval_max_new_tokens,
+                args.locomo_eval_question_max_length,
+            )
+            prediction = canonicalize_prediction(answer, spec)
+            record["evidence_session_context_tokens"] = (
+                evidence_session_context_tokens
+            )
+            record["evidence_session_write_truncated"] = (
+                evidence_session_context_tokens > cfg.test.context_max_length
+            )
+            record["conditions"]["evidence_session_write"] = {
+                "prediction": prediction,
+                "raw_prediction": raw,
+                "score": score_prediction(question, prediction),
+            }
         for condition_name in selected_conditions:
-            if condition_name in {"direct_context", "evidence_write"}:
+            if condition_name in {
+                "direct_context",
+                "evidence_write",
+                "evidence_session_write",
+            }:
                 continue
             lora_dict = condition_loras[condition_name]
             answer, raw = _generate_from_messages(
@@ -367,6 +417,16 @@ def evaluate_locomo_probe(
         summary["truncated_evidence_questions"] = sum(
             bool(record["evidence_write_truncated"]) for record in records
         )
+    if "evidence_session_write" in selected_conditions:
+        evidence_session_token_counts = [
+            int(record["evidence_session_context_tokens"]) for record in records
+        ]
+        summary["max_evidence_session_context_tokens"] = max(
+            evidence_session_token_counts
+        )
+        summary["truncated_evidence_session_questions"] = sum(
+            bool(record["evidence_session_write_truncated"]) for record in records
+        )
     if "direct_context" in conditions and "single_write" in conditions:
         summary["compression_gap"] = (
             conditions["direct_context"]["overall_score"]
@@ -380,6 +440,16 @@ def evaluate_locomo_probe(
     if "evidence_write" in conditions and "single_write" in conditions:
         summary["long_context_interference_gap"] = (
             conditions["evidence_write"]["overall_score"]
+            - conditions["single_write"]["overall_score"]
+        )
+    if "evidence_write" in conditions and "evidence_session_write" in conditions:
+        summary["within_session_interference_gap"] = (
+            conditions["evidence_write"]["overall_score"]
+            - conditions["evidence_session_write"]["overall_score"]
+        )
+    if "evidence_session_write" in conditions and "single_write" in conditions:
+        summary["cross_session_interference_gap"] = (
+            conditions["evidence_session_write"]["overall_score"]
             - conditions["single_write"]["overall_score"]
         )
     if "single_write" in conditions and "recurrent" in conditions:
@@ -510,6 +580,8 @@ def locomo_wandb_payload(summary: dict) -> dict:
         "compression_gap",
         "evidence_write_gap",
         "long_context_interference_gap",
+        "within_session_interference_gap",
+        "cross_session_interference_gap",
         "recurrent_gap",
     ):
         if gap_name in summary:

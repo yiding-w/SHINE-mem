@@ -162,6 +162,16 @@ def _aggregate(per_sample: list[dict], condition_names: list[str]) -> dict:
             conditions["evidence_write"]["overall_score"]
             - conditions["single_write"]["overall_score"]
         )
+    if "evidence_write" in conditions and "evidence_session_write" in conditions:
+        result["within_session_interference_gap"] = (
+            conditions["evidence_write"]["overall_score"]
+            - conditions["evidence_session_write"]["overall_score"]
+        )
+    if "evidence_session_write" in conditions and "single_write" in conditions:
+        result["cross_session_interference_gap"] = (
+            conditions["evidence_session_write"]["overall_score"]
+            - conditions["single_write"]["overall_score"]
+        )
     if "single_write" in conditions and "recurrent" in conditions:
         result["recurrent_gap"] = (
             conditions["single_write"]["overall_score"]
