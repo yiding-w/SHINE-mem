@@ -1,0 +1,12 @@
+seed: 42
+policies: [BASE, MEMORY, CONTEXT]
+scales: [0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0]
+decode:
+  method: greedy
+  max_new_tokens: 32
+evaluation:
+  normalize_case: true
+  strip_whitespace: true
+  report_full_set: true
+  report_fully_recoverable: true
+
