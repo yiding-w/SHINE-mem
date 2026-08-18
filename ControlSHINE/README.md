@@ -52,6 +52,7 @@ ControlSHINE/
   scripts/
     build_synthetic.py      deterministic synthetic triples
     convert_counterfact.py  CounterFact adapter (planned)
+    build_test_split.py     entity-disjoint held-out candidates
     run_source_only.py      A/B/C source-only generations
     run_memory_logit_sweep.py  training-free Memory residual sweep
     run_scale_sweep.py      CAD-style decoding (planned)
