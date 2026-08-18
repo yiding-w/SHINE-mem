@@ -29,6 +29,15 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=10, help="Use -1 for all records")
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--max-new-tokens", type=int, default=16)
+    parser.add_argument(
+        "--thinking-mode",
+        choices=["force-empty", "allow"],
+        default="force-empty",
+        help=(
+            "force-empty prefills an empty <think> block so the token budget is "
+            "spent on the answer; allow leaves Qwen free to reason."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -42,7 +51,10 @@ def _prompt(question: str, context: str | None = None) -> str:
 
 
 @torch.inference_mode()
-def _generate(model, tokenizer, device, prompt, loradict, max_length, max_new_tokens):
+def _generate(
+    model, tokenizer, device, prompt, loradict, max_length, max_new_tokens,
+    thinking_mode="force-empty",
+):
     encoded = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
         add_generation_prompt=True,
@@ -55,6 +67,19 @@ def _generate(model, tokenizer, device, prompt, loradict, max_length, max_new_to
     )
     input_ids = encoded["input_ids"].to(device)
     attention_mask = encoded["attention_mask"].to(device)
+    if thinking_mode == "force-empty":
+        # The checked-in Qwen chat template merely omits a thinking prefill when
+        # enable_thinking=False. This checkpoint may still generate <think>
+        # itself and exhaust a short decoding budget before reaching the answer.
+        # Prefill a completed empty block after <|im_start|>assistant instead.
+        no_think_ids = tokenizer(
+            "<think>\n\n</think>\n\n", add_special_tokens=False,
+            return_tensors="pt",
+        )["input_ids"].to(device)
+        input_ids = torch.cat((input_ids, no_think_ids), dim=1)
+        attention_mask = torch.cat(
+            (attention_mask, torch.ones_like(no_think_ids, device=device)), dim=1
+        )
     outputs = model.metamodel.generate(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -114,18 +139,18 @@ def main():
             question = row["question"]
             base = _generate(
                 model, tokenizer, device, _prompt(question), None,
-                cfg.test.conversation_max_length, args.max_new_tokens,
+                cfg.test.conversation_max_length, args.max_new_tokens, args.thinking_mode,
             )
             lora = _memory_lora(
                 model, tokenizer, metalora, cfg, device, row["memory"]["text"]
             )
             memory = _generate(
                 model, tokenizer, device, _prompt(question), lora,
-                cfg.test.conversation_max_length, args.max_new_tokens,
+                cfg.test.conversation_max_length, args.max_new_tokens, args.thinking_mode,
             )
             context = _generate(
                 model, tokenizer, device, _prompt(question, row["context"]["text"]), None,
-                cfg.test.conversation_max_length, args.max_new_tokens,
+                cfg.test.conversation_max_length, args.max_new_tokens, args.thinking_mode,
             )
             predictions = {"base": base, "memory": memory, "context": context}
             matches = {
@@ -165,6 +190,7 @@ def main():
             for key in ("base_recoverable", "memory_recoverable", "context_recoverable", "fully_recoverable")
         },
         "wall_seconds": time.perf_counter() - start_all,
+        "thinking_mode": args.thinking_mode,
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -174,4 +200,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

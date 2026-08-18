@@ -142,5 +142,6 @@ CUDA_VISIBLE_DEVICES=3 python -m ControlSHINE.scripts.run_source_only \
   --input ControlSHINE/data/processed/counterfact_three_source.jsonl \
   --output-dir ControlSHINE/runs/counterfact_smoke_10 \
   --limit 10 \
-  --max-new-tokens 16
+  --max-new-tokens 16 \
+  --thinking-mode force-empty
 ```
