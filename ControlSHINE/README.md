@@ -55,6 +55,9 @@ ControlSHINE/
     build_test_split.py     entity-disjoint held-out candidates
     run_source_only.py      A/B/C source-only generations
     run_memory_logit_sweep.py  training-free Memory residual sweep
+    run_lora_scale_sweep.py    direct generated-LoRA scaling baseline
+    run_paraphrase_consistency.py  fixed-alpha paraphrase robustness
+    analyze_target_signal.py   teacher-forced target probability/rank
     run_scale_sweep.py      CAD-style decoding (planned)
     evaluate.py             switching/isolation metrics (planned)
   controlshine/
