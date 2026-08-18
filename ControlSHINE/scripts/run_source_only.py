@@ -43,10 +43,15 @@ def parse_args():
 
 def _prompt(question: str, context: str | None = None) -> str:
     if context is None:
-        return question
+        return (
+            "Complete the following statement with the missing value. "
+            "Return only that value.\n\n"
+            f"Statement: {question}"
+        )
     return (
-        "Use the following context to answer the query. Return only the answer.\n\n"
-        f"Context: {context}\n\nQuery: {question}"
+        "Use only the context below to complete the statement. "
+        "Return only the missing value.\n\n"
+        f"Context: {context}\n\nStatement: {question}"
     )
 
 
@@ -136,7 +141,9 @@ def main():
 
     with output_file.open("w", encoding="utf-8") as handle:
         for index, row in enumerate(rows, 1):
-            question = row["question"]
+            # Prefer CounterFact's canonical rewrite prompt. This also keeps
+            # older converted JSONL files usable after the prompt fix.
+            question = row.get("prompts", {}).get("rewrite") or row["question"]
             base = _generate(
                 model, tokenizer, device, _prompt(question), None,
                 cfg.test.conversation_max_length, args.max_new_tokens, args.thinking_mode,

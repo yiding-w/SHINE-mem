@@ -75,6 +75,7 @@ def convert_records(
         try:
             rewrite = _rewrite(record)
             template = _text(rewrite["prompt"])
+            relation_key = _text(rewrite.get("relation_id")) or template
             true_answer = _text(rewrite["target_true"])
             new_answer = _text(rewrite["target_new"])
             subject = _text(rewrite["subject"])
@@ -84,7 +85,7 @@ def convert_records(
             stats["malformed"] += 1
             continue
         parsed.append((record, rewrite))
-        pools[template].extend((true_answer, new_answer))
+        pools[relation_key].extend((true_answer, new_answer))
 
     for template, values in pools.items():
         pools[template] = sorted(set(values), key=lambda x: (_norm(x), x))
@@ -92,11 +93,12 @@ def convert_records(
     output: list[ControlSample] = []
     for record, rewrite in parsed:
         template = _text(rewrite["prompt"])
+        relation_key = _text(rewrite.get("relation_id")) or template
         subject = _text(rewrite["subject"])
         true_answer = _text(rewrite["target_true"])
         new_answer = _text(rewrite["target_new"])
         forbidden = {_norm(true_answer), _norm(new_answer)}
-        donors = [value for value in pools[template] if _norm(value) not in forbidden]
+        donors = [value for value in pools[relation_key] if _norm(value) not in forbidden]
         if not donors:
             stats["no_same_relation_third_answer"] += 1
             continue
@@ -110,7 +112,10 @@ def convert_records(
         case_id = record.get("case_id", len(output))
         sample = ControlSample(
             sample_id=f"counterfact-{case_id}",
-            question=_text(generation_prompts[0]),
+            # The rewrite prompt is the canonical factual query. CounterFact's
+            # first paraphrase is often a fragment that chat models interpret
+            # as an accidentally truncated user message.
+            question=rewrite_prompt,
             entity=subject,
             relation=template,
             base=SourceFact(_render_fact(template, subject, true_answer), true_answer),
@@ -119,7 +124,8 @@ def convert_records(
             provenance={
                 "dataset": "CounterFact",
                 "case_id": case_id,
-                "third_answer_strategy": "same_rewrite_template_donor",
+                "third_answer_strategy": "same_relation_id_donor",
+                "relation_key": relation_key,
                 "seed": seed,
             },
             prompts={
