@@ -1,0 +1,9 @@
+model_path: /home/wangyiding/SHINE-mem/models/Qwen3-8B
+seed: 42
+lora_r: 8
+metalora_r: 128
+metanetwork_layers: 4
+context_max_length: 1141
+conversation_max_length: 1536
+torch_dtype: bf16
+

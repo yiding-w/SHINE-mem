@@ -3,4 +3,3 @@
 from .schema import ControlSample, SourceFact
 
 __all__ = ["ControlSample", "SourceFact"]
-

@@ -52,7 +52,7 @@ ControlSHINE/
   scripts/
     build_synthetic.py      deterministic synthetic triples
     convert_counterfact.py  CounterFact adapter (planned)
-    run_source_only.py      B/M/C logits and generations (planned)
+    run_source_only.py      A/B/C source-only generations
     run_scale_sweep.py      CAD-style decoding (planned)
     evaluate.py             switching/isolation metrics (planned)
   controlshine/
@@ -128,3 +128,19 @@ be written to separate run artifacts so that raw data stays immutable.
   switching over unscaled source-only decoding;
 - non-selected source perturbations have little effect;
 - gains are not limited to a per-example oracle scale.
+
+## Source-only checkpoint run
+
+The evaluator is a standalone ControlSHINE program. It reproduces the original
+`test_pretrain.py` construction order and loads the checkpoint directly. Start
+with 10 examples on one GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 python -m ControlSHINE.scripts.run_source_only \
+  --runtime-config ControlSHINE/configs/runtime_pretrain.yaml \
+  --checkpoint-dir /home/wangyiding/SHINE-mem/checkpoints/8gpu_8lora_128metalora_lr5e-5_grouppretrain_1150/pretrain/checkpoint-epoch-1 \
+  --input ControlSHINE/data/processed/counterfact_three_source.jsonl \
+  --output-dir ControlSHINE/runs/counterfact_smoke_10 \
+  --limit 10 \
+  --max-new-tokens 16
+```
