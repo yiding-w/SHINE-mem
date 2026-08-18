@@ -20,7 +20,8 @@ from ControlSHINE.controlshine.runtime import load_pretrain_runtime  # noqa: E40
 from ControlSHINE.scripts.run_memory_logit_sweep import (  # noqa: E402
     _decode_residual, _read_jsonl, _select,
 )
-from ControlSHINE.scripts.run_source_only import _memory_lora, _prompt  # noqa: E402
+from ControlSHINE.scripts.run_lora_scale_sweep import _scale_lora  # noqa: E402
+from ControlSHINE.scripts.run_source_only import _generate, _memory_lora, _prompt  # noqa: E402
 
 
 def main():
@@ -31,7 +32,8 @@ def main():
     parser.add_argument("--source-only", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--gpu-id", type=int, default=0)
-    parser.add_argument("--alpha", type=float, default=1.2)
+    parser.add_argument("--logit-alpha", type=float, default=1.2)
+    parser.add_argument("--lora-scale", type=float, default=1.3)
     parser.add_argument("--paraphrases-per-sample", type=int, default=3)
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--rescue-limit", type=int, default=999999)
@@ -63,20 +65,35 @@ def main():
             target = row["memory"]["answer"]
             aliases = row["memory"].get("aliases", [])
             records = []
-            sample_matches = {"1.0": [], str(float(args.alpha)): []}
+            method_names = (
+                "native",
+                f"logit_alpha_{args.logit_alpha:g}",
+                f"lora_scale_{args.lora_scale:g}",
+            )
+            sample_matches = {name: [] for name in method_names}
             for prompt_index, paraphrase in enumerate(paraphrases):
                 outputs = {}
-                for alpha in (1.0, float(args.alpha)):
-                    prediction = _decode_residual(
+                predictions = {
+                    "native": _generate(
                         model, tokenizer, device, _prompt(paraphrase), lora,
-                        alpha, args.max_new_tokens,
-                    )
+                        cfg.test.conversation_max_length, args.max_new_tokens, "force-empty",
+                    ),
+                    f"logit_alpha_{args.logit_alpha:g}": _decode_residual(
+                        model, tokenizer, device, _prompt(paraphrase), lora,
+                        float(args.logit_alpha), args.max_new_tokens,
+                    ),
+                    f"lora_scale_{args.lora_scale:g}": _generate(
+                        model, tokenizer, device, _prompt(paraphrase),
+                        _scale_lora(lora, float(args.lora_scale)),
+                        cfg.test.conversation_max_length, args.max_new_tokens, "force-empty",
+                    ),
+                }
+                for method, prediction in predictions.items():
                     matched = answer_match(prediction, target, aliases)
-                    key = str(float(alpha))
-                    outputs[key] = {"prediction": prediction, "match": matched}
-                    correct[group][key] += int(matched)
-                    totals[(group, key)] += 1
-                    sample_matches[key].append(matched)
+                    outputs[method] = {"prediction": prediction, "match": matched}
+                    correct[group][method] += int(matched)
+                    totals[(group, method)] += 1
+                    sample_matches[method].append(matched)
                 records.append({"index": prompt_index, "prompt": paraphrase, "outputs": outputs})
             for key, matches in sample_matches.items():
                 all_correct[group][key] += int(bool(matches) and all(matches))
@@ -87,17 +104,20 @@ def main():
             handle.flush()
             print(f"[Paraphrase] {index}/{len(selected)} group={group}", flush=True)
 
-    summary = {"alpha": args.alpha, "groups": {}}
+    summary = {
+        "logit_alpha": args.logit_alpha,
+        "lora_scale": args.lora_scale,
+        "groups": {},
+    }
     for group in ("rescue", "retention"):
         summary["groups"][group] = {}
-        for alpha in (1.0, float(args.alpha)):
-            key = str(float(alpha))
-            denom = totals[(group, key)]
-            summary["groups"][group][key] = {
-                "prompt_correct": correct[group][key],
+        for method in ("native", f"logit_alpha_{args.logit_alpha:g}", f"lora_scale_{args.lora_scale:g}"):
+            denom = totals[(group, method)]
+            summary["groups"][group][method] = {
+                "prompt_correct": correct[group][method],
                 "prompt_total": denom,
-                "prompt_accuracy": correct[group][key] / denom if denom else None,
-                "all_paraphrases_correct_samples": all_correct[group][key],
+                "prompt_accuracy": correct[group][method] / denom if denom else None,
+                "all_paraphrases_correct_samples": all_correct[group][method],
             }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -107,4 +127,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
